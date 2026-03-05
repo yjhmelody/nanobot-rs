@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agent::SubagentManager;
+use crate::agent::SpawnService;
+use crate::error::Result;
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
 
 #[derive(Debug, Deserialize)]
@@ -15,12 +15,12 @@ pub(crate) struct SpawnArgs {
 }
 
 pub struct SpawnTool {
-    manager: Arc<SubagentManager>,
+    service: Arc<dyn SpawnService>,
 }
 
 impl SpawnTool {
-    pub fn new(manager: Arc<SubagentManager>) -> Self {
-        Self { manager }
+    pub fn new(service: Arc<dyn SpawnService>) -> Self {
+        Self { service }
     }
 
     pub fn definition() -> ToolDefinition {
@@ -51,7 +51,7 @@ impl SpawnTool {
 
     pub(crate) async fn execute_typed(&self, args: SpawnArgs, ctx: &ToolContext) -> Result<String> {
         Ok(self
-            .manager
+            .service
             .spawn(
                 args.task,
                 args.label,
@@ -74,8 +74,8 @@ impl SpawnTool {
             .await)
     }
 
-    pub async fn cancel_by_session(&self, session_key: &str) -> usize {
-        self.manager.cancel_by_session(session_key).await
+    pub async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
+        self.service.cancel_by_session(session_key).await
     }
 }
 
@@ -95,19 +95,17 @@ impl Tool for SpawnTool {
     }
 
     async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
-        Ok(self.cancel_by_session(session_key).await)
+        self.cancel_by_session(session_key).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use async_trait::async_trait;
 
-    use crate::bus::MessageBus;
-    use crate::config::schema::{ExecToolConfig, WebToolsConfig};
+    use crate::agent::SpawnService;
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
 
     struct DummyProvider;
@@ -130,6 +128,26 @@ mod tests {
         }
     }
 
+    struct MockSpawnService;
+
+    #[async_trait]
+    impl SpawnService for MockSpawnService {
+        async fn spawn(
+            &self,
+            task: String,
+            _label: Option<String>,
+            _origin_channel: String,
+            _origin_chat_id: String,
+            _session_key: Option<String>,
+        ) -> String {
+            format!("Spawned: {}", task)
+        }
+
+        async fn cancel_by_session(&self, _session_key: &str) -> Result<usize> {
+            Ok(1)
+        }
+    }
+
     #[test]
     fn definition_requires_task_parameter() {
         let def = SpawnTool::definition();
@@ -143,10 +161,32 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Update test after SubagentManager refactoring
-    async fn execute_returns_started_message() {
-        // This test needs to be updated to work with the new SubagentManager
-        // that requires ToolRegistry, which creates a circular dependency in tests.
-        // Consider creating a mock ToolRegistry or restructuring the test.
+    async fn execute_returns_spawned_message() {
+        let service = Arc::new(MockSpawnService);
+        let tool = SpawnTool::new(service);
+
+        let ctx = ToolContext {
+            channel: "cli".to_string(),
+            chat_id: "direct".to_string(),
+            session_key: "cli:direct".to_string(),
+            message_id: None,
+        };
+
+        let result = tool
+            .execute(r#"{"task":"test task"}"#, &ctx)
+            .await
+            .expect("execute spawn tool");
+
+        assert!(result.contains("Spawned"));
+        assert!(result.contains("test task"));
+    }
+
+    #[tokio::test]
+    async fn cancel_by_session_returns_count() {
+        let service = Arc::new(MockSpawnService);
+        let tool = SpawnTool::new(service);
+
+        let cancelled = tool.cancel_by_session("test").await.expect("cancel");
+        assert_eq!(cancelled, 1);
     }
 }

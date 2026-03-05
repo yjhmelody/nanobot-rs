@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use anyhow::Result;
 use regex::Regex;
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
@@ -11,6 +10,7 @@ use tracing::{error, info, warn};
 use crate::agent::ContextBuilder;
 use crate::bus::{InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
 use crate::config::schema::ChannelsConfig;
+use crate::error::Result;
 use crate::provider::{
     AssistantFunctionCall, AssistantToolCall, ChatMessage, ChatRequest, LLMProvider,
     MessageContent, MessageRole,
@@ -264,7 +264,10 @@ impl AgentLoop {
 
     fn has_active_tasks(&self, session_key: &str) -> bool {
         if let Ok(tasks) = self.active_tasks.try_lock() {
-            tasks.get(session_key).map(|t| !t.is_empty()).unwrap_or(false)
+            tasks
+                .get(session_key)
+                .map(|t| !t.is_empty())
+                .unwrap_or(false)
         } else {
             true // Assume active if we can't check
         }
@@ -333,22 +336,25 @@ impl AgentLoop {
 
         let history = session.get_history(self.memory_window);
         let history_len = history.len();
-        let messages = self.context.build_messages(
-            history,
-            &msg.content,
-            if msg.media.is_empty() {
-                None
-            } else {
-                Some(&msg.media)
-            },
-            Some(&msg.channel),
-            Some(&msg.chat_id),
-        ).await;
+        let messages = self
+            .context
+            .build_messages(
+                history,
+                &msg.content,
+                if msg.media.is_empty() {
+                    None
+                } else {
+                    Some(&msg.media)
+                },
+                Some(&msg.channel),
+                Some(&msg.chat_id),
+            )
+            .await;
 
         let start_index = messages.len() - 1 - history_len;
         let (final_content, all_msgs) = self.run_agent_loop(messages, &tool_context).await;
 
-        self.save_turn(&mut session, &all_msgs, start_index);
+        self.save_turn(&mut session, all_msgs, start_index);
         self.sessions.save(&session).await?;
 
         if self.tools.message_sent_in_turn().await {
@@ -389,18 +395,15 @@ impl AgentLoop {
 
         let history = session.get_history(self.memory_window);
         let history_len = history.len();
-        let messages = self.context.build_messages(
-            history,
-            &msg.content,
-            None,
-            Some(&channel),
-            Some(&chat_id),
-        ).await;
+        let messages = self
+            .context
+            .build_messages(history, &msg.content, None, Some(&channel), Some(&chat_id))
+            .await;
 
         let start_index = messages.len() - 1 - history_len;
         let (final_content, all_msgs) = self.run_agent_loop(messages, &tool_context).await;
 
-        self.save_turn(&mut session, &all_msgs, start_index);
+        self.save_turn(&mut session, all_msgs, start_index);
         self.sessions.save(&session).await?;
 
         Ok(Some(OutboundMessage {
@@ -516,15 +519,19 @@ impl AgentLoop {
         (final_content, messages)
     }
 
-    fn save_turn(&self, session: &mut Session, messages: &[ChatMessage], skip: usize) {
-        for msg in messages.iter().skip(skip) {
-            let role = msg.role.clone();
-            let mut content = msg.content.clone();
+    fn save_turn(&self, session: &mut Session, messages: Vec<ChatMessage>, skip: usize) {
+        for msg in messages.into_iter().skip(skip) {
+            let ChatMessage {
+                role,
+                mut content,
+                tool_calls,
+                tool_call_id,
+                name,
+                reasoning_content,
+                thinking_blocks,
+            } = msg;
 
-            if matches!(role, MessageRole::Assistant)
-                && content.is_none()
-                && msg.tool_calls.is_none()
-            {
+            if matches!(role, MessageRole::Assistant) && content.is_none() && tool_calls.is_none() {
                 continue;
             }
 
@@ -562,11 +569,11 @@ impl AgentLoop {
                 role,
                 content,
                 timestamp: chrono::Utc::now().to_rfc3339(),
-                tool_calls: msg.tool_calls.clone(),
-                tool_call_id: msg.tool_call_id.clone(),
-                name: msg.name.clone(),
-                reasoning_content: msg.reasoning_content.clone(),
-                thinking_blocks: msg.thinking_blocks.clone(),
+                tool_calls,
+                tool_call_id,
+                name,
+                reasoning_content,
+                thinking_blocks,
             };
             session.messages.push(entry);
         }
@@ -657,7 +664,7 @@ fn debug_progress(content: &str, tool_hint: bool) {
     }
 }
 
-fn format_tool_error(err: &anyhow::Error) -> String {
+fn format_tool_error(err: &crate::error::NanobotError) -> String {
     format!(
         "Error: {}\n\n[Analyze the error above and try a different approach.]",
         err
@@ -715,9 +722,9 @@ mod tests {
 
     #[test]
     fn format_tool_error_contains_analysis_hint() {
-        let err = anyhow::anyhow!("boom");
+        let err = crate::error::NanobotError::tool_execution("test", anyhow::anyhow!("boom"));
         let out = format_tool_error(&err);
-        assert!(out.contains("Error: boom"));
+        assert!(out.contains("Error:"));
         assert!(out.contains("Analyze the error above"));
     }
 

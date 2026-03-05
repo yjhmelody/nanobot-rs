@@ -3,16 +3,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use anyhow::{Result, anyhow, bail};
-
-use crate::agent::SubagentManager;
+use crate::agent::{SpawnService, SubagentManager};
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, WebToolsConfig};
 use crate::cron::CronService;
+use crate::error::{NanobotError, Result};
 use crate::tools::base::{Tool, ToolContext, ToolDefinition};
+use crate::tools::config::SharedToolConfig;
 use crate::tools::cron::CronTool;
 use crate::tools::message::MessageTool;
-use crate::tools::shared_config::SharedToolConfig;
 use crate::tools::spawn::SpawnTool;
 use crate::tools::{filesystem, shell, web};
 
@@ -33,7 +32,7 @@ impl ToolRegistry {
         exec_config: ExecToolConfig,
         web_config: WebToolsConfig,
         bus: Option<Arc<MessageBus>>,
-        spawn_manager: Option<Arc<SubagentManager>>,
+        spawn_service: Option<Arc<dyn SpawnService>>,
         cron_service: Option<Arc<CronService>>,
     ) -> Self {
         let config =
@@ -54,8 +53,8 @@ impl ToolRegistry {
         let message_tool: Arc<dyn Tool> = Arc::new(MessageTool::new(bus));
         tools.insert(message_tool.name().to_string(), message_tool);
 
-        if let Some(manager) = spawn_manager {
-            let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(manager));
+        if let Some(service) = spawn_service {
+            let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(service));
             tools.insert(spawn_tool.name().to_string(), spawn_tool);
         }
 
@@ -87,14 +86,20 @@ impl ToolRegistry {
     pub fn register_dynamic_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
         let name = tool.name().to_string();
         if self.builtin_names.contains(&name) {
-            bail!("tool '{}' conflicts with builtin tool name", name);
+            return Err(NanobotError::config(format!(
+                "tool '{}' conflicts with builtin tool name",
+                name
+            )));
         }
         let mut guard = self
             .tools
             .write()
-            .map_err(|_| anyhow!("tool registry poisoned"))?;
+            .map_err(|_| NanobotError::config("tool registry poisoned"))?;
         if guard.contains_key(&name) {
-            bail!("tool '{}' already registered", name);
+            return Err(NanobotError::config(format!(
+                "tool '{}' already registered",
+                name
+            )));
         }
         guard.insert(name, tool);
         Ok(())
@@ -109,11 +114,27 @@ impl ToolRegistry {
         }
     }
 
-    /// Sets the spawn manager after initial construction.
+    /// Sets the spawn service after initial construction.
     ///
     /// This is used to break the circular dependency between ToolRegistry and SubagentManager.
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use the constructor parameter instead.
+    #[deprecated(note = "Use constructor parameter spawn_service instead")]
     pub fn set_spawn_manager(&self, manager: Arc<SubagentManager>) {
         let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(manager));
+        if let Ok(mut guard) = self.tools.write() {
+            guard.insert(spawn_tool.name().to_string(), spawn_tool);
+        }
+    }
+
+    /// Sets the spawn service after initial construction.
+    ///
+    /// This allows setting the spawn service after registry creation,
+    /// which is useful for breaking circular dependencies.
+    pub fn set_spawn_service(&self, service: Arc<dyn SpawnService>) {
+        let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(service));
         if let Ok(mut guard) = self.tools.write() {
             guard.insert(spawn_tool.name().to_string(), spawn_tool);
         }
@@ -202,7 +223,7 @@ impl ToolRegistry {
     /// ```no_run
     /// # use nanobot_rs::tools::registry::ToolRegistry;
     /// # use nanobot_rs::tools::base::ToolContext;
-    /// # async fn example(registry: &ToolRegistry) -> anyhow::Result<()> {
+    /// # async fn example(registry: &ToolRegistry) -> nanobot_rs::error::Result<()> {
     /// let ctx = ToolContext {
     ///     channel: "cli".to_string(),
     ///     chat_id: "direct".to_string(),
@@ -218,7 +239,7 @@ impl ToolRegistry {
         if let Some(tool) = tool {
             tool.execute(args_json, ctx).await
         } else {
-            bail!("tool '{}' not found", name)
+            Err(NanobotError::ToolNotFound(name.to_string()))
         }
     }
 

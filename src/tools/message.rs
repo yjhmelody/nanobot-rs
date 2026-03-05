@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::bus::MessageBus;
 use crate::bus::events::{MessageMetadata, OutboundMessage};
+use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +74,7 @@ impl MessageTool {
         let message_id = args.message_id.or_else(|| ctx.message_id.clone());
 
         if channel.trim().is_empty() || chat_id.trim().is_empty() {
-            bail!("no target channel/chat specified");
+            return Err(NanobotError::tool_execution("message", anyhow::anyhow!("no target channel/chat specified")));
         }
 
         let media = args.media.unwrap_or_default();
@@ -90,7 +90,7 @@ impl MessageTool {
                 metadata,
             };
             if let Err(e) = bus.publish_outbound(msg) {
-                return Err(e).context("sending message");
+                return Err(NanobotError::tool_execution("message", anyhow::anyhow!("sending message: {}", e)));
             }
         }
 

@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::fs as async_fs;
 
+use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
-use crate::tools::shared_config::SharedToolConfig;
+use crate::tools::config::SharedToolConfig;
 
 #[derive(Debug, Deserialize)]
 struct ReadFileArgs {
@@ -63,7 +63,7 @@ pub async fn execute(
         "write_file" => write_file(args_json, workspace, allowed_dir).await,
         "edit_file" => edit_file(args_json, workspace, allowed_dir).await,
         "list_dir" => list_dir(args_json, workspace, allowed_dir).await,
-        _ => bail!("unsupported filesystem tool {}", name),
+        _ => Err(NanobotError::ToolNotFound(name.to_string())),
     }
 }
 
@@ -289,20 +289,33 @@ async fn resolve_path(path: &str, workspace: &Path, allowed_dir: Option<&Path>) 
     let resolved = async_fs::canonicalize(&full)
         .await
         .or_else(|_| Ok::<PathBuf, io::Error>(full.clone()))
-        .with_context(|| format!("resolving path {}", full.display()))?;
+        .map_err(|e| {
+            NanobotError::tool_execution(
+                "filesystem",
+                anyhow::anyhow!("resolving path {}: {}", full.display(), e),
+            )
+        })?;
 
     if let Some(allowed) = allowed_dir {
         let allowed = async_fs::canonicalize(allowed)
             .await
             .or_else(|_| Ok::<PathBuf, io::Error>(allowed.to_path_buf()))
-            .with_context(|| format!("resolving allowed dir {}", allowed.display()))?;
+            .map_err(|e| {
+                NanobotError::tool_execution(
+                    "filesystem",
+                    anyhow::anyhow!("resolving allowed dir {}: {}", allowed.display(), e),
+                )
+            })?;
         // Enforce workspace boundary for both read and write operations.
         if !resolved.starts_with(&allowed) {
-            bail!(
-                "path {} is outside allowed directory {}",
-                path,
-                allowed.display()
-            );
+            return Err(NanobotError::tool_execution(
+                "filesystem",
+                anyhow::anyhow!(
+                    "path {} is outside allowed directory {}",
+                    path,
+                    allowed.display()
+                ),
+            ));
         }
     }
     Ok(resolved)
@@ -319,18 +332,32 @@ async fn read_file(
     let resolved = resolve_path(&path, workspace, allowed_dir).await?;
     let metadata = match async_fs::metadata(&resolved).await {
         Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => bail!("file not found: {}", path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(NanobotError::tool_execution(
+                "read_file",
+                anyhow::anyhow!("file not found: {}", path),
+            ));
+        }
         Err(err) => {
-            return Err(err).with_context(|| format!("reading metadata {}", resolved.display()));
+            return Err(NanobotError::tool_execution(
+                "read_file",
+                anyhow::anyhow!("reading metadata {}: {}", resolved.display(), err),
+            ));
         }
     };
     if !metadata.is_file() {
-        bail!("not a file: {}", path);
+        return Err(NanobotError::tool_execution(
+            "read_file",
+            anyhow::anyhow!("not a file: {}", path),
+        ));
     }
 
-    async_fs::read_to_string(&resolved)
-        .await
-        .with_context(|| format!("reading file {}", resolved.display()))
+    async_fs::read_to_string(&resolved).await.map_err(|e| {
+        NanobotError::tool_execution(
+            "read_file",
+            anyhow::anyhow!("reading file {}: {}", resolved.display(), e),
+        )
+    })
 }
 
 async fn write_file(
@@ -345,14 +372,20 @@ async fn write_file(
     let resolved = resolve_path(&path, workspace, allowed_dir).await?;
 
     if let Some(parent) = resolved.parent() {
-        async_fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating directory {}", parent.display()))?;
+        async_fs::create_dir_all(parent).await.map_err(|e| {
+            NanobotError::tool_execution(
+                "write_file",
+                anyhow::anyhow!("creating directory {}: {}", parent.display(), e),
+            )
+        })?;
     }
 
-    async_fs::write(&resolved, &content)
-        .await
-        .with_context(|| format!("writing file {}", resolved.display()))?;
+    async_fs::write(&resolved, &content).await.map_err(|e| {
+        NanobotError::tool_execution(
+            "write_file",
+            anyhow::anyhow!("writing file {}: {}", resolved.display(), e),
+        )
+    })?;
     Ok(format!(
         "Successfully wrote {} bytes to {}",
         content.len(),
@@ -374,21 +407,38 @@ async fn edit_file(
 
     let metadata = match async_fs::metadata(&resolved).await {
         Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => bail!("file not found: {}", path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(NanobotError::tool_execution(
+                "edit_file",
+                anyhow::anyhow!("file not found: {}", path),
+            ));
+        }
         Err(err) => {
-            return Err(err).with_context(|| format!("reading metadata {}", resolved.display()));
+            return Err(NanobotError::tool_execution(
+                "edit_file",
+                anyhow::anyhow!("reading metadata {}: {}", resolved.display(), err),
+            ));
         }
     };
     if !metadata.is_file() {
-        bail!("not a file: {}", path);
+        return Err(NanobotError::tool_execution(
+            "edit_file",
+            anyhow::anyhow!("not a file: {}", path),
+        ));
     }
 
-    let content = async_fs::read_to_string(&resolved)
-        .await
-        .with_context(|| format!("reading file {}", resolved.display()))?;
+    let content = async_fs::read_to_string(&resolved).await.map_err(|e| {
+        NanobotError::tool_execution(
+            "edit_file",
+            anyhow::anyhow!("reading file {}: {}", resolved.display(), e),
+        )
+    })?;
 
     if !content.contains(&old_text) {
-        bail!("old_text not found in {}", path);
+        return Err(NanobotError::tool_execution(
+            "edit_file",
+            anyhow::anyhow!("old_text not found in {}", path),
+        ));
     }
     if content.matches(&old_text).count() > 1 {
         return Ok(format!(
@@ -398,9 +448,12 @@ async fn edit_file(
     }
 
     let new_content = content.replacen(&old_text, &new_text, 1);
-    async_fs::write(&resolved, new_content)
-        .await
-        .with_context(|| format!("writing file {}", resolved.display()))?;
+    async_fs::write(&resolved, new_content).await.map_err(|e| {
+        NanobotError::tool_execution(
+            "edit_file",
+            anyhow::anyhow!("writing file {}: {}", resolved.display(), e),
+        )
+    })?;
     Ok(format!("Successfully edited {}", resolved.display()))
 }
 
@@ -411,24 +464,45 @@ async fn list_dir(args_json: &str, workspace: &Path, allowed_dir: Option<&Path>)
     let resolved = resolve_path(&path, workspace, allowed_dir).await?;
     let metadata = match async_fs::metadata(&resolved).await {
         Ok(meta) => meta,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => bail!("directory not found: {}", path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(NanobotError::tool_execution(
+                "list_dir",
+                anyhow::anyhow!("directory not found: {}", path),
+            ));
+        }
         Err(err) => {
-            return Err(err).with_context(|| format!("reading metadata {}", resolved.display()));
+            return Err(NanobotError::tool_execution(
+                "list_dir",
+                anyhow::anyhow!("reading metadata {}: {}", resolved.display(), err),
+            ));
         }
     };
     if !metadata.is_dir() {
-        bail!("not a directory: {}", path);
+        return Err(NanobotError::tool_execution(
+            "list_dir",
+            anyhow::anyhow!("not a directory: {}", path),
+        ));
     }
 
     let mut items = Vec::new();
-    let mut read_dir = async_fs::read_dir(&resolved)
-        .await
-        .with_context(|| format!("listing directory {}", resolved.display()))?;
-    while let Some(ent) = read_dir.next_entry().await? {
-        let file_type = ent
-            .file_type()
-            .await
-            .with_context(|| format!("reading entry type in {}", resolved.display()))?;
+    let mut read_dir = async_fs::read_dir(&resolved).await.map_err(|e| {
+        NanobotError::tool_execution(
+            "list_dir",
+            anyhow::anyhow!("listing directory {}: {}", resolved.display(), e),
+        )
+    })?;
+    while let Some(ent) = read_dir.next_entry().await.map_err(|e| {
+        NanobotError::tool_execution(
+            "list_dir",
+            anyhow::anyhow!("reading directory entry: {}", e),
+        )
+    })? {
+        let file_type = ent.file_type().await.map_err(|e| {
+            NanobotError::tool_execution(
+                "list_dir",
+                anyhow::anyhow!("reading entry type in {}: {}", resolved.display(), e),
+            )
+        })?;
         let prefix = if file_type.is_dir() { "📁" } else { "📄" };
         items.push(format!("{} {}", prefix, ent.file_name().to_string_lossy()));
     }

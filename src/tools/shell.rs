@@ -2,14 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use regex::Regex;
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
-use crate::tools::shared_config::SharedToolConfig;
+use crate::tools::config::SharedToolConfig;
 
 #[derive(Debug, Deserialize)]
 struct ExecArgs {
@@ -113,7 +113,12 @@ pub async fn execute(
 
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Err(e).context("executing command"),
+        Err(e) => {
+            return Err(NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("executing command: {}", e),
+            ));
+        }
     };
 
     let output = match tokio::time::timeout(
@@ -124,9 +129,19 @@ pub async fn execute(
     {
         Ok(res) => match res {
             Ok(o) => o,
-            Err(e) => return Err(e).context("waiting command output"),
+            Err(e) => {
+                return Err(NanobotError::tool_execution(
+                    "exec",
+                    anyhow::anyhow!("waiting command output: {}", e),
+                ));
+            }
         },
-        Err(_) => bail!("command timed out after {} seconds", timeout_secs),
+        Err(_) => {
+            return Err(NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("command timed out after {} seconds", timeout_secs),
+            ));
+        }
     };
 
     let mut parts = Vec::new();
@@ -183,25 +198,39 @@ fn guard_command(command: &str, cwd: &Path, restrict_to_workspace: bool) -> Resu
             .map(|r| r.is_match(&lower))
             .unwrap_or(false)
         {
-            bail!("command blocked by safety guard (dangerous pattern detected)");
+            return Err(NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("command blocked by safety guard (dangerous pattern detected)"),
+            ));
         }
     }
 
     if restrict_to_workspace {
         if command.contains("../") || command.contains("..\\") {
-            bail!("command blocked by safety guard (path traversal detected)");
+            return Err(NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("command blocked by safety guard (path traversal detected)"),
+            ));
         }
 
-        let cwd = cwd
-            .canonicalize()
-            .with_context(|| format!("canonicalizing cwd {}", cwd.display()))?;
+        let cwd = cwd.canonicalize().map_err(|e| {
+            NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("canonicalizing cwd {}: {}", cwd.display(), e),
+            )
+        })?;
         // Best-effort scan for absolute paths referenced in the shell string.
         for abs in extract_absolute_paths(command) {
             let p = std::path::PathBuf::from(abs);
             if p.is_absolute() {
                 if let Ok(resolved) = p.canonicalize() {
                     if resolved != cwd && !resolved.starts_with(&cwd) {
-                        bail!("command blocked by safety guard (path outside working dir)");
+                        return Err(NanobotError::tool_execution(
+                            "exec",
+                            anyhow::anyhow!(
+                                "command blocked by safety guard (path outside working dir)"
+                            ),
+                        ));
                     }
                 }
             }

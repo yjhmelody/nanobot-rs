@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use anyhow::{Result, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use serde::Deserialize;
 
 use crate::cron::{CronSchedule, CronScheduleKind, CronService};
+use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
 
 #[derive(Debug, Deserialize)]
@@ -90,18 +90,18 @@ impl CronTool {
 
     pub(crate) async fn execute_typed(&self, args: CronArgs, ctx: &ToolContext) -> Result<String> {
         let Some(action) = args.action else {
-            bail!("missing required action");
+            return Err(NanobotError::invalid_tool_args("cron", "missing required action"));
         };
 
         match action {
             CronAction::Add => {
                 let message = args.message.unwrap_or_default();
                 if message.trim().is_empty() {
-                    bail!("message is required for add");
+                    return Err(NanobotError::invalid_tool_args("cron", "message is required for add"));
                 }
 
                 if ctx.channel.trim().is_empty() || ctx.chat_id.trim().is_empty() {
-                    bail!("no session context (channel/chat_id)");
+                    return Err(NanobotError::tool_execution("cron", anyhow::anyhow!("no session context (channel/chat_id)")));
                 }
 
                 let every_seconds = args.every_seconds;
@@ -110,13 +110,13 @@ impl CronTool {
                 let at = args.at;
 
                 if tz.is_some() && cron_expr.is_none() {
-                    bail!("tz can only be used with cron_expr");
+                    return Err(NanobotError::invalid_tool_args("cron", "tz can only be used with cron_expr"));
                 }
 
                 let mut delete_after = false;
                 let schedule = if let Some(sec) = every_seconds {
                     if sec <= 0 {
-                        bail!("every_seconds must be > 0");
+                        return Err(NanobotError::invalid_tool_args("cron", "every_seconds must be > 0"));
                     }
                     CronSchedule {
                         kind: CronScheduleKind::Every,
@@ -139,7 +139,7 @@ impl CronTool {
                         ..CronSchedule::default()
                     }
                 } else {
-                    bail!("either every_seconds, cron_expr, or at is required");
+                    return Err(NanobotError::invalid_tool_args("cron", "either every_seconds, cron_expr, or at is required"));
                 };
 
                 let name = if message.len() > 30 {
@@ -162,7 +162,7 @@ impl CronTool {
                     .await
                 {
                     Ok(job) => Ok(format!("Created job '{}' (id: {})", job.name, job.id)),
-                    Err(err) => Err(err),
+                    Err(err) => Err(NanobotError::tool_execution("cron", err)),
                 }
             }
             CronAction::List => match self.service.list_jobs(false).await {
@@ -184,17 +184,17 @@ impl CronTool {
                         Ok(format!("Scheduled jobs:\n{}", lines.join("\n")))
                     }
                 }
-                Err(err) => Err(err),
+                Err(err) => Err(NanobotError::tool_execution("cron", err)),
             },
             CronAction::Remove => {
                 let Some(job_id) = args.job_id else {
-                    bail!("job_id is required for remove");
+                    return Err(NanobotError::invalid_tool_args("cron", "job_id is required for remove"));
                 };
 
                 match self.service.remove_job(&job_id).await {
                     Ok(true) => Ok(format!("Removed job {}", job_id)),
                     Ok(false) => Ok(format!("Job {} not found", job_id)),
-                    Err(err) => Err(err),
+                    Err(err) => Err(NanobotError::tool_execution("cron", err)),
                 }
             }
         }
@@ -230,7 +230,7 @@ fn parse_at_to_ms(input: &str) -> Result<i64> {
         }
     }
 
-    bail!("invalid at datetime, expected ISO format like 2026-02-12T10:30:00");
+    Err(NanobotError::invalid_tool_args("cron", "invalid at datetime, expected ISO format like 2026-02-12T10:30:00"))
 }
 
 #[cfg(test)]

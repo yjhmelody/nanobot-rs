@@ -1,12 +1,12 @@
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
-use crate::tools::shared_config::SharedToolConfig;
+use crate::tools::config::SharedToolConfig;
 
 #[derive(Debug, Deserialize)]
 struct WebSearchArgs {
@@ -185,9 +185,12 @@ pub async fn execute_search(
     let query = typed.query;
 
     if api_key.trim().is_empty() {
-        bail!(
-            "Brave Search API key not configured. Set tools.web.search.apiKey in ~/.nanobot/config.json"
-        );
+        return Err(NanobotError::tool_execution(
+            "web_search",
+            anyhow::anyhow!(
+                "Brave Search API key not configured. Set tools.web.search.apiKey in ~/.nanobot/config.json"
+            ),
+        ));
     }
 
     let count = typed.count.unwrap_or(max_results as i64).clamp(1, 10) as usize;
@@ -203,17 +206,27 @@ pub async fn execute_search(
         .send()
         .await;
 
-    let resp = res.context("requesting Brave Search API")?;
+    let resp = res.map_err(|e| {
+        NanobotError::tool_execution(
+            "web_search",
+            anyhow::anyhow!("requesting Brave Search API: {}", e),
+        )
+    })?;
     if !resp.status().is_success() {
         let code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        bail!("HTTP {}: {}", code, text);
+        return Err(NanobotError::tool_execution(
+            "web_search",
+            anyhow::anyhow!("HTTP {}: {}", code, text),
+        ));
     }
 
-    let parsed: BraveSearchResponse = resp
-        .json()
-        .await
-        .context("failed to parse search response")?;
+    let parsed: BraveSearchResponse = resp.json().await.map_err(|e| {
+        NanobotError::tool_execution(
+            "web_search",
+            anyhow::anyhow!("failed to parse search response: {}", e),
+        )
+    })?;
 
     let results = parsed.web.map(|w| w.results).unwrap_or_default();
 
@@ -243,9 +256,17 @@ pub async fn execute_fetch(
         .map(|v| v.max(100) as usize)
         .unwrap_or(max_chars_default);
 
-    let parsed = Url::parse(&url).with_context(|| format!("URL validation failed: {}", url))?;
+    let parsed = Url::parse(&url).map_err(|e| {
+        NanobotError::tool_execution(
+            "web_fetch",
+            anyhow::anyhow!("URL validation failed: {}: {}", url, e),
+        )
+    })?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("URL validation failed: only http/https allowed");
+        return Err(NanobotError::tool_execution(
+            "web_fetch",
+            anyhow::anyhow!("URL validation failed: only http/https allowed"),
+        ));
     }
 
     let client = build_client(proxy)?;
@@ -257,7 +278,9 @@ pub async fn execute_fetch(
         .send()
         .await;
 
-    let resp = res.context("fetching web content")?;
+    let resp = res.map_err(|e| {
+        NanobotError::tool_execution("web_fetch", anyhow::anyhow!("fetching web content: {}", e))
+    })?;
 
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();
@@ -268,7 +291,12 @@ pub async fn execute_fetch(
         .unwrap_or("")
         .to_string();
 
-    let body = resp.text().await.context("reading web response body")?;
+    let body = resp.text().await.map_err(|e| {
+        NanobotError::tool_execution(
+            "web_fetch",
+            anyhow::anyhow!("reading web response body: {}", e),
+        )
+    })?;
 
     let (extractor, mut text) = if ctype.contains("application/json") {
         ("json", body)
@@ -296,19 +324,30 @@ pub async fn execute_fetch(
         length: text.len(),
         text,
     })
-    .map_err(|e| anyhow!("serializing web_fetch response: {}", e))
+    .map_err(|e| {
+        NanobotError::tool_execution(
+            "web_fetch",
+            anyhow::anyhow!("serializing web_fetch response: {}", e),
+        )
+    })
 }
 
 fn build_client(proxy: Option<&str>) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder();
     if let Some(proxy_url) = proxy {
         if !proxy_url.trim().is_empty() {
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .with_context(|| format!("invalid proxy: {}", proxy_url))?;
+            let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| {
+                NanobotError::tool_execution(
+                    "web",
+                    anyhow::anyhow!("invalid proxy: {}: {}", proxy_url, e),
+                )
+            })?;
             builder = builder.proxy(proxy);
         }
     }
-    builder.build().context("building web client")
+    builder.build().map_err(|e| {
+        NanobotError::tool_execution("web", anyhow::anyhow!("building web client: {}", e))
+    })
 }
 
 #[cfg(test)]

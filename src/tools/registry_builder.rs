@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::agent::SubagentManager;
+use crate::agent::{SpawnService, SubagentManager};
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, WebToolsConfig};
 use crate::cron::CronService;
@@ -22,7 +22,7 @@ pub struct ToolRegistryBuilder {
     exec_config: ExecToolConfig,
     web_config: WebToolsConfig,
     bus: Option<Arc<MessageBus>>,
-    spawn_manager: Option<Arc<SubagentManager>>,
+    spawn_service: Option<Arc<dyn SpawnService>>,
     cron_service: Option<Arc<CronService>>,
     custom_tools: Vec<Arc<dyn Tool>>,
 }
@@ -36,7 +36,7 @@ impl ToolRegistryBuilder {
             exec_config: ExecToolConfig::default(),
             web_config: WebToolsConfig::default(),
             bus: None,
-            spawn_manager: None,
+            spawn_service: None,
             cron_service: None,
             custom_tools: Vec::new(),
         }
@@ -66,9 +66,17 @@ impl ToolRegistryBuilder {
         self
     }
 
+    /// Sets the spawn service for the spawn tool.
+    pub fn with_spawn_service(mut self, service: Arc<dyn SpawnService>) -> Self {
+        self.spawn_service = Some(service);
+        self
+    }
+
     /// Sets the spawn manager for the spawn tool.
+    ///
+    /// This is a convenience method that accepts SubagentManager directly.
     pub fn with_spawn_manager(mut self, manager: Arc<SubagentManager>) -> Self {
-        self.spawn_manager = Some(manager);
+        self.spawn_service = Some(manager);
         self
     }
 
@@ -92,7 +100,7 @@ impl ToolRegistryBuilder {
             self.exec_config,
             self.web_config,
             self.bus,
-            self.spawn_manager,
+            self.spawn_service,
             self.cron_service,
         );
 
@@ -162,7 +170,7 @@ mod tests {
             )
         }
 
-        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> Result<String> {
+        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> crate::error::Result<String> {
             Ok("builder-ok".to_string())
         }
     }
@@ -214,7 +222,7 @@ mod tests {
             )
         }
 
-        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> Result<String> {
+        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> crate::error::Result<String> {
             Ok(String::new())
         }
     }

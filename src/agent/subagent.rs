@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use regex::Regex;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::agent::skills::SkillsLoader;
+use crate::agent::spawn_service::SpawnService;
 use crate::bus::{InboundMessage, MessageBus, MessageMetadata};
+use crate::error::Result;
 use crate::provider::{
     AssistantFunctionCall, AssistantToolCall, ChatMessage, ChatRequest, LLMProvider,
 };
@@ -156,11 +159,23 @@ impl SubagentManager {
             message_id: None,
         };
 
-        let outcome = self.run_subagent_loop(task, &tool_context).await;
+        let outcome = run_subagent_loop_impl(
+            task,
+            &tool_context,
+            &self.provider,
+            &self.workspace,
+            &self.tools,
+            &self.model,
+            self.temperature,
+            self.max_tokens,
+            self.reasoning_effort.as_deref(),
+        )
+        .await;
+
         match outcome {
             Ok(result) => {
                 info!("subagent [{}] completed", task_id);
-                self.announce_result(
+                announce_result_impl(
                     &task_id.to_string(),
                     label,
                     task,
@@ -168,11 +183,12 @@ impl SubagentManager {
                     origin_channel,
                     origin_chat_id,
                     "ok",
+                    &self.bus,
                 );
             }
             Err(err) => {
                 error!("subagent [{}] failed: {}", task_id, err);
-                self.announce_result(
+                announce_result_impl(
                     &task_id.to_string(),
                     label,
                     task,
@@ -180,137 +196,118 @@ impl SubagentManager {
                     origin_channel,
                     origin_chat_id,
                     "error",
+                    &self.bus,
                 );
             }
         }
     }
+}
 
-    async fn run_subagent_loop(&self, task: &str, tool_context: &ToolContext) -> anyhow::Result<String> {
-        let tools = self.tools.definitions();
+/// Implement SpawnService trait for SubagentManager.
+///
+/// This allows SubagentManager to be used as a SpawnService without
+/// creating a circular dependency with ToolRegistry.
+///
+/// Note: Since SpawnService trait methods receive &self but SubagentManager::spawn
+/// requires &Arc<Self>, we need to wrap self in an Arc. This is safe because
+/// SubagentManager is always used behind an Arc in practice.
+#[async_trait]
+impl SpawnService for SubagentManager {
+    async fn spawn(
+        &self,
+        task: String,
+        label: Option<String>,
+        origin_channel: String,
+        origin_chat_id: String,
+        session_key: Option<String>,
+    ) -> String {
+        let task_id = TaskId::new();
+        let display_label = label.unwrap_or_else(|| truncate(&task, 30));
 
-        let mut messages = vec![
-            ChatMessage::system_text(self.build_subagent_prompt()),
-            ChatMessage::user_text(task),
-        ];
+        // Clone the Arc fields we need for the spawned task
+        let provider = self.provider.clone();
+        let workspace = self.workspace.clone();
+        let bus = self.bus.clone();
+        let tools = self.tools.clone();
+        let model = self.model.clone();
+        let temperature = self.temperature;
+        let max_tokens = self.max_tokens;
+        let reasoning_effort = self.reasoning_effort.clone();
 
-        let mut final_result = None;
-        for _ in 0..15 {
-            let response = self
-                .provider
-                .chat(ChatRequest {
-                    messages: messages.clone(),
-                    tools: Some(tools.clone()),
-                    model: Some(self.model.clone()),
-                    max_tokens: self.max_tokens,
-                    temperature: self.temperature,
-                    reasoning_effort: self.reasoning_effort.clone(),
-                })
+        let handle = tokio::spawn({
+            let display_label = display_label.clone();
+            let task = task.clone();
+
+            async move {
+                let tool_context = ToolContext {
+                    channel: origin_channel.clone(),
+                    chat_id: origin_chat_id.clone(),
+                    session_key: format!("{}:{}", origin_channel, origin_chat_id),
+                    message_id: None,
+                };
+
+                let outcome = run_subagent_loop_impl(
+                    &task,
+                    &tool_context,
+                    &provider,
+                    &workspace,
+                    &tools,
+                    &model,
+                    temperature,
+                    max_tokens,
+                    reasoning_effort.as_deref(),
+                )
                 .await;
 
-            if response.has_tool_calls() {
-                let tool_calls = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| AssistantToolCall {
-                        id: tc.id.clone(),
-                        kind: "function".to_string(),
-                        function: AssistantFunctionCall {
-                            name: tc.name.to_string(),
-                            arguments: tc.arguments_json.clone(),
-                        },
-                    })
-                    .collect::<Vec<_>>();
-
-                messages.push(ChatMessage::assistant(
-                    response.content,
-                    Some(tool_calls),
-                    response.reasoning_content,
-                    response.thinking_blocks,
-                ));
-
-                for call in response.tool_calls {
-                    let result = self
-                        .tools
-                        .execute(call.name.as_str(), &call.arguments_json, tool_context)
-                        .await;
-
-                    let rendered = match result {
-                        Ok(v) => v,
-                        Err(err) => format!("Error: {}", err),
-                    };
-
-                    messages.push(ChatMessage::tool_result(
-                        call.id,
-                        call.name.to_string(),
-                        rendered,
-                    ));
+                match outcome {
+                    Ok(result) => {
+                        info!("subagent [{}] completed", task_id);
+                        announce_result_impl(
+                            &task_id.to_string(),
+                            &display_label,
+                            &task,
+                            &result,
+                            &origin_channel,
+                            &origin_chat_id,
+                            "ok",
+                            &bus,
+                        );
+                    }
+                    Err(err) => {
+                        error!("subagent [{}] failed: {}", task_id, err);
+                        announce_result_impl(
+                            &task_id.to_string(),
+                            &display_label,
+                            &task,
+                            &format!("Error: {}", err),
+                            &origin_channel,
+                            &origin_chat_id,
+                            "error",
+                            &bus,
+                        );
+                    }
                 }
-            } else {
-                final_result = strip_think(response.content.as_deref());
-                break;
             }
+        });
+
+        {
+            let mut running = self.running_tasks.lock().await;
+            running.insert(task_id, handle);
+        }
+        if let Some(session) = session_key {
+            let mut sessions = self.session_tasks.lock().await;
+            sessions.entry(session).or_default().insert(task_id);
         }
 
-        Ok(final_result
-            .unwrap_or_else(|| "Task completed but no final response was generated.".to_string()))
+        info!("spawned subagent [{}]: {}", task_id, display_label);
+        format!(
+            "Subagent [{}] started (id: {}). I'll notify you when it completes.",
+            display_label, task_id
+        )
     }
 
-    fn build_subagent_prompt(&self) -> String {
-        let runtime = chrono::Local::now()
-            .format("%Y-%m-%d %H:%M (%A)")
-            .to_string();
-        let mut parts = vec![format!(
-            "# Subagent\n\nCurrent Time: {}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{}",
-            runtime,
-            self.workspace.display(),
-        )];
-
-        let skills = SkillsLoader::new(&self.workspace).build_skills_summary();
-        if !skills.trim().is_empty() {
-            parts.push(format!(
-                "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{}",
-                skills
-            ));
-        }
-
-        parts.join("\n\n")
-    }
-
-    fn announce_result(
-        &self,
-        _task_id: &str,
-        label: &str,
-        task: &str,
-        result: &str,
-        origin_channel: &str,
-        origin_chat_id: &str,
-        status: &str,
-    ) {
-        let status_text = if status == "ok" {
-            "completed successfully"
-        } else {
-            "failed"
-        };
-
-        let content = format!(
-            "[Subagent '{}' {}]\n\nTask: {}\n\nResult:\n{}\n\nSummarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like subagent or task IDs.",
-            label, status_text, task, result
-        );
-
-        let msg = InboundMessage {
-            channel: "system".to_string(),
-            sender_id: "subagent".to_string(),
-            chat_id: format!("{}:{}", origin_channel, origin_chat_id),
-            content,
-            timestamp: chrono::Utc::now(),
-            media: Vec::new(),
-            metadata: MessageMetadata::default(),
-            session_key_override: None,
-        };
-
-        if let Err(err) = self.bus.publish_inbound(msg) {
-            error!("failed to publish subagent result: {}", err);
-        }
+    async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
+        Ok(self.cancel_by_session(session_key).await)
     }
 }
 
@@ -336,6 +333,146 @@ fn strip_think(text: Option<&str>) -> Option<String> {
         None
     } else {
         Some(cleaned)
+    }
+}
+
+/// Helper function to run the subagent loop logic.
+/// Extracted to be reusable from both the Arc-based spawn method and the trait implementation.
+async fn run_subagent_loop_impl(
+    task: &str,
+    tool_context: &ToolContext,
+    provider: &Arc<dyn LLMProvider>,
+    workspace: &std::path::Path,
+    tools: &Arc<ToolRegistry>,
+    model: &str,
+    temperature: f32,
+    max_tokens: i32,
+    reasoning_effort: Option<&str>,
+) -> Result<String> {
+    let tool_defs = tools.definitions();
+
+    let runtime = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M (%A)")
+        .to_string();
+    let mut parts = vec![format!(
+        "# Subagent\n\nCurrent Time: {}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{}",
+        runtime,
+        workspace.display(),
+    )];
+
+    let skills = SkillsLoader::new(workspace).build_skills_summary();
+    if !skills.trim().is_empty() {
+        parts.push(format!(
+            "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{}",
+            skills
+        ));
+    }
+
+    let system_prompt = parts.join("\n\n");
+
+    let mut messages = vec![
+        ChatMessage::system_text(system_prompt),
+        ChatMessage::user_text(task),
+    ];
+
+    let mut final_result = None;
+    const MAX_ITERATOR: usize = 15;
+    for _ in 0..MAX_ITERATOR {
+        let response = provider
+            .chat(ChatRequest {
+                messages: messages.clone(),
+                tools: Some(tool_defs.clone()),
+                model: Some(model.to_string()),
+                max_tokens,
+                temperature,
+                reasoning_effort: reasoning_effort.map(|s| s.to_string()),
+            })
+            .await;
+
+        // when tool call the sub agent will end task
+        if response.has_tool_calls() {
+            let tool_calls = response
+                .tool_calls
+                .iter()
+                .map(|tc| AssistantToolCall {
+                    id: tc.id.clone(),
+                    kind: "function".to_string(),
+                    function: AssistantFunctionCall {
+                        name: tc.name.to_string(),
+                        arguments: tc.arguments_json.clone(),
+                    },
+                })
+                .collect::<Vec<_>>();
+
+            messages.push(ChatMessage::assistant(
+                response.content,
+                Some(tool_calls),
+                response.reasoning_content,
+                response.thinking_blocks,
+            ));
+
+            for call in response.tool_calls {
+                let result = tools
+                    .execute(call.name.as_str(), &call.arguments_json, tool_context)
+                    .await;
+
+                let rendered = match result {
+                    Ok(v) => v,
+                    Err(err) => format!("Error: {}", err),
+                };
+
+                messages.push(ChatMessage::tool_result(
+                    call.id,
+                    call.name.to_string(),
+                    rendered,
+                ));
+            }
+        } else {
+            final_result = strip_think(response.content.as_deref());
+            break;
+        }
+    }
+
+    Ok(final_result
+        .unwrap_or_else(|| "Task completed but no final response was generated.".to_string()))
+}
+
+/// Helper function to announce subagent results.
+fn announce_result_impl(
+    _task_id: &str,
+    label: &str,
+    task: &str,
+    result: &str,
+    origin_channel: &str,
+    origin_chat_id: &str,
+    status: &str,
+    bus: &Arc<MessageBus>,
+) {
+    let status_text = if status == "ok" {
+        "completed successfully"
+    } else {
+        "failed"
+    };
+
+    let content = format!(
+        "[Subagent '{}' {}]\n\nTask: {}\n\nResult:\n{}\n\nSummarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like subagent or task IDs.",
+        label, status_text, task, result
+    );
+
+    let msg = InboundMessage {
+        channel: "system".to_string(),
+        sender_id: "subagent".to_string(),
+        chat_id: format!("{}:{}", origin_channel, origin_chat_id),
+        content,
+        timestamp: chrono::Utc::now(),
+        media: Vec::new(),
+        metadata: MessageMetadata::default(),
+        session_key_override: None,
+    };
+
+    // Inject as system message to trigger main agent
+    if let Err(err) = bus.publish_inbound(msg) {
+        error!("failed to publish subagent result: {}", err);
     }
 }
 

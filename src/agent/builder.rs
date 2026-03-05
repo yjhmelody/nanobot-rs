@@ -160,19 +160,19 @@ impl AgentLoopBuilder {
         let context = ContextBuilder::new(self.workspace.clone())?;
         let sessions = Arc::new(SessionManager::new(&self.workspace)?);
 
-        // Create ToolRegistry first without SubagentManager
+        // Create ToolRegistry first without SpawnService
         let tools = Arc::new(ToolRegistry::new(
             self.workspace.clone(),
             self.restrict_to_workspace,
             self.exec_config.clone(),
             self.web_config.clone(),
             Some(self.bus.clone()),
-            None, // Will be set later
+            None, // SpawnService will be set after SubagentManager is created
             self.cron_service.clone(),
         ));
 
         // Create SubagentManager with ToolRegistry
-        let spawn_manager = Arc::new(SubagentManager::new(
+        let subagent_manager = Arc::new(SubagentManager::new(
             self.provider.clone(),
             self.workspace.clone(),
             self.bus.clone(),
@@ -183,8 +183,8 @@ impl AgentLoopBuilder {
             self.config.reasoning_effort.clone(),
         ));
 
-        // Set the spawn manager in ToolRegistry
-        tools.set_spawn_manager(spawn_manager);
+        // Set the spawn service in ToolRegistry (SubagentManager implements SpawnService)
+        tools.set_spawn_service(subagent_manager);
 
         let mcp = if self.mcp_servers.is_empty() {
             None

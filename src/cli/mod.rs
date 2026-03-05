@@ -364,6 +364,7 @@ impl HeartbeatExecuteHandler for GatewayHeartbeatExecuteHandler {
         self.agent
             .process_direct(&tasks, "heartbeat", &channel, &chat_id)
             .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 }
 

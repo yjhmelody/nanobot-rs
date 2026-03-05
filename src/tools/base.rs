@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use crate::error::{NanobotError, Result};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolContext {
@@ -22,14 +23,20 @@ pub struct ToolContext {
 pub trait Tool: Send + Sync {
     /// Stable function name exposed to the model.
     fn name(&self) -> &str;
+
     /// OpenAI-compatible function definition.
     fn definition(&self) -> ToolDefinition;
+
     /// Execute tool using raw JSON args with runtime context.
     async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Result<String>;
 
     /// Optional hook called at the start of each agent turn.
     async fn start_turn(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn post_execute(&self) -> Result<bool> {
+        Ok(false)
     }
 
     /// Optional signal used by tools like `message`.
@@ -54,7 +61,9 @@ pub fn parse_args<T>(args_json: &str) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_str::<T>(args_json).context("invalid tool arguments")
+    serde_json::from_str::<T>(args_json).map_err(|e| {
+        NanobotError::invalid_tool_args("unknown", format!("invalid tool arguments: {}", e))
+    })
 }
 
 /// Helper for building ordered schema properties with less boilerplate.
