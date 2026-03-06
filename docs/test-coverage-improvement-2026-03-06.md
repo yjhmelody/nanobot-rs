@@ -286,3 +286,65 @@ async fn function_name_scenario_expected_result() {
 ---
 
 **注意**：本文档记录了测试覆盖率改进的详细过程和结果。后续改进请参考本文档的结构和最佳实践。
+
+## 第二轮改进 - agent/loop_core.rs
+
+### 新增测试：5 个
+
+**测试模块**：`agent/loop_core.rs` (+5 个测试)
+
+**覆盖功能**：
+- 空响应处理
+- 运行时上下文处理
+- Think 标签剥离
+- 工具调用提示生成
+- 参数截断
+
+**关键测试**：
+```rust
+#[tokio::test]
+async fn agent_loop_handles_empty_response()
+#[tokio::test]
+async fn agent_loop_strips_runtime_context_from_response()
+#[tokio::test]
+async fn agent_loop_strips_think_tags()
+#[test]
+fn tool_hint_handles_empty_calls()
+#[test]
+fn tool_hint_truncates_long_arguments()
+```
+
+### 统计更新
+
+| 指标 | 第一轮 | 第二轮 | 总变化 |
+|------|--------|--------|--------|
+| 测试总数 | 190 | 195 | +51 (+35%) |
+| agent/loop_core.rs | 10 | 15 | +5 |
+| 测试覆盖率 | ~57% | ~58% | +13% |
+
+### 提交信息
+
+```
+test: add 5 more tests for agent loop_core
+
+- Add test for empty response handling
+- Add test for runtime context in responses
+- Add test for think tag stripping
+- Add test for empty tool calls
+- Add test for long argument truncation
+- Test coverage: 190 → 195 tests (+2.6%)
+```
+
+### Git 历史
+
+```
+90b012a test: add 5 more tests for agent loop_core
+f6c193e docs: add test coverage improvement documentation
+1164a7a fix: add missing templates and improve test coverage
+```
+
+---
+
+**更新时间**：2026-03-06 11:48
+**累计测试数**：195 个
+**累计覆盖率**：~58%
