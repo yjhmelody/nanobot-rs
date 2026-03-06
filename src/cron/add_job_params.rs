@@ -1,5 +1,4 @@
-use crate::cron::service::{CronJob, CronSchedule, CronService};
-use anyhow::Result;
+use crate::cron::CronSchedule;
 
 /// Parameters for adding a cron job.
 #[derive(Debug, Clone)]
@@ -52,26 +51,10 @@ impl AddJobParams {
     }
 }
 
-impl CronService {
-    /// Adds a cron job using structured parameters.
-    pub async fn add_job_with_params(&self, params: AddJobParams) -> Result<CronJob> {
-        self.add_job(
-            params.name,
-            params.schedule,
-            params.message,
-            params.deliver,
-            params.channel,
-            params.to,
-            params.delete_after_run,
-        )
-        .await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cron::service::CronScheduleKind;
+    use crate::cron::CronScheduleKind;
 
     #[test]
     fn add_job_params_builder_works() {

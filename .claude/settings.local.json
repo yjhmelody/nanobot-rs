@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:paul-schick.com)",
+      "WebFetch(domain:www.groff.dev)",
+      "Bash(/tmp/comparison.md:*)",
+      "Read(//tmp/**)",
+      "Bash(cargo run:*)"
+    ]
+  }
+}

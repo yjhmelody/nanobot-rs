@@ -2,34 +2,12 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
-use serde::Deserialize;
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 
-use crate::cron::{CronSchedule, CronScheduleKind, CronService};
+use crate::cron::{AddJobParams, CronSchedule, CronScheduleKind, CronService};
 use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum CronAction {
-    Add,
-    List,
-    Remove,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CronArgs {
-    action: Option<CronAction>,
-    message: Option<String>,
-    #[serde(alias = "everySeconds")]
-    every_seconds: Option<i64>,
-    #[serde(alias = "cronExpr")]
-    cron_expr: Option<String>,
-    tz: Option<String>,
-    at: Option<String>,
-    #[serde(alias = "jobId")]
-    job_id: Option<String>,
-}
+use crate::types::tools::{CronAction, CronArgs};
 
 pub struct CronTool {
     service: Arc<CronService>,
@@ -45,13 +23,13 @@ impl CronTool {
         DEF.get_or_init(|| {
             ToolDefinition::function(
                 "cron",
-                "Schedule reminders and recurring tasks. Actions: add, list, remove.",
+                "Schedule reminders and recurring tasks. Actions: add, once, list, remove.",
                 JsonSchema::object(
                     schema_props([
                         (
                             "action",
                             JsonSchema::string(Some("Action to perform"))
-                                .with_enum(vec!["add", "list", "remove"]),
+                                .with_enum(vec!["add", "once", "list", "remove"]),
                         ),
                         (
                             "message",
@@ -89,19 +67,21 @@ impl CronTool {
     }
 
     pub(crate) async fn execute_typed(&self, args: CronArgs, ctx: &ToolContext) -> Result<String> {
-        let Some(action) = args.action else {
-            return Err(NanobotError::invalid_tool_args("cron", "missing required action"));
-        };
-
-        match action {
+        match args.action {
             CronAction::Add => {
                 let message = args.message.unwrap_or_default();
                 if message.trim().is_empty() {
-                    return Err(NanobotError::invalid_tool_args("cron", "message is required for add"));
+                    return Err(NanobotError::invalid_tool_args(
+                        "cron",
+                        "message is required for add",
+                    ));
                 }
 
                 if ctx.channel.trim().is_empty() || ctx.chat_id.trim().is_empty() {
-                    return Err(NanobotError::tool_execution("cron", anyhow::anyhow!("no session context (channel/chat_id)")));
+                    return Err(NanobotError::tool_execution(
+                        "cron",
+                        anyhow::anyhow!("no session context (channel/chat_id)"),
+                    ));
                 }
 
                 let every_seconds = args.every_seconds;
@@ -110,13 +90,19 @@ impl CronTool {
                 let at = args.at;
 
                 if tz.is_some() && cron_expr.is_none() {
-                    return Err(NanobotError::invalid_tool_args("cron", "tz can only be used with cron_expr"));
+                    return Err(NanobotError::invalid_tool_args(
+                        "cron",
+                        "tz can only be used with cron_expr",
+                    ));
                 }
 
                 let mut delete_after = false;
                 let schedule = if let Some(sec) = every_seconds {
                     if sec <= 0 {
-                        return Err(NanobotError::invalid_tool_args("cron", "every_seconds must be > 0"));
+                        return Err(NanobotError::invalid_tool_args(
+                            "cron",
+                            "every_seconds must be > 0",
+                        ));
                     }
                     CronSchedule {
                         kind: CronScheduleKind::Every,
@@ -139,7 +125,10 @@ impl CronTool {
                         ..CronSchedule::default()
                     }
                 } else {
-                    return Err(NanobotError::invalid_tool_args("cron", "either every_seconds, cron_expr, or at is required"));
+                    return Err(NanobotError::invalid_tool_args(
+                        "cron",
+                        "either every_seconds, cron_expr, or at is required",
+                    ));
                 };
 
                 let name = if message.len() > 30 {
@@ -151,13 +140,65 @@ impl CronTool {
                 match self
                     .service
                     .add_job(
-                        name,
-                        schedule,
-                        message,
-                        true,
-                        Some(ctx.channel.clone()),
-                        Some(ctx.chat_id.clone()),
-                        delete_after,
+                        AddJobParams::new(name, schedule, message)
+                            .with_deliver(true)
+                            .with_channel(ctx.channel.clone())
+                            .with_to(ctx.chat_id.clone())
+                            .with_delete_after_run(delete_after),
+                    )
+                    .await
+                {
+                    Ok(job) => Ok(format!("Created job '{}' (id: {})", job.name, job.id)),
+                    Err(err) => Err(NanobotError::tool_execution("cron", err)),
+                }
+            }
+            CronAction::Once => {
+                let message = args.message.unwrap_or_default();
+                if message.trim().is_empty() {
+                    return Err(NanobotError::invalid_tool_args(
+                        "cron",
+                        "message is required for once",
+                    ));
+                }
+
+                if ctx.channel.trim().is_empty() || ctx.chat_id.trim().is_empty() {
+                    return Err(NanobotError::tool_execution(
+                        "cron",
+                        anyhow::anyhow!("no session context (channel/chat_id)"),
+                    ));
+                }
+
+                if args.every_seconds.is_some() || args.cron_expr.is_some() || args.tz.is_some() {
+                    return Err(NanobotError::invalid_tool_args(
+                        "cron",
+                        "once only supports optional at",
+                    ));
+                }
+
+                let at_ms = match args.at {
+                    Some(at_value) => parse_at_to_ms(&at_value)?,
+                    None => Utc::now().timestamp_millis() + 1000,
+                };
+                let schedule = CronSchedule {
+                    kind: CronScheduleKind::At,
+                    at_ms: Some(at_ms),
+                    ..CronSchedule::default()
+                };
+
+                let name = if message.len() > 30 {
+                    message[..30].to_string()
+                } else {
+                    message.clone()
+                };
+
+                match self
+                    .service
+                    .add_job(
+                        AddJobParams::new(name, schedule, message)
+                            .with_deliver(true)
+                            .with_channel(ctx.channel.clone())
+                            .with_to(ctx.chat_id.clone())
+                            .with_delete_after_run(true),
                     )
                     .await
                 {
@@ -188,7 +229,10 @@ impl CronTool {
             },
             CronAction::Remove => {
                 let Some(job_id) = args.job_id else {
-                    return Err(NanobotError::invalid_tool_args("cron", "job_id is required for remove"));
+                    return Err(NanobotError::invalid_tool_args(
+                        "cron",
+                        "job_id is required for remove",
+                    ));
                 };
 
                 match self.service.remove_job(&job_id).await {
@@ -230,7 +274,10 @@ fn parse_at_to_ms(input: &str) -> Result<i64> {
         }
     }
 
-    Err(NanobotError::invalid_tool_args("cron", "invalid at datetime, expected ISO format like 2026-02-12T10:30:00"))
+    Err(NanobotError::invalid_tool_args(
+        "cron",
+        "invalid at datetime, expected ISO format like 2026-02-12T10:30:00",
+    ))
 }
 
 #[cfg(test)]
@@ -296,6 +343,61 @@ mod tests {
             .await
             .expect("remove cron");
         assert!(removed.starts_with("Removed job"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn once_action_creates_one_time_job() {
+        let path = temp_store_path("once");
+        let service = Arc::new(CronService::new(path.clone()));
+        let tool = CronTool::new(service.clone());
+
+        let ctx = ToolContext {
+            channel: "cli".to_string(),
+            chat_id: "direct".to_string(),
+            session_key: "cli:direct".to_string(),
+            message_id: None,
+        };
+
+        let once_args: CronArgs =
+            parse_args(r#"{"action":"once","message":"do it once"}"#).expect("parse once args");
+        let created = tool
+            .execute_typed(once_args, &ctx)
+            .await
+            .expect("create once cron");
+        assert!(created.starts_with("Created job"));
+
+        let jobs = service.list_jobs(false).await.expect("list jobs");
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(jobs[0].schedule.kind, CronScheduleKind::At));
+        assert!(jobs[0].delete_after_run);
+        assert!(jobs[0].state.next_run_at_ms.is_some());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn once_action_rejects_recurring_fields() {
+        let path = temp_store_path("once-invalid");
+        let service = Arc::new(CronService::new(path.clone()));
+        let tool = CronTool::new(service);
+
+        let ctx = ToolContext {
+            channel: "cli".to_string(),
+            chat_id: "direct".to_string(),
+            session_key: "cli:direct".to_string(),
+            message_id: None,
+        };
+
+        let once_args: CronArgs =
+            parse_args(r#"{"action":"once","message":"x","every_seconds":30}"#)
+                .expect("parse once args");
+        let err = tool
+            .execute_typed(once_args, &ctx)
+            .await
+            .expect_err("once with recurring field should fail");
+        assert!(err.to_string().contains("once only supports optional at"));
 
         let _ = std::fs::remove_file(path);
     }

@@ -5,20 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::provider::{ChatMessage, ChatRequest, LLMProvider};
 use crate::tools::base::{JsonSchema, ToolDefinition, parse_args};
-
-#[derive(Debug, Deserialize)]
-struct HeartbeatDecisionArgs {
-    action: String,
-    #[serde(default)]
-    tasks: String,
-}
+use crate::types::heartbeat::HeartbeatDecisionArgs;
 
 #[async_trait]
 pub trait HeartbeatExecuteHandler: Send + Sync {
@@ -224,7 +217,7 @@ impl HeartbeatService {
 mod tests {
     use super::*;
 
-    use crate::provider::{LLMResponse, ToolCallRequest, UsageStats};
+    use crate::types::provider::{LLMResponse, ToolCallRequest, UsageStats};
 
     struct StubProvider {
         responses: Mutex<Vec<LLMResponse>>,

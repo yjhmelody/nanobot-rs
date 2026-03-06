@@ -129,8 +129,7 @@ fn should_deliver(msg: &OutboundMessage, send_progress: bool, send_tool_hints: b
         return true;
     };
 
-    // Keep backward-compatible filtering semantics with Python where progress/tool hints
-    // can be toggled globally. Rust encodes this in message_id tags.
+    // Progress/tool-hint delivery is toggled via message_id tags.
     if raw_message_id == "__progress__" {
         return send_progress;
     }

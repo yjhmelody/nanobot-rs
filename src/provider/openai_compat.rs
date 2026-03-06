@@ -2,17 +2,15 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use serde::de::Error as DeError;
-use serde::{Deserialize, Deserializer, Serialize};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::provider::base::{
+use crate::provider::registry::find_spec;
+use crate::provider::{
     ChatMessage, ChatRequest, LLMProvider, LLMResponse, MessageContent, MessageRole,
     ToolCallRequest, UsageStats,
 };
-use crate::provider::registry::find_spec;
-use crate::tools::base::ToolDefinition;
+use crate::types::provider_openai::{ChatCompletionPayload, OpenAIChatResponse, ThinkingBlock};
 
 pub struct OpenAICompatProvider {
     api_key: String,
@@ -126,20 +124,6 @@ impl OpenAICompatProvider {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct ChatCompletionPayload {
-    model: String,
-    messages: Vec<ChatMessage>,
-    max_tokens: i32,
-    temperature: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolDefinition>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
-}
-
 #[async_trait]
 impl LLMProvider for OpenAICompatProvider {
     async fn chat(&self, req: ChatRequest) -> LLMResponse {
@@ -222,99 +206,6 @@ fn error_response(message: String) -> LLMResponse {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct OpenAIChatResponse {
-    choices: Vec<Choice>,
-    #[serde(default)]
-    usage: Option<Usage>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Choice {
-    message: AssistantMessage,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct AssistantMessage {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<OpenAIToolCall>>,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    thinking_blocks: Option<Vec<ThinkingBlock>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OpenAIToolCall {
-    #[serde(default)]
-    id: Option<String>,
-    function: OpenAIFunctionCall,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OpenAIFunctionCall {
-    name: String,
-    #[serde(rename = "arguments", deserialize_with = "deserialize_arguments_json")]
-    arguments_json: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-enum ThinkingBlock {
-    Text(String),
-    Structured(StructuredThinkingBlock),
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct StructuredThinkingBlock {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-}
-
-impl ThinkingBlock {
-    fn into_text(self) -> Option<String> {
-        match self {
-            Self::Text(s) => (!s.trim().is_empty()).then_some(s),
-            Self::Structured(v) => v
-                .text
-                .or(v.content)
-                .or(v.summary)
-                .and_then(|s| (!s.trim().is_empty()).then_some(s)),
-        }
-    }
-}
-
-fn deserialize_arguments_json<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
-    let payload = raw.get();
-    if payload.starts_with('"') {
-        serde_json::from_str::<String>(payload).map_err(D::Error::custom)
-    } else {
-        Ok(payload.to_string())
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Usage {
-    #[serde(default)]
-    prompt_tokens: Option<u64>,
-    #[serde(default)]
-    completion_tokens: Option<u64>,
-    #[serde(default)]
-    total_tokens: Option<u64>,
-}
-
 fn parse_response(resp: OpenAIChatResponse) -> LLMResponse {
     let choice = match resp.choices.into_iter().next() {
         Some(c) => c,
@@ -366,6 +257,10 @@ mod tests {
     use super::*;
 
     use crate::provider::{AssistantFunctionCall, AssistantToolCall};
+    use crate::types::provider_openai::{
+        AssistantMessage, Choice, OpenAIFunctionCall, OpenAIToolCall, StructuredThinkingBlock,
+        Usage,
+    };
 
     fn make_provider(provider_name: &str) -> OpenAICompatProvider {
         OpenAICompatProvider::new(

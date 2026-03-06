@@ -11,34 +11,13 @@ use crate::config::schema::{ExecToolConfig, WebToolsConfig};
 /// - Sharing across multiple tools (Arc)
 /// - Runtime modification (RwLock)
 /// - Thread-safe access (RwLock)
-///
-/// # Example
-///
-/// ```no_run
-/// use nanobot_rs::tools::shared_config::SharedToolConfig;
-/// use std::path::PathBuf;
-///
-/// # async fn example() {
-/// let config = SharedToolConfig::new(
-///     PathBuf::from("/workspace"),
-///     false,
-///     Default::default(),
-///     Default::default(),
-/// );
-///
-/// // Read current configuration
-/// let snapshot = config.snapshot().await;
-/// println!("Workspace: {:?}", snapshot.workspace);
-///
-/// // Modify configuration at runtime
-/// config.set_exec_timeout(120).await;
-/// # }
 /// ```
 #[derive(Clone)]
 pub struct SharedToolConfig {
     inner: Arc<RwLock<ToolConfig>>,
 }
 
+/// Config for shell execution
 #[derive(Debug, Clone)]
 pub struct ExecConfig {
     pub timeout_secs: u64,

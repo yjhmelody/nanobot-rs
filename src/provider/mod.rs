@@ -9,10 +9,9 @@ use anyhow::{Result, anyhow};
 
 use crate::config::schema::Config;
 
-pub use base::{
-    AssistantFunctionCall, AssistantToolCall, ChatMessage, ChatRequest, ContentPart, LLMProvider,
-    LLMResponse, MessageContent, MessageRole, ToolCallRequest, UsageStats,
-};
+pub use crate::provider::base::*;
+pub use crate::types::provider::*;
+
 use openai_compat::OpenAICompatProvider;
 pub use tool_name::ToolName;
 

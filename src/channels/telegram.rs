@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -12,6 +11,7 @@ use tracing::{error, info, warn};
 use crate::bus::{InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
 use crate::channels::base::{ChannelAdapter, is_sender_allowed};
 use crate::config::schema::GenericChannelConfig;
+use crate::types::channels::{TelegramSendMessage, TelegramUpdatesResponse};
 
 const TELEGRAM_API_DEFAULT: &str = "https://api.telegram.org";
 const TELEGRAM_TEXT_LIMIT: usize = 4000;
@@ -180,43 +180,6 @@ impl ChannelAdapter for TelegramChannel {
     fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUpdatesResponse {
-    ok: bool,
-    #[serde(default)]
-    result: Vec<TelegramUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
-    message: Option<TelegramMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramMessage {
-    message_id: i64,
-    from: Option<TelegramUser>,
-    chat: TelegramChat,
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUser {
-    id: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramChat {
-    id: i64,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct TelegramSendMessage {
-    chat_id: i64,
-    text: String,
 }
 
 fn split_text(text: &str, max_len: usize) -> Vec<String> {

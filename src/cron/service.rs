@@ -1,152 +1,22 @@
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{Local, TimeZone, Utc};
-use chrono_tz::Tz;
-use cron::Schedule;
-use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
+use tokio::fs as async_fs;
 use tokio::sync::{RwLock, RwLockWriteGuard};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CronScheduleKind {
-    At,
-    Every,
-    Cron,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct CronSchedule {
-    /// One of `at`, `every`, `cron`.
-    pub kind: CronScheduleKind,
-    /// Unix ms for one-shot schedule.
-    pub at_ms: Option<i64>,
-    /// Interval ms for fixed-rate schedule.
-    pub every_ms: Option<i64>,
-    /// Cron expression when `kind == Cron`.
-    pub expr: Option<String>,
-    /// IANA timezone for cron expressions.
-    pub tz: Option<String>,
-}
-
-impl Default for CronSchedule {
-    fn default() -> Self {
-        Self {
-            kind: CronScheduleKind::Every,
-            at_ms: None,
-            every_ms: None,
-            expr: None,
-            tz: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct CronPayload {
-    pub kind: String,
-    pub message: String,
-    pub deliver: bool,
-    pub channel: Option<String>,
-    pub to: Option<String>,
-}
-
-impl Default for CronPayload {
-    fn default() -> Self {
-        Self {
-            kind: "agent_turn".to_string(),
-            message: String::new(),
-            deliver: false,
-            channel: None,
-            to: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct CronJobState {
-    pub next_run_at_ms: Option<i64>,
-    pub last_run_at_ms: Option<i64>,
-    pub last_status: Option<String>,
-    pub last_error: Option<String>,
-}
-
-impl Default for CronJobState {
-    fn default() -> Self {
-        Self {
-            next_run_at_ms: None,
-            last_run_at_ms: None,
-            last_status: None,
-            last_error: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct CronJob {
-    pub id: String,
-    pub name: String,
-    pub enabled: bool,
-    pub schedule: CronSchedule,
-    pub payload: CronPayload,
-    pub state: CronJobState,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-    pub delete_after_run: bool,
-}
-
-impl Default for CronJob {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            enabled: true,
-            schedule: CronSchedule::default(),
-            payload: CronPayload::default(),
-            state: CronJobState::default(),
-            created_at_ms: 0,
-            updated_at_ms: 0,
-            delete_after_run: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-struct CronStore {
-    version: i64,
-    jobs: Vec<CronJob>,
-}
-
-impl Default for CronStore {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            jobs: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CronStatus {
-    pub enabled: bool,
-    pub jobs: usize,
-    pub next_wake_at_ms: Option<i64>,
-}
+use super::add_job_params::AddJobParams;
+#[cfg(test)]
+use crate::types::cron::CronSchedule;
+use crate::types::cron::{
+    CronJob, CronJobState, CronPayload, CronScheduleKind, CronStatus, CronStore, now_ms,
+};
 
 #[async_trait]
 pub trait CronJobHandler: Send + Sync {
@@ -186,9 +56,9 @@ impl CronService {
 
         {
             let mut store = self.write_store().await;
-            self.reload_if_modified_locked(&mut store)?;
+            self.reload_if_modified_locked(&mut store).await?;
             recompute_next_runs(&mut store.jobs);
-            self.save_store_locked(&store)?;
+            self.save_store_locked(&store).await?;
         }
 
         let this = self.clone();
@@ -221,7 +91,7 @@ impl CronService {
 
     pub async fn status(&self) -> Result<CronStatus> {
         let mut store = self.write_store().await;
-        self.reload_if_modified_locked(&mut store)?;
+        self.reload_if_modified_locked(&mut store).await?;
         Ok(CronStatus {
             enabled: self.running.load(Ordering::SeqCst),
             jobs: store.jobs.len(),
@@ -231,7 +101,7 @@ impl CronService {
 
     pub async fn list_jobs(&self, include_disabled: bool) -> Result<Vec<CronJob>> {
         let mut store = self.write_store().await;
-        self.reload_if_modified_locked(&mut store)?;
+        self.reload_if_modified_locked(&mut store).await?;
 
         let mut jobs = if include_disabled {
             store.jobs.clone()
@@ -248,58 +118,50 @@ impl CronService {
         Ok(jobs)
     }
 
-    pub async fn add_job(
-        &self,
-        name: String,
-        schedule: CronSchedule,
-        message: String,
-        deliver: bool,
-        channel: Option<String>,
-        to: Option<String>,
-        delete_after_run: bool,
-    ) -> Result<CronJob> {
-        validate_schedule_for_add(&schedule)?;
+    pub async fn add_job(&self, params: AddJobParams) -> Result<CronJob> {
+        params.schedule.validate_for_add()?;
         let now = now_ms();
 
         let mut store = self.write_store().await;
-        self.reload_if_modified_locked(&mut store)?;
+        self.reload_if_modified_locked(&mut store).await?;
+        let next_run_at_ms = params.schedule.compute_next_run(now);
 
         let job = CronJob {
             id: uuid::Uuid::new_v4().to_string(),
-            name,
+            name: params.name,
             enabled: true,
-            schedule: schedule.clone(),
+            schedule: params.schedule,
             payload: CronPayload {
                 kind: "agent_turn".to_string(),
-                message,
-                deliver,
-                channel,
-                to,
+                message: params.message,
+                deliver: params.deliver,
+                channel: params.channel,
+                to: params.to,
             },
             state: CronJobState {
-                next_run_at_ms: compute_next_run(&schedule, now),
+                next_run_at_ms,
                 ..CronJobState::default()
             },
             created_at_ms: now,
             updated_at_ms: now,
-            delete_after_run,
+            delete_after_run: params.delete_after_run,
         };
 
         store.jobs.push(job.clone());
-        self.save_store_locked(&store)?;
+        self.save_store_locked(&store).await?;
         Ok(job)
     }
 
     pub async fn remove_job(&self, job_id: &str) -> Result<bool> {
         let mut store = self.write_store().await;
-        self.reload_if_modified_locked(&mut store)?;
+        self.reload_if_modified_locked(&mut store).await?;
 
         let before = store.jobs.len();
         store.jobs.retain(|j| j.id != job_id);
         let removed = store.jobs.len() < before;
 
         if removed {
-            self.save_store_locked(&store)?;
+            self.save_store_locked(&store).await?;
         }
 
         Ok(removed)
@@ -309,7 +171,7 @@ impl CronService {
         // Collect due ids first to avoid holding the store lock while executing callbacks.
         let due_ids = {
             let mut store = self.write_store().await;
-            self.reload_if_modified_locked(&mut store)?;
+            self.reload_if_modified_locked(&mut store).await?;
             let now = now_ms();
             store
                 .jobs
@@ -331,7 +193,7 @@ impl CronService {
     async fn execute_job(&self, job_id: &str) -> Result<()> {
         let job_snapshot = {
             let mut store = self.write_store().await;
-            self.reload_if_modified_locked(&mut store)?;
+            self.reload_if_modified_locked(&mut store).await?;
             store.jobs.iter().find(|j| j.id == job_id).cloned()
         };
 
@@ -357,7 +219,7 @@ impl CronService {
         }
 
         let mut store = self.write_store().await;
-        self.reload_if_modified_locked(&mut store)?;
+        self.reload_if_modified_locked(&mut store).await?;
         let Some(idx) = store.jobs.iter().position(|j| j.id == job_id) else {
             return Ok(());
         };
@@ -380,7 +242,7 @@ impl CronService {
                     }
                 }
                 _ => {
-                    job.state.next_run_at_ms = compute_next_run(&job.schedule, now_ms());
+                    job.state.next_run_at_ms = job.schedule.compute_next_run(now_ms());
                 }
             }
         }
@@ -389,7 +251,7 @@ impl CronService {
             store.jobs.remove(idx);
         }
 
-        self.save_store_locked(&store)?;
+        self.save_store_locked(&store).await?;
         Ok(())
     }
 
@@ -397,110 +259,50 @@ impl CronService {
         self.store.write().await
     }
 
-    fn reload_if_modified_locked(&self, store: &mut CronStore) -> Result<()> {
-        if !self.store_path.exists() {
-            return Ok(());
-        }
-
-        let metadata = std::fs::metadata(&self.store_path)
-            .with_context(|| format!("failed to stat {}", self.store_path.display()))?;
+    async fn reload_if_modified_locked(&self, store: &mut CronStore) -> Result<()> {
+        let metadata = match async_fs::metadata(&self.store_path).await {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to stat {}", self.store_path.display()));
+            }
+        };
         let modified = metadata.modified().ok();
 
-        let mut last_mtime = self
-            .last_mtime
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cron mtime lock poisoned"))?;
-
-        if modified.is_some() && *last_mtime == modified {
-            return Ok(());
+        {
+            let last_mtime = self.last_mtime.lock();
+            if modified.is_some() && *last_mtime == modified {
+                return Ok(());
+            }
         }
 
-        let loaded = read_store_file(&self.store_path)?;
+        let loaded = read_store_file_async(&self.store_path).await?;
         *store = loaded;
-        *last_mtime = modified;
+        *self.last_mtime.lock() = modified;
         Ok(())
     }
 
-    fn save_store_locked(&self, store: &CronStore) -> Result<()> {
+    async fn save_store_locked(&self, store: &CronStore) -> Result<()> {
         if let Some(parent) = self.store_path.parent() {
-            std::fs::create_dir_all(parent)
+            async_fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
         let text = serde_json::to_string_pretty(store)?;
-        std::fs::write(&self.store_path, text)
+        async_fs::write(&self.store_path, text)
+            .await
             .with_context(|| format!("failed to write {}", self.store_path.display()))?;
 
-        let modified = std::fs::metadata(&self.store_path)
+        let modified = async_fs::metadata(&self.store_path)
+            .await
             .ok()
             .and_then(|m| m.modified().ok());
 
-        if let Ok(mut guard) = self.last_mtime.lock() {
-            *guard = modified;
-        }
+        *self.last_mtime.lock() = modified;
 
         Ok(())
-    }
-}
-
-fn validate_schedule_for_add(schedule: &CronSchedule) -> Result<()> {
-    if schedule.tz.is_some() && !matches!(schedule.kind, CronScheduleKind::Cron) {
-        anyhow::bail!("tz can only be used with cron schedules");
-    }
-
-    match schedule.kind {
-        CronScheduleKind::At => {
-            if schedule.at_ms.is_none() {
-                anyhow::bail!("at schedule requires at_ms");
-            }
-        }
-        CronScheduleKind::Every => {
-            if schedule.every_ms.unwrap_or_default() <= 0 {
-                anyhow::bail!("every schedule requires every_ms > 0");
-            }
-        }
-        CronScheduleKind::Cron => {
-            let expr = schedule.expr.as_deref().unwrap_or_default().trim();
-            if expr.is_empty() {
-                anyhow::bail!("cron schedule requires expr");
-            }
-            let _ =
-                Schedule::from_str(expr).with_context(|| format!("invalid cron expr: {}", expr))?;
-            if let Some(tz) = &schedule.tz {
-                let _: Tz = tz
-                    .parse()
-                    .with_context(|| format!("unknown timezone '{}'", tz))?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn compute_next_run(schedule: &CronSchedule, now_ms: i64) -> Option<i64> {
-    match schedule.kind {
-        CronScheduleKind::At => schedule
-            .at_ms
-            .and_then(|ts| if ts > now_ms { Some(ts) } else { None }),
-        CronScheduleKind::Every => schedule
-            .every_ms
-            .and_then(|ms| if ms > 0 { Some(now_ms + ms) } else { None }),
-        CronScheduleKind::Cron => {
-            let expr = schedule.expr.as_deref()?.trim();
-            if expr.is_empty() {
-                return None;
-            }
-            let parsed = Schedule::from_str(expr).ok()?;
-
-            if let Some(tz_name) = &schedule.tz {
-                let tz: Tz = tz_name.parse().ok()?;
-                let base = tz.timestamp_millis_opt(now_ms).single()?;
-                parsed.after(&base).next().map(|dt| dt.timestamp_millis())
-            } else {
-                let base = Local.timestamp_millis_opt(now_ms).single()?;
-                parsed.after(&base).next().map(|dt| dt.timestamp_millis())
-            }
-        }
     }
 }
 
@@ -508,7 +310,7 @@ fn recompute_next_runs(jobs: &mut [CronJob]) {
     let now = now_ms();
     for job in jobs.iter_mut() {
         if job.enabled {
-            job.state.next_run_at_ms = compute_next_run(&job.schedule, now);
+            job.state.next_run_at_ms = job.schedule.compute_next_run(now);
         }
     }
 }
@@ -539,6 +341,18 @@ fn load_store_sync(path: &Path) -> (CronStore, Option<SystemTime>) {
 
 fn read_store_file(path: &Path) -> Result<CronStore> {
     let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read cron store {}", path.display()))?;
+    let mut store: CronStore = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse cron store {}", path.display()))?;
+    if store.version <= 0 {
+        store.version = 1;
+    }
+    Ok(store)
+}
+
+async fn read_store_file_async(path: &Path) -> Result<CronStore> {
+    let raw = async_fs::read_to_string(path)
+        .await
         .with_context(|| format!("failed to read cron store {}", path.display()))?;
     let mut store: CronStore = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse cron store {}", path.display()))?;
@@ -581,7 +395,8 @@ mod tests {
             tz: Some("UTC".to_string()),
             ..CronSchedule::default()
         };
-        let err = validate_schedule_for_add(&schedule)
+        let err = schedule
+            .validate_for_add()
             .expect_err("schedule should reject tz outside cron");
         assert!(err.to_string().contains("tz can only be used"));
     }
@@ -595,21 +410,23 @@ mod tests {
             at_ms: Some(now + 5_000),
             ..CronSchedule::default()
         };
-        assert_eq!(compute_next_run(&at, now), Some(now + 5_000));
+        assert_eq!(at.compute_next_run(now), Some(now + 5_000));
 
         let every = CronSchedule {
             kind: CronScheduleKind::Every,
             every_ms: Some(30_000),
             ..CronSchedule::default()
         };
-        assert_eq!(compute_next_run(&every, now), Some(now + 30_000));
+        assert_eq!(every.compute_next_run(now), Some(now + 30_000));
 
         let cron = CronSchedule {
             kind: CronScheduleKind::Cron,
             expr: Some("*/5 * * * * * *".to_string()),
             ..CronSchedule::default()
         };
-        let next = compute_next_run(&cron, now).expect("cron schedule should compute next run");
+        let next = cron
+            .compute_next_run(now)
+            .expect("cron schedule should compute next run");
         assert!(next > now);
     }
 
@@ -625,13 +442,10 @@ mod tests {
         };
         let job = service
             .add_job(
-                "test-job".to_string(),
-                schedule,
-                "hello".to_string(),
-                true,
-                Some("cli".to_string()),
-                Some("direct".to_string()),
-                false,
+                AddJobParams::new("test-job".to_string(), schedule, "hello".to_string())
+                    .with_deliver(true)
+                    .with_channel("cli".to_string())
+                    .with_to("direct".to_string()),
             )
             .await
             .expect("add_job should succeed");
@@ -680,13 +494,10 @@ mod tests {
         };
         let job = service
             .add_job(
-                "cb-job".to_string(),
-                schedule,
-                "hello".to_string(),
-                true,
-                Some("cli".to_string()),
-                Some("direct".to_string()),
-                false,
+                AddJobParams::new("cb-job".to_string(), schedule, "hello".to_string())
+                    .with_deliver(true)
+                    .with_channel("cli".to_string())
+                    .with_to("direct".to_string()),
             )
             .await
             .expect("add_job should succeed");

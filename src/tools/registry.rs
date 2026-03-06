@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
 
 use crate::agent::{SpawnService, SubagentManager};
 use crate::bus::MessageBus;
@@ -76,9 +77,9 @@ impl ToolRegistry {
         let mut defs = self
             .tools
             .read()
-            .ok()
-            .map(|map| map.values().map(|t| t.definition()).collect::<Vec<_>>())
-            .unwrap_or_default();
+            .values()
+            .map(|t| t.definition())
+            .collect::<Vec<_>>();
         defs.sort_unstable_by(|a, b| a.function.name.cmp(&b.function.name));
         defs
     }
@@ -91,10 +92,7 @@ impl ToolRegistry {
                 name
             )));
         }
-        let mut guard = self
-            .tools
-            .write()
-            .map_err(|_| NanobotError::config("tool registry poisoned"))?;
+        let mut guard = self.tools.write();
         if guard.contains_key(&name) {
             return Err(NanobotError::config(format!(
                 "tool '{}' already registered",
@@ -109,9 +107,7 @@ impl ToolRegistry {
         if self.builtin_names.contains(name) {
             return;
         }
-        if let Ok(mut guard) = self.tools.write() {
-            guard.remove(name);
-        }
+        self.tools.write().remove(name);
     }
 
     /// Sets the spawn service after initial construction.
@@ -124,9 +120,9 @@ impl ToolRegistry {
     #[deprecated(note = "Use constructor parameter spawn_service instead")]
     pub fn set_spawn_manager(&self, manager: Arc<SubagentManager>) {
         let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(manager));
-        if let Ok(mut guard) = self.tools.write() {
-            guard.insert(spawn_tool.name().to_string(), spawn_tool);
-        }
+        self.tools
+            .write()
+            .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
     /// Sets the spawn service after initial construction.
@@ -135,9 +131,9 @@ impl ToolRegistry {
     /// which is useful for breaking circular dependencies.
     pub fn set_spawn_service(&self, service: Arc<dyn SpawnService>) {
         let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(service));
-        if let Ok(mut guard) = self.tools.write() {
-            guard.insert(spawn_tool.name().to_string(), spawn_tool);
-        }
+        self.tools
+            .write()
+            .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
     /// Sets the runtime context for all tools.
@@ -158,24 +154,14 @@ impl ToolRegistry {
     }
 
     pub async fn start_turn(&self) {
-        let snapshot = self
-            .tools
-            .read()
-            .ok()
-            .map(|m| m.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
             let _ = tool.start_turn().await;
         }
     }
 
     pub async fn message_sent_in_turn(&self) -> bool {
-        let snapshot = self
-            .tools
-            .read()
-            .ok()
-            .map(|m| m.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
             if tool.sent_in_turn().await.unwrap_or(false) {
                 return true;
@@ -186,12 +172,7 @@ impl ToolRegistry {
 
     pub async fn cancel_spawn_by_session(&self, session_key: &str) -> usize {
         let mut cancelled = 0usize;
-        let snapshot = self
-            .tools
-            .read()
-            .ok()
-            .map(|m| m.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
             cancelled += tool.cancel_by_session(session_key).await.unwrap_or(0);
         }
@@ -235,7 +216,7 @@ impl ToolRegistry {
     /// # }
     /// ```
     pub async fn execute(&self, name: &str, args_json: &str, ctx: &ToolContext) -> Result<String> {
-        let tool = self.tools.read().ok().and_then(|m| m.get(name).cloned());
+        let tool = self.tools.read().get(name).cloned();
         if let Some(tool) = tool {
             tool.execute(args_json, ctx).await
         } else {
@@ -296,6 +277,7 @@ mod tests {
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
     use crate::tools::base::{JsonSchema, ToolDefinition};
 
+    #[allow(unused)]
     struct DummyProvider;
 
     #[async_trait]

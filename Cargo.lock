@@ -1034,6 +1034,7 @@ dependencies = [
  "html2text",
  "http",
  "mockall",
+ "parking_lot",
  "regex",
  "reqwest",
  "rmcp",

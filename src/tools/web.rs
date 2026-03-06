@@ -1,58 +1,12 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
 use crate::tools::config::SharedToolConfig;
-
-#[derive(Debug, Deserialize)]
-struct WebSearchArgs {
-    query: String,
-    count: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebFetchArgs {
-    url: String,
-    #[serde(rename = "maxChars", alias = "max_chars")]
-    max_chars: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BraveSearchResponse {
-    web: Option<BraveWebData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BraveWebData {
-    #[serde(default)]
-    results: Vec<BraveResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BraveResult {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    url: String,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct WebFetchResponse {
-    url: String,
-    #[serde(rename = "finalUrl")]
-    final_url: String,
-    status: u16,
-    extractor: String,
-    truncated: bool,
-    length: usize,
-    text: String,
-}
+use crate::types::tools::{BraveSearchResponse, WebFetchArgs, WebFetchResponse, WebSearchArgs};
 
 pub fn definitions() -> Vec<ToolDefinition> {
     static DEFS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
@@ -80,7 +34,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 JsonSchema::object(
                     schema_props([
                         ("url", JsonSchema::string(Some("URL to fetch"))),
-                        ("maxChars", JsonSchema::integer(None).with_minimum(100)),
+                        ("max_chars", JsonSchema::integer(None).with_minimum(100)),
                     ]),
                     vec!["url"],
                 ),

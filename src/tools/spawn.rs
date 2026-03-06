@@ -2,17 +2,11 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use serde::Deserialize;
 
 use crate::agent::SpawnService;
 use crate::error::Result;
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SpawnArgs {
-    task: String,
-    label: Option<String>,
-}
+use crate::types::tools::SpawnArgs;
 
 pub struct SpawnTool {
     service: Arc<dyn SpawnService>,
@@ -108,6 +102,7 @@ mod tests {
     use crate::agent::SpawnService;
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
 
+    #[allow(unused)]
     struct DummyProvider;
 
     #[async_trait]

@@ -174,7 +174,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        
+
         assert!(store.memory_dir().exists());
         assert!(store.memory_dir().is_dir());
 
@@ -200,8 +200,9 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        
-        store.write_long_term("# Important Facts\n\n- User prefers Rust\n- Timezone: UTC+8")
+
+        store
+            .write_long_term("# Important Facts\n\n- User prefers Rust\n- Timezone: UTC+8")
             .await
             .expect("write");
 
@@ -219,9 +220,15 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        
-        store.write_long_term("Old content").await.expect("write old");
-        store.write_long_term("New content").await.expect("write new");
+
+        store
+            .write_long_term("Old content")
+            .await
+            .expect("write old");
+        store
+            .write_long_term("New content")
+            .await
+            .expect("write new");
 
         let content = store.read_long_term().await;
         assert_eq!(content, "New content");
@@ -236,10 +243,15 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        
-        store.append_history("2024-03-01: First entry").await.expect("append");
 
-        let content = fs::read_to_string(store.history_file()).await.expect("read history");
+        store
+            .append_history("2024-03-01: First entry")
+            .await
+            .expect("append");
+
+        let content = fs::read_to_string(store.history_file())
+            .await
+            .expect("read history");
         assert!(content.contains("2024-03-01: First entry"));
 
         let _ = std::fs::remove_dir_all(workspace);
@@ -251,12 +263,14 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        
+
         store.append_history("Entry 1").await.expect("append 1");
         store.append_history("Entry 2").await.expect("append 2");
         store.append_history("Entry 3").await.expect("append 3");
 
-        let content = fs::read_to_string(store.history_file()).await.expect("read history");
+        let content = fs::read_to_string(store.history_file())
+            .await
+            .expect("read history");
         assert!(content.contains("Entry 1"));
         assert!(content.contains("Entry 2"));
         assert!(content.contains("Entry 3"));
@@ -277,10 +291,15 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        
-        store.append_history("  Entry with spaces  \n\n").await.expect("append");
 
-        let content = fs::read_to_string(store.history_file()).await.expect("read history");
+        store
+            .append_history("  Entry with spaces  \n\n")
+            .await
+            .expect("append");
+
+        let content = fs::read_to_string(store.history_file())
+            .await
+            .expect("read history");
         assert!(content.contains("Entry with spaces"));
         assert!(!content.contains("  Entry with spaces  "));
 
@@ -306,7 +325,10 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("create workspace");
 
         let store = MemoryStore::new(&workspace).expect("new memory store");
-        store.write_long_term("Important info").await.expect("write");
+        store
+            .write_long_term("Important info")
+            .await
+            .expect("write");
 
         let context = store.get_memory_context().await;
         assert!(context.contains("## Long-term Memory"));

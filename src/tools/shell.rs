@@ -4,19 +4,12 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use regex::Regex;
-use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
 use crate::tools::config::SharedToolConfig;
-
-#[derive(Debug, Deserialize)]
-struct ExecArgs {
-    command: String,
-    #[serde(alias = "workingDir")]
-    working_dir: Option<String>,
-}
+use crate::types::tools::ExecArgs;
 
 pub struct ShellTool {
     config: SharedToolConfig,
@@ -265,8 +258,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_exec_args_supports_working_dir_alias() {
-        let json = r#"{"command":"echo ok","workingDir":"/tmp"}"#;
+    fn parse_exec_args_with_working_dir() {
+        let json = r#"{"command":"echo ok","working_dir":"/tmp"}"#;
         let args: ExecArgs = crate::tools::base::parse_args(json).expect("parse exec args");
         assert_eq!(args.command, "echo ok");
         assert_eq!(args.working_dir.as_deref(), Some("/tmp"));

@@ -5,158 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use tokio::sync::RwLock;
 
-use crate::provider::{AssistantToolCall, ChatMessage, MessageContent, MessageRole};
+pub use crate::types::session::{Session, SessionEntry, SessionSummary};
+use crate::types::session::{SessionMetadata, SessionMetadataLine};
 use crate::utils::helpers::{ensure_dir, safe_filename};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionMetadata {
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionEntry {
-    pub role: MessageRole,
-    #[serde(default)]
-    pub content: Option<MessageContent>,
-    #[serde(default)]
-    pub timestamp: String,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<AssistantToolCall>>,
-    #[serde(default)]
-    pub tool_call_id: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub reasoning_content: Option<String>,
-    #[serde(default)]
-    pub thinking_blocks: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Session {
-    pub key: String,
-    #[serde(default)]
-    pub messages: Vec<SessionEntry>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    #[serde(default)]
-    pub metadata: SessionMetadata,
-    #[serde(default)]
-    pub last_consolidated: usize,
-}
-
-impl Session {
-    /// Creates a new empty session with the specified key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Session identifier (typically "channel:chat_id")
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use nanobot_rs::session::manager::Session;
-    ///
-    /// let session = Session::new("telegram:123456");
-    /// assert_eq!(session.key, "telegram:123456");
-    /// assert!(session.messages.is_empty());
-    /// ```
-    pub fn new(key: &str) -> Self {
-        let now = Utc::now();
-        Self {
-            key: key.to_string(),
-            messages: Vec::new(),
-            created_at: now,
-            updated_at: now,
-            metadata: SessionMetadata::default(),
-            last_consolidated: 0,
-        }
-    }
-
-    /// Clears all messages from the session.
-    ///
-    /// This resets the message history and consolidation state while
-    /// preserving the session key and metadata.
-    pub fn clear(&mut self) {
-        self.messages.clear();
-        self.last_consolidated = 0;
-        self.updated_at = Utc::now();
-    }
-
-    /// Returns the most recent messages from the session history.
-    ///
-    /// This method returns unconsolidated messages (those after `last_consolidated`),
-    /// limited to `max_messages`. If the result doesn't start with a user message,
-    /// it trims earlier messages until it finds one.
-    ///
-    /// # Arguments
-    ///
-    /// * `max_messages` - Maximum number of messages to return
-    ///
-    /// # Returns
-    ///
-    /// Returns messages in chronological order (oldest first), starting from
-    /// the first user message in the window.
-    pub fn get_history(&self, max_messages: usize) -> Vec<ChatMessage> {
-        let unconsolidated = if self.last_consolidated <= self.messages.len() {
-            &self.messages[self.last_consolidated..]
-        } else {
-            &[]
-        };
-
-        let start = unconsolidated.len().saturating_sub(max_messages);
-        let mut sliced: Vec<&SessionEntry> = unconsolidated[start..].iter().collect();
-
-        if let Some(idx) = sliced
-            .iter()
-            .position(|m| matches!(m.role, MessageRole::User))
-        {
-            sliced = sliced[idx..].to_vec();
-        }
-
-        sliced
-            .into_iter()
-            .map(|m| ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_calls: m.tool_calls.clone(),
-                tool_call_id: m.tool_call_id.clone(),
-                name: m.name.clone(),
-                reasoning_content: m.reasoning_content.clone(),
-                thinking_blocks: m.thinking_blocks.clone(),
-            })
-            .collect()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionSummary {
-    pub key: String,
-    pub updated_at: Option<String>,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionMetadataLine {
-    #[serde(rename = "_type")]
-    line_type: String,
-    key: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    #[serde(default)]
-    metadata: SessionMetadata,
-    #[serde(default)]
-    last_consolidated: usize,
-}
 
 pub struct SessionManager {
     sessions_dir: PathBuf,
@@ -350,6 +204,9 @@ impl SessionManager {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use chrono::Utc;
+
+    use crate::provider::{MessageContent, MessageRole};
 
     fn temp_workspace(case: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -471,12 +328,17 @@ mod tests {
         session.messages.push(entry(MessageRole::User, "original"));
         manager.save(&session).await.expect("save");
 
-        session.messages.push(entry(MessageRole::Assistant, "reply"));
+        session
+            .messages
+            .push(entry(MessageRole::Assistant, "reply"));
         manager.save(&session).await.expect("save again");
 
         manager.invalidate("test:invalidate").await;
 
-        let loaded = manager.get_or_create("test:invalidate").await.expect("reload");
+        let loaded = manager
+            .get_or_create("test:invalidate")
+            .await
+            .expect("reload");
         assert_eq!(loaded.messages.len(), 2);
 
         let _ = fs::remove_dir_all(workspace);
@@ -501,7 +363,11 @@ mod tests {
         let mut session = Session::new("test:max");
         for i in 0..10 {
             session.messages.push(entry(
-                if i % 2 == 0 { MessageRole::User } else { MessageRole::Assistant },
+                if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
                 &format!("msg{}", i),
             ));
         }
@@ -523,7 +389,7 @@ mod tests {
         session.messages.push(entry(MessageRole::User, "old1"));
         session.messages.push(entry(MessageRole::Assistant, "old2"));
         session.last_consolidated = 2;
-        
+
         session.messages.push(entry(MessageRole::User, "new1"));
         session.messages.push(entry(MessageRole::Assistant, "new2"));
 
@@ -541,7 +407,7 @@ mod tests {
 
         let path = manager.session_path("telegram:123/456");
         let filename = path.file_name().unwrap().to_str().unwrap();
-        
+
         assert!(!filename.contains('/'));
         assert!(filename.ends_with(".jsonl"));
 

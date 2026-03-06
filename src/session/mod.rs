@@ -1,3 +1,4 @@
 pub mod manager;
 
-pub use manager::{Session, SessionEntry, SessionManager, SessionSummary};
+pub use crate::types::session::{Session, SessionEntry, SessionSummary};
+pub use manager::SessionManager;

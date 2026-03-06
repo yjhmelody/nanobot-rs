@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use walkdir::WalkDir;
+
+use crate::types::agent::{SkillMeta, SkillMetaNode};
 
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
@@ -13,57 +13,14 @@ pub struct SkillInfo {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct SkillRequirements {
-    bins: Vec<String>,
-    env: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct SkillMetaNode {
-    always: Option<bool>,
-    requires: SkillRequirements,
-    nanobot: Option<Box<SkillMetaNode>>,
-    openclaw: Option<Box<SkillMetaNode>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SkillMeta {
-    always: bool,
-    requires: SkillRequirements,
-}
-
-impl SkillMetaNode {
-    fn normalize(self) -> SkillMeta {
-        if let Some(node) = self.nanobot {
-            return node.normalize();
-        }
-        if let Some(node) = self.openclaw {
-            return node.normalize();
-        }
-        SkillMeta {
-            always: self.always.unwrap_or(false),
-            requires: self.requires,
-        }
-    }
-}
-
 pub struct SkillsLoader {
     workspace_skills: PathBuf,
-    builtin_skills: PathBuf,
 }
 
 impl SkillsLoader {
     pub fn new(workspace: &Path) -> Self {
-        let builtin_skills = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("nanobot")
-            .join("skills");
         Self {
             workspace_skills: workspace.join("skills"),
-            builtin_skills,
         }
     }
 
@@ -97,38 +54,6 @@ impl SkillsLoader {
             }
         }
 
-        if self.builtin_skills.exists() {
-            for entry in WalkDir::new(&self.builtin_skills)
-                .min_depth(1)
-                .max_depth(1)
-                .into_iter()
-                .flatten()
-            {
-                let dir = entry.path();
-                if !dir.is_dir() {
-                    continue;
-                }
-                let file = dir.join("SKILL.md");
-                if !file.exists() {
-                    continue;
-                }
-                let name = dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                if skills.iter().any(|s| s.name == name) {
-                    continue;
-                }
-                skills.push(SkillInfo {
-                    name,
-                    path: file,
-                    source: "builtin".to_string(),
-                });
-            }
-        }
-
         if filter_unavailable {
             skills
                 .into_iter()
@@ -143,11 +68,6 @@ impl SkillsLoader {
         let workspace = self.workspace_skills.join(name).join("SKILL.md");
         if workspace.exists() {
             return fs::read_to_string(workspace).ok();
-        }
-
-        let builtin = self.builtin_skills.join(name).join("SKILL.md");
-        if builtin.exists() {
-            return fs::read_to_string(builtin).ok();
         }
 
         None
@@ -335,6 +255,8 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use crate::types::agent::SkillRequirements;
+
     fn temp_workspace(case: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "nanobot-rs-skills-{}-{}",
@@ -411,16 +333,16 @@ Content here"#;
     }
 
     #[test]
-    fn list_skills_workspace_overrides_builtin() {
-        let workspace = temp_workspace("override");
+    fn list_skills_only_returns_workspace_sources() {
+        let workspace = temp_workspace("workspace-only");
         create_skill(&workspace, "common-skill", "# Workspace version");
 
         let loader = SkillsLoader::new(&workspace);
         let skills = loader.list_skills(false);
 
-        // Should only have workspace version
-        let common = skills.iter().filter(|s| s.name == "common-skill").count();
-        assert!(common <= 1);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "common-skill");
+        assert_eq!(skills[0].source, "workspace");
 
         let _ = fs::remove_dir_all(workspace);
     }
@@ -479,10 +401,7 @@ always: true
         create_skill(&workspace, "skill2", "# Skill 2");
 
         let loader = SkillsLoader::new(&workspace);
-        let context = loader.load_skills_for_context(&[
-            "skill1".to_string(),
-            "skill2".to_string(),
-        ]);
+        let context = loader.load_skills_for_context(&["skill1".to_string(), "skill2".to_string()]);
 
         assert!(context.contains("Skill: skill1"));
         assert!(context.contains("Skill: skill2"));

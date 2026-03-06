@@ -4,35 +4,12 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use tokio::fs as async_fs;
 
 use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
 use crate::tools::config::SharedToolConfig;
-
-#[derive(Debug, Deserialize)]
-struct ReadFileArgs {
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WriteFileArgs {
-    path: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct EditFileArgs {
-    path: String,
-    old_text: String,
-    new_text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListDirArgs {
-    path: String,
-}
+use crate::types::tools::{EditFileArgs, ListDirArgs, ReadFileArgs, WriteFileArgs};
 
 pub fn build_tools(config: SharedToolConfig) -> Vec<Arc<dyn Tool>> {
     vec![
@@ -50,21 +27,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
         EditFileTool::definition_static(),
         ListDirTool::definition_static(),
     ]
-}
-
-pub async fn execute(
-    name: &str,
-    args_json: &str,
-    workspace: &Path,
-    allowed_dir: Option<&Path>,
-) -> Result<String> {
-    match name {
-        "read_file" => read_file(args_json, workspace, allowed_dir).await,
-        "write_file" => write_file(args_json, workspace, allowed_dir).await,
-        "edit_file" => edit_file(args_json, workspace, allowed_dir).await,
-        "list_dir" => list_dir(args_json, workspace, allowed_dir).await,
-        _ => Err(NanobotError::ToolNotFound(name.to_string())),
-    }
 }
 
 pub struct ReadFileTool {
@@ -520,8 +482,20 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use crate::config::schema::{ExecToolConfig, WebToolsConfig};
+    use crate::tools::base::ToolContext;
+
     fn temp_workspace(case: &str) -> PathBuf {
         std::env::temp_dir().join(format!("nanobot-rs-fs-{}-{}", case, uuid::Uuid::new_v4()))
+    }
+
+    fn tool_config(workspace: &Path) -> SharedToolConfig {
+        SharedToolConfig::new(
+            workspace.to_path_buf(),
+            true,
+            ExecToolConfig::default(),
+            WebToolsConfig::default(),
+        )
     }
 
     #[tokio::test]
@@ -531,25 +505,21 @@ mod tests {
         let workspace = workspace_raw
             .canonicalize()
             .expect("canonicalize temp workspace");
+        let config = tool_config(workspace.as_path());
+        let write_tool = WriteFileTool::new(config.clone());
+        let read_tool = ReadFileTool::new(config);
+        let ctx = ToolContext::default();
 
-        let write = execute(
-            "write_file",
-            r#"{"path":"notes/todo.txt","content":"hello rust"}"#,
-            workspace.as_path(),
-            Some(workspace.as_path()),
-        )
-        .await
-        .expect("write file should succeed");
+        let write = write_tool
+            .execute(r#"{"path":"notes/todo.txt","content":"hello rust"}"#, &ctx)
+            .await
+            .expect("write file should succeed");
         assert!(write.contains("Successfully wrote"));
 
-        let read = execute(
-            "read_file",
-            r#"{"path":"notes/todo.txt"}"#,
-            workspace.as_path(),
-            Some(workspace.as_path()),
-        )
-        .await
-        .expect("read file should succeed");
+        let read = read_tool
+            .execute(r#"{"path":"notes/todo.txt"}"#, &ctx)
+            .await
+            .expect("read file should succeed");
         assert_eq!(read, "hello rust");
 
         let _ = fs::remove_dir_all(workspace_raw);
@@ -564,15 +534,17 @@ mod tests {
             .expect("canonicalize temp workspace");
         let file = workspace.join("dup.txt");
         fs::write(&file, "foo\nfoo\n").expect("seed file");
+        let config = tool_config(workspace.as_path());
+        let edit_tool = EditFileTool::new(config);
+        let ctx = ToolContext::default();
 
-        let out = execute(
-            "edit_file",
-            r#"{"path":"dup.txt","old_text":"foo","new_text":"bar"}"#,
-            workspace.as_path(),
-            Some(workspace.as_path()),
-        )
-        .await
-        .expect("edit call should return warning");
+        let out = edit_tool
+            .execute(
+                r#"{"path":"dup.txt","old_text":"foo","new_text":"bar"}"#,
+                &ctx,
+            )
+            .await
+            .expect("edit call should return warning");
         assert!(out.contains("Warning: old_text appears multiple times"));
 
         let current = fs::read_to_string(&file).expect("read back file");
@@ -598,15 +570,14 @@ mod tests {
         let path_json =
             serde_json::to_string(&outside.to_string_lossy().to_string()).expect("serialize path");
         let args = format!(r#"{{"path":{}}}"#, path_json);
+        let config = tool_config(workspace.as_path());
+        let read_tool = ReadFileTool::new(config);
+        let ctx = ToolContext::default();
 
-        let err = execute(
-            "read_file",
-            &args,
-            workspace.as_path(),
-            Some(workspace.as_path()),
-        )
-        .await
-        .expect_err("outside path should be rejected");
+        let err = read_tool
+            .execute(&args, &ctx)
+            .await
+            .expect_err("outside path should be rejected");
         assert!(err.to_string().contains("outside allowed directory"));
 
         let _ = fs::remove_file(outside);

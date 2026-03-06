@@ -5,7 +5,7 @@ use regex::Regex;
 use tokio::fs;
 use tracing_subscriber::EnvFilter;
 
-use super::templates::{TemplateFile, HISTORY_TEMPLATE_PATH, MEMORY_TEMPLATE, ROOT_TEMPLATES};
+use super::templates::{HISTORY_TEMPLATE_PATH, MEMORY_TEMPLATE, ROOT_TEMPLATES, TemplateFile};
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));

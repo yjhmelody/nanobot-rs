@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use regex::Regex;
-use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
@@ -11,14 +10,15 @@ use crate::agent::ContextBuilder;
 use crate::bus::{InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
 use crate::config::schema::ChannelsConfig;
 use crate::error::Result;
-use crate::provider::{
-    AssistantFunctionCall, AssistantToolCall, ChatMessage, ChatRequest, LLMProvider,
-    MessageContent, MessageRole,
-};
+use crate::provider::{ChatRequest, LLMProvider};
 use crate::session::{Session, SessionEntry, SessionManager};
 use crate::task_id::TaskId;
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
+use crate::types::agent::PreviewValue;
+use crate::types::provider::{
+    AssistantFunctionCall, AssistantToolCall, ChatMessage, MessageContent, MessageRole,
+};
 
 pub struct AgentLoop {
     pub bus: Arc<MessageBus>,
@@ -604,37 +604,6 @@ fn strip_think(text: Option<&str>) -> Option<String> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PreviewValue {
-    String(String),
-    Bool(bool),
-    Integer(i64),
-    Float(f64),
-    Array(Vec<PreviewValue>),
-    Object(BTreeMap<String, PreviewValue>),
-}
-
-impl PreviewValue {
-    fn short(&self) -> String {
-        match self {
-            Self::String(s) => s.clone(),
-            Self::Bool(v) => v.to_string(),
-            Self::Integer(v) => v.to_string(),
-            Self::Float(v) => v.to_string(),
-            Self::Array(values) => values
-                .first()
-                .map(|v| v.short())
-                .unwrap_or_else(|| "[]".to_string()),
-            Self::Object(map) => map
-                .iter()
-                .next()
-                .map(|(_, v)| v.short())
-                .unwrap_or_else(|| "{}".to_string()),
-        }
-    }
-}
-
 fn tool_hint(calls: &[crate::provider::ToolCallRequest]) -> String {
     // Build a compact preview string for progress logs, not for execution.
     let mut hints = Vec::new();
@@ -1014,5 +983,4 @@ mod tests {
         assert!(hint.len() < long_arg.len() + 50);
         assert!(hint.contains("..."));
     }
-
 }

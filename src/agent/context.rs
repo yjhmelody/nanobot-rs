@@ -5,7 +5,9 @@ use chrono::Local;
 
 use crate::agent::memory::MemoryStore;
 use crate::agent::skills::SkillsLoader;
-use crate::provider::{AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole};
+use crate::types::provider::{
+    AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole,
+};
 
 pub struct ContextBuilder {
     workspace: PathBuf,
@@ -296,14 +298,14 @@ mod tests {
     fn identity_section_includes_workspace_path() {
         let workspace = temp_workspace("identity");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let identity = builder.identity_section();
-        
+
         assert!(identity.contains("nanobot"));
         assert!(identity.contains(&workspace.display().to_string()));
         assert!(identity.contains("memory/MEMORY.md"));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -313,15 +315,15 @@ mod tests {
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join("SOUL.md"), "# Soul\n\nBe helpful").expect("write soul");
         fs::write(workspace.join("USER.md"), "# User\n\nName: Alice").expect("write user");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let bootstrap = builder.load_bootstrap_files();
-        
+
         assert!(bootstrap.contains("SOUL.md"));
         assert!(bootstrap.contains("Be helpful"));
         assert!(bootstrap.contains("USER.md"));
         assert!(bootstrap.contains("Name: Alice"));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -329,13 +331,13 @@ mod tests {
     fn load_bootstrap_files_skips_missing_files() {
         let workspace = temp_workspace("bootstrap-missing");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let bootstrap = builder.load_bootstrap_files();
-        
+
         // Should not fail, just return empty or partial content
         assert!(!bootstrap.contains("SOUL.md") || bootstrap.is_empty());
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -343,13 +345,13 @@ mod tests {
     async fn build_system_prompt_includes_identity() {
         let workspace = temp_workspace("system-prompt");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let prompt = builder.build_system_prompt().await;
-        
+
         assert!(prompt.contains("nanobot"));
         assert!(prompt.contains(&workspace.display().to_string()));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -357,24 +359,20 @@ mod tests {
     async fn build_messages_includes_system_and_user() {
         let workspace = temp_workspace("messages");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
-        let messages = builder.build_messages(
-            vec![],
-            "Hello",
-            None,
-            Some("cli"),
-            Some("direct"),
-        ).await;
-        
+        let messages = builder
+            .build_messages(vec![], "Hello", None, Some("cli"), Some("direct"))
+            .await;
+
         assert!(messages.len() >= 2);
         assert!(matches!(messages[0].role, MessageRole::System));
         assert!(matches!(messages[1].role, MessageRole::User));
-        
+
         let user_content = messages[1].content_as_text().unwrap_or("");
         assert!(user_content.contains("Hello"));
         assert!(user_content.contains("Channel: cli"));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -382,28 +380,24 @@ mod tests {
     async fn build_messages_includes_history() {
         let workspace = temp_workspace("history");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let history = vec![
             ChatMessage::user_text("Previous question"),
             ChatMessage::assistant(Some("Previous answer".to_string()), None, None, None),
         ];
-        
-        let messages = builder.build_messages(
-            history,
-            "New question",
-            None,
-            None,
-            None,
-        ).await;
-        
+
+        let messages = builder
+            .build_messages(history, "New question", None, None, None)
+            .await;
+
         // System + 2 history + 1 new user
         assert_eq!(messages.len(), 4);
         assert!(matches!(messages[0].role, MessageRole::System));
         assert!(matches!(messages[1].role, MessageRole::User));
         assert!(matches!(messages[2].role, MessageRole::Assistant));
         assert!(matches!(messages[3].role, MessageRole::User));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -411,17 +405,17 @@ mod tests {
     fn add_tool_result_appends_message() {
         let workspace = temp_workspace("tool-result");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let mut messages = vec![];
-        
+
         builder.add_tool_result(&mut messages, "call-123", "read_file", "file content");
-        
+
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0].role, MessageRole::Tool));
         assert_eq!(messages[0].tool_call_id.as_deref(), Some("call-123"));
         assert_eq!(messages[0].name.as_deref(), Some("read_file"));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -429,10 +423,10 @@ mod tests {
     fn add_assistant_message_appends_message() {
         let workspace = temp_workspace("assistant-msg");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let mut messages = vec![];
-        
+
         builder.add_assistant_message(
             &mut messages,
             Some("Response text".to_string()),
@@ -440,11 +434,11 @@ mod tests {
             None,
             None,
         );
-        
+
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0].role, MessageRole::Assistant));
         assert_eq!(messages[0].content_as_text(), Some("Response text"));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -452,12 +446,12 @@ mod tests {
     fn build_user_content_handles_text_only() {
         let workspace = temp_workspace("content-text");
         fs::create_dir_all(&workspace).expect("create workspace");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let content = builder.build_user_content("Hello world", None);
-        
+
         assert_eq!(content.as_text(), Some("Hello world"));
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -467,17 +461,18 @@ mod tests {
         fs::create_dir_all(&workspace).expect("create workspace");
         let media_file = workspace.join("image.png");
         fs::write(&media_file, b"fake image").expect("write media");
-        
+
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
         let content = builder.build_user_content(
             "Check this image",
             Some(&[media_file.display().to_string()]),
         );
-        
+
         match content {
             MessageContent::Parts(parts) => {
                 assert!(parts.len() >= 2);
                 assert!(parts.iter().any(|p| {
+                    #[allow(irrefutable_let_patterns)]
                     if let ContentPart::Text { text } = p {
                         text.contains("image.png")
                     } else {
@@ -487,7 +482,7 @@ mod tests {
             }
             _ => panic!("Expected Parts content"),
         }
-        
+
         let _ = fs::remove_dir_all(workspace);
     }
 }

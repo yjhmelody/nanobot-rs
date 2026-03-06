@@ -170,7 +170,11 @@ mod tests {
             )
         }
 
-        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> crate::error::Result<String> {
+        async fn execute(
+            &self,
+            _args_json: &str,
+            _ctx: &ToolContext,
+        ) -> crate::error::Result<String> {
             Ok("builder-ok".to_string())
         }
     }
@@ -222,7 +226,11 @@ mod tests {
             )
         }
 
-        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> crate::error::Result<String> {
+        async fn execute(
+            &self,
+            _args_json: &str,
+            _ctx: &ToolContext,
+        ) -> crate::error::Result<String> {
             Ok(String::new())
         }
     }

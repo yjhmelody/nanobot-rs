@@ -177,12 +177,16 @@ impl MCPClientSession {
                 cmd.env(k, v);
             }
         }))
-        .map_err(|e| NanobotError::mcp_server(name, format!("spawning MCP server '{}': {}", name, e)))?;
+        .map_err(|e| {
+            NanobotError::mcp_server(name, format!("spawning MCP server '{}': {}", name, e))
+        })?;
 
-        let client: MCPRunningClient = Self::client_info()
-            .serve(transport)
-            .await
-            .map_err(|e| NanobotError::mcp_server(name, format!("initializing MCP stdio server '{}': {}", name, e)))?;
+        let client: MCPRunningClient = Self::client_info().serve(transport).await.map_err(|e| {
+            NanobotError::mcp_server(
+                name,
+                format!("initializing MCP stdio server '{}': {}", name, e),
+            )
+        })?;
 
         Ok(Arc::new(Self {
             name: name.to_string(),
@@ -204,10 +208,12 @@ impl MCPClientSession {
             .map_err(|e| NanobotError::mcp_server(name, format!("build MCP HTTP client: {}", e)))?;
         let transport = StreamableHttpClientTransport::with_client(http_client, transport_cfg);
 
-        let client = Self::client_info()
-            .serve(transport)
-            .await
-            .map_err(|e| NanobotError::mcp_server(name, format!("initializing MCP HTTP server '{}': {}", name, e)))?;
+        let client = Self::client_info().serve(transport).await.map_err(|e| {
+            NanobotError::mcp_server(
+                name,
+                format!("initializing MCP HTTP server '{}': {}", name, e),
+            )
+        })?;
 
         Ok(Arc::new(Self {
             name: name.to_string(),
@@ -233,7 +239,9 @@ impl MCPClientSession {
 
     async fn list_tools(&self) -> Result<Vec<MCPRemoteTool>> {
         let peer = self.peer().await?;
-        let tools = peer.list_all_tools().await.map_err(|e| NanobotError::mcp_server(&self.name, format!("list tools failed: {}", e)))?;
+        let tools = peer.list_all_tools().await.map_err(|e| {
+            NanobotError::mcp_server(&self.name, format!("list tools failed: {}", e))
+        })?;
         Ok(tools)
     }
 
@@ -246,7 +254,9 @@ impl MCPClientSession {
         let result = peer
             .call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(arguments))
             .await
-            .map_err(|e| NanobotError::mcp_server(&self.name, format!("call tool '{}' failed: {}", name, e)))?;
+            .map_err(|e| {
+                NanobotError::mcp_server(&self.name, format!("call tool '{}' failed: {}", name, e))
+            })?;
         Ok(format_call_tool_result(result))
     }
 
@@ -270,8 +280,9 @@ fn parse_custom_headers(
     for (k, v) in input {
         let name = HeaderName::from_bytes(k.as_bytes())
             .map_err(|e| NanobotError::config(format!("invalid MCP header name '{}': {}", k, e)))?;
-        let value = HeaderValue::from_str(v)
-            .map_err(|e| NanobotError::config(format!("invalid MCP header value for '{}': {}", k, e)))?;
+        let value = HeaderValue::from_str(v).map_err(|e| {
+            NanobotError::config(format!("invalid MCP header value for '{}': {}", k, e))
+        })?;
         out.insert(name, value);
     }
     Ok(out)
@@ -359,12 +370,21 @@ impl Tool for MCPToolWrapper {
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
-        let args_value: serde_json::Value =
-            serde_json::from_str(args_json).map_err(|e| NanobotError::invalid_tool_args(&self.name, format!("invalid MCP tool arguments: {}", e)))?;
+        let args_value: serde_json::Value = serde_json::from_str(args_json).map_err(|e| {
+            NanobotError::invalid_tool_args(
+                &self.name,
+                format!("invalid MCP tool arguments: {}", e),
+            )
+        })?;
         let args_obj = match args_value {
             serde_json::Value::Object(map) => map,
             serde_json::Value::Null => serde_json::Map::new(),
-            _ => return Err(NanobotError::invalid_tool_args(&self.name, "MCP tool arguments must be a JSON object")),
+            _ => {
+                return Err(NanobotError::invalid_tool_args(
+                    &self.name,
+                    "MCP tool arguments must be a JSON object",
+                ));
+            }
         };
 
         match tokio::time::timeout(
@@ -523,10 +543,9 @@ while True:
         use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
         let mut request_line = String::new();
-        let n = reader
-            .read_line(&mut request_line)
-            .await
-            .map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("read request line: {}", e)))?;
+        let n = reader.read_line(&mut request_line).await.map_err(|e| {
+            NanobotError::tool_execution("mcp_test", anyhow::anyhow!("read request line: {}", e))
+        })?;
         if n == 0 {
             return Ok(None);
         }
@@ -534,10 +553,9 @@ while True:
         let mut headers = HashMap::new();
         loop {
             let mut line = String::new();
-            let n = reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("read header line: {}", e)))?;
+            let n = reader.read_line(&mut line).await.map_err(|e| {
+                NanobotError::tool_execution("mcp_test", anyhow::anyhow!("read header line: {}", e))
+            })?;
             if n == 0 {
                 return Ok(None);
             }
@@ -556,16 +574,23 @@ while True:
             .unwrap_or(0);
         let mut body = vec![0u8; len];
         if len > 0 {
-            reader
-                .read_exact(&mut body)
-                .await
-                .map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("read request body: {}", e)))?;
+            reader.read_exact(&mut body).await.map_err(|e| {
+                NanobotError::tool_execution(
+                    "mcp_test",
+                    anyhow::anyhow!("read request body: {}", e),
+                )
+            })?;
         }
 
         let value = if len == 0 {
             serde_json::Value::Null
         } else {
-            serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("decode request body: {}", e)))?
+            serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| {
+                NanobotError::tool_execution(
+                    "mcp_test",
+                    anyhow::anyhow!("decode request body: {}", e),
+                )
+            })?
         };
 
         Ok(Some((headers, value)))
@@ -590,11 +615,12 @@ while True:
         response.extend_from_slice(b"\r\n");
         response.extend_from_slice(body);
 
-        stream
-            .write_all(&response)
-            .await
-            .map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("write response: {}", e)))?;
-        stream.flush().await.map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("flush response: {}", e)))?;
+        stream.write_all(&response).await.map_err(|e| {
+            NanobotError::tool_execution("mcp_test", anyhow::anyhow!("write response: {}", e))
+        })?;
+        stream.flush().await.map_err(|e| {
+            NanobotError::tool_execution("mcp_test", anyhow::anyhow!("flush response: {}", e))
+        })?;
         Ok(())
     }
 
@@ -658,7 +684,9 @@ while True:
             "id": id,
             "result": result
         }))
-        .map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("encode response: {}", e)))?;
+        .map_err(|e| {
+            NanobotError::tool_execution("mcp_test", anyhow::anyhow!("encode response: {}", e))
+        })?;
 
         write_http_response(stream, "200 OK", &payload).await
     }
@@ -671,8 +699,15 @@ while True:
     )> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("bind mock server: {}", e)))?;
-        let addr = listener.local_addr().map_err(|e| NanobotError::tool_execution("mcp_test", anyhow::anyhow!("read mock server addr: {}", e)))?;
+            .map_err(|e| {
+                NanobotError::tool_execution("mcp_test", anyhow::anyhow!("bind mock server: {}", e))
+            })?;
+        let addr = listener.local_addr().map_err(|e| {
+            NanobotError::tool_execution(
+                "mcp_test",
+                anyhow::anyhow!("read mock server addr: {}", e),
+            )
+        })?;
         let headers = Arc::new(Mutex::new(Vec::new()));
         let headers_for_task = headers.clone();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();

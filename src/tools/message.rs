@@ -1,35 +1,24 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use serde::Deserialize;
-use tokio::sync::Mutex;
 
 use crate::bus::MessageBus;
 use crate::bus::events::{MessageMetadata, OutboundMessage};
 use crate::error::{NanobotError, Result};
 use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct MessageArgs {
-    content: String,
-    channel: Option<String>,
-    #[serde(alias = "chatId")]
-    chat_id: Option<String>,
-    #[serde(alias = "messageId")]
-    message_id: Option<String>,
-    media: Option<Vec<String>>,
-}
+use crate::types::tools::MessageArgs;
 
 pub struct MessageTool {
     bus: Option<Arc<MessageBus>>,
-    sent_in_turn: Mutex<bool>,
+    sent_in_turn: AtomicBool,
 }
 
 impl MessageTool {
     pub fn new(bus: Option<Arc<MessageBus>>) -> Self {
         Self {
             bus,
-            sent_in_turn: Mutex::new(false),
+            sent_in_turn: AtomicBool::new(false),
         }
     }
 
@@ -74,7 +63,10 @@ impl MessageTool {
         let message_id = args.message_id.or_else(|| ctx.message_id.clone());
 
         if channel.trim().is_empty() || chat_id.trim().is_empty() {
-            return Err(NanobotError::tool_execution("message", anyhow::anyhow!("no target channel/chat specified")));
+            return Err(NanobotError::tool_execution(
+                "message",
+                anyhow::anyhow!("no target channel/chat specified"),
+            ));
         }
 
         let media = args.media.unwrap_or_default();
@@ -90,12 +82,15 @@ impl MessageTool {
                 metadata,
             };
             if let Err(e) = bus.publish_outbound(msg) {
-                return Err(NanobotError::tool_execution("message", anyhow::anyhow!("sending message: {}", e)));
+                return Err(NanobotError::tool_execution(
+                    "message",
+                    anyhow::anyhow!("sending message: {}", e),
+                ));
             }
         }
 
         if channel == ctx.channel && chat_id == ctx.chat_id {
-            *self.sent_in_turn.lock().await = true;
+            self.sent_in_turn.store(true, Ordering::SeqCst);
         }
 
         let info = if media.is_empty() {
@@ -123,12 +118,12 @@ impl Tool for MessageTool {
     }
 
     async fn start_turn(&self) -> Result<()> {
-        *self.sent_in_turn.lock().await = false;
+        self.sent_in_turn.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     async fn sent_in_turn(&self) -> Result<bool> {
-        Ok(*self.sent_in_turn.lock().await)
+        Ok(self.sent_in_turn.load(Ordering::SeqCst))
     }
 }
 
@@ -138,7 +133,7 @@ mod tests {
     use crate::bus::MessageBus;
 
     #[tokio::test]
-    async fn message_tool_accepts_camel_case_fields_and_sets_metadata() {
+    async fn message_tool_sets_metadata_from_snake_case_fields() {
         let bus = Arc::new(MessageBus::new());
         let tool = MessageTool::new(Some(bus.clone()));
 
@@ -156,7 +151,7 @@ mod tests {
 
         let out = tool
             .execute(
-                r#"{"content":"hello","channel":"cli","chatId":"direct","messageId":"msg-2"}"#,
+                r#"{"content":"hello","channel":"cli","chat_id":"direct","message_id":"msg-2"}"#,
                 &ctx,
             )
             .await
