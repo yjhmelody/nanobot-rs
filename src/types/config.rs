@@ -438,6 +438,7 @@ pub struct ProviderConfig {
     pub api_key: String,
     pub api_base: Option<String>,
     pub extra_headers: Option<HashMap<String, String>>,
+    pub github_instruction: Option<String>,
 }
 
 impl ProviderConfig {
@@ -452,6 +453,7 @@ impl Default for ProviderConfig {
             api_key: String::new(),
             api_base: None,
             extra_headers: None,
+            github_instruction: None,
         }
     }
 }

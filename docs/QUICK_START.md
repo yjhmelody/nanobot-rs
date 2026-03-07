@@ -56,14 +56,21 @@ Edit `~/.nanobot/config.json` and add your API key:
     },
     "openai": {
       "apiKey": "sk-xxx"
+    },
+    "githubCopilot": {
+      "apiKey": ""
     }
   }
 }
 ```
 
+**Note:** GitHub Copilot uses OAuth authentication and doesn't require an API key. The provider will authenticate automatically when you use models with the `github-copilot/` or `github_copilot/` prefix.
+
 **Supported Providers:**
 - `anthropic` - Claude models
 - `openai` - GPT models
+- `github_copilot` - GitHub Copilot (OAuth, no API key needed)
+- `openai_codex` - OpenAI Codex (OAuth, not yet implemented)
 - `openrouter` - Multiple providers
 - `deepseek`, `groq`, `gemini`, `moonshot`, `minimax`
 - `zhipu`, `dashscope`, `siliconflow`, `volcengine`
@@ -77,6 +84,26 @@ Edit `~/.nanobot/config.json` and add your API key:
 
 ```bash
 nanobot-rs agent -m "Hello! What can you do?"
+```
+
+#### Using GitHub Copilot
+
+```bash
+# Set model with github-copilot prefix
+nanobot-rs agent -m "Explain this code" -s "copilot:session1"
+```
+
+Or configure in `config.json`:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "github-copilot/gpt-4o",
+      "provider": "github_copilot"
+    }
+  }
+}
 ```
 
 #### Interactive Session
@@ -374,6 +401,11 @@ nanobot-rs onboard --overwrite
 
 **"No provider configured"**
 - Add API key to `~/.nanobot/config.json`
+- For GitHub Copilot, no API key needed - just use `github-copilot/` model prefix
+
+**"openai_codex OAuth provider is not implemented yet"**
+- OpenAI Codex OAuth is not yet supported in the current version
+- Use GitHub Copilot instead for OAuth-based access
 
 **"Workspace not found"**
 - Run `nanobot-rs onboard` first
