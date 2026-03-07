@@ -2,6 +2,9 @@ use std::io;
 
 use thiserror::Error;
 
+/// Result type alias using NanobotError.
+pub type Result<T> = std::result::Result<T, NanobotError>;
+
 /// Core error types for nanobot-rs.
 ///
 /// This provides type-safe error handling with specific error variants
@@ -111,9 +114,6 @@ pub enum ProviderError {
     #[error("Provider error: {0}")]
     Other(String),
 }
-
-/// Result type alias using NanobotError.
-pub type Result<T> = std::result::Result<T, NanobotError>;
 
 impl NanobotError {
     /// Creates a tool execution error.

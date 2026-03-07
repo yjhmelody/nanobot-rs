@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -10,12 +9,12 @@ use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_ar
 use crate::types::tools::MessageArgs;
 
 pub struct MessageTool {
-    bus: Option<Arc<MessageBus>>,
+    bus: Option<MessageBus>,
     sent_in_turn: AtomicBool,
 }
 
 impl MessageTool {
-    pub fn new(bus: Option<Arc<MessageBus>>) -> Self {
+    pub fn new(bus: Option<MessageBus>) -> Self {
         Self {
             bus,
             sent_in_turn: AtomicBool::new(false),
@@ -134,7 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_tool_sets_metadata_from_snake_case_fields() {
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let tool = MessageTool::new(Some(bus.clone()));
 
         let ctx = ToolContext {

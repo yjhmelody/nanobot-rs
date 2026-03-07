@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::types::provider::ChatMessage;
 use crate::types::tools::ToolDefinition;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ChatCompletionPayload {
     pub(crate) model: String,
     pub(crate) messages: Vec<ChatMessage>,
@@ -18,21 +18,21 @@ pub(crate) struct ChatCompletionPayload {
     pub(crate) tool_choice: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct OpenAIChatResponse {
     pub(crate) choices: Vec<Choice>,
     #[serde(default)]
     pub(crate) usage: Option<Usage>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Choice {
     pub(crate) message: AssistantMessage,
     #[serde(default)]
     pub(crate) finish_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct AssistantMessage {
     #[serde(default)]
     pub(crate) content: Option<String>,
@@ -44,28 +44,28 @@ pub(crate) struct AssistantMessage {
     pub(crate) thinking_blocks: Option<Vec<ThinkingBlock>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct OpenAIToolCall {
     #[serde(default)]
     pub(crate) id: Option<String>,
     pub(crate) function: OpenAIFunctionCall,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct OpenAIFunctionCall {
     pub(crate) name: String,
     #[serde(rename = "arguments", deserialize_with = "deserialize_arguments_json")]
     pub(crate) arguments_json: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ThinkingBlock {
     Text(String),
     Structured(StructuredThinkingBlock),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct StructuredThinkingBlock {
     #[serde(default)]
     pub(crate) text: Option<String>,
@@ -101,7 +101,7 @@ where
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Usage {
     #[serde(default)]
     pub(crate) prompt_tokens: Option<u64>,

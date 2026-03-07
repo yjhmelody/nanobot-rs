@@ -9,5 +9,5 @@ pub mod subagent;
 pub use builder::{AgentConfig, AgentLoopBuilder};
 pub use context::ContextBuilder;
 pub use loop_core::AgentLoop;
-pub use spawn_service::{NoOpSpawnService, SpawnService};
+pub use spawn_service::SpawnService;
 pub use subagent::SubagentManager;

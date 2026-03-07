@@ -52,7 +52,7 @@ impl Default for AgentConfig {
 /// use std::path::PathBuf;
 ///
 /// # async fn example(provider: Arc<dyn LLMProvider>) -> anyhow::Result<()> {
-/// let bus = Arc::new(MessageBus::new());
+/// let bus = MessageBus::new();
 /// let workspace = PathBuf::from("/workspace");
 ///
 /// let agent = AgentLoopBuilder::new(bus, provider, workspace)
@@ -68,7 +68,7 @@ impl Default for AgentConfig {
 /// ```
 pub struct AgentLoopBuilder {
     // Required parameters
-    bus: Arc<MessageBus>,
+    bus: MessageBus,
     provider: Arc<dyn LLMProvider>,
     workspace: PathBuf,
 
@@ -92,7 +92,7 @@ impl AgentLoopBuilder {
     /// * `bus` - Message bus for inter-component communication
     /// * `provider` - LLM provider for chat completions
     /// * `workspace` - Working directory for file operations
-    pub fn new(bus: Arc<MessageBus>, provider: Arc<dyn LLMProvider>, workspace: PathBuf) -> Self {
+    pub fn new(bus: MessageBus, provider: Arc<dyn LLMProvider>, workspace: PathBuf) -> Self {
         Self {
             bus,
             provider,
@@ -207,9 +207,10 @@ impl AgentLoopBuilder {
             mcp,
             context,
             sessions,
-            running: Arc::new(tokio::sync::RwLock::new(false)),
-            session_locks: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            active_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            session_locks: Arc::new(dashmap::DashMap::new()),
+            active_tasks: Arc::new(dashmap::DashMap::new()),
+            last_cleanup: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
         })
     }
 }
@@ -220,6 +221,7 @@ mod tests {
     use crate::provider::{ChatRequest, LLMResponse, UsageStats};
     use async_trait::async_trait;
 
+    #[derive(Debug)]
     struct DummyProvider;
 
     #[async_trait]
@@ -242,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn builder_creates_agent_loop_with_defaults() {
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let provider: Arc<dyn LLMProvider> = Arc::new(DummyProvider);
         let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
 
@@ -256,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn builder_accepts_custom_config() {
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let provider: Arc<dyn LLMProvider> = Arc::new(DummyProvider);
         let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
 

@@ -67,10 +67,6 @@ impl SpawnTool {
             )
             .await)
     }
-
-    pub async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
-        self.service.cancel_by_session(session_key).await
-    }
 }
 
 #[async_trait]
@@ -89,7 +85,7 @@ impl Tool for SpawnTool {
     }
 
     async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
-        self.cancel_by_session(session_key).await
+        self.service.cancel_by_session(session_key).await
     }
 }
 

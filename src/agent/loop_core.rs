@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use regex::Regex;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
@@ -22,7 +25,7 @@ use crate::types::provider::{
 };
 
 pub struct AgentLoop {
-    pub bus: Arc<MessageBus>,
+    pub bus: MessageBus,
     pub channels_config: ChannelsConfig,
     pub provider: Arc<dyn LLMProvider>,
     pub workspace: std::path::PathBuf,
@@ -36,14 +39,21 @@ pub struct AgentLoop {
     pub(crate) mcp: Option<Arc<MCPManager>>,
     pub context: ContextBuilder,
     pub sessions: Arc<SessionManager>,
-    pub(crate) running: Arc<RwLock<bool>>,
+    /// Running state flag using AtomicBool for lock-free access
+    pub(crate) running: Arc<AtomicBool>,
     /// Per-session locks for concurrent message processing
-    pub(crate) session_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
-    pub(crate) active_tasks: Arc<Mutex<HashMap<String, HashMap<TaskId, AbortHandle>>>>,
+    /// Using DashMap eliminates the outer RwLock, reducing lock contention
+    pub(crate) session_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// Active tasks per session
+    /// Using nested DashMap for better concurrent access
+    pub(crate) active_tasks: Arc<DashMap<String, DashMap<TaskId, AbortHandle>>>,
+    /// Last cleanup timestamp for periodic maintenance
+    pub(crate) last_cleanup: Arc<Mutex<Instant>>,
 }
 
 impl AgentLoop {
     const TOOL_RESULT_MAX_CHARS: usize = 500;
+    const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
     async fn ensure_mcp_connected(&self) {
         if let Some(mcp) = &self.mcp
@@ -64,20 +74,20 @@ impl AgentLoop {
     }
 
     pub async fn run(self: Arc<Self>) {
-        *self.running.write().await = true;
+        self.running.store(true, Ordering::Release);
         self.ensure_mcp_connected().await;
         info!(target: TARGET_AGENT, "agent loop started");
 
         let mut inbound_rx = self.bus.subscribe_inbound();
 
         loop {
-            if !*self.running.read().await {
+            if !self.running.load(Ordering::Acquire) {
                 break;
             }
             let Ok(msg) = inbound_rx.recv().await else {
                 continue;
             };
-            if !*self.running.read().await {
+            if !self.running.load(Ordering::Acquire) {
                 break;
             }
 
@@ -104,7 +114,7 @@ impl AgentLoop {
     }
 
     pub async fn stop(&self) {
-        *self.running.write().await = false;
+        self.running.store(false, Ordering::Release);
         let _ = self.bus.publish_inbound(InboundMessage {
             channel: "system".to_string(),
             sender_id: "system".to_string(),
@@ -116,15 +126,16 @@ impl AgentLoop {
             session_key_override: Some("__nanobot_stop__".to_string()),
         });
 
-        let all = {
-            let mut active = self.active_tasks.lock().await;
-            std::mem::take(&mut *active)
-        };
-        for (_, handles) in all {
-            for (_, h) in handles {
-                h.abort();
+        // Abort all active tasks using DashMap iteration
+        for entry in self.active_tasks.iter() {
+            let handles = entry.value();
+            for handle_entry in handles.iter() {
+                handle_entry.value().abort();
             }
         }
+
+        // Clear all tasks
+        self.active_tasks.clear();
     }
 
     pub async fn process_direct(
@@ -151,39 +162,38 @@ impl AgentLoop {
     }
 
     async fn register_task(&self, session_key: &str, task_id: TaskId, handle: AbortHandle) {
-        let mut active = self.active_tasks.lock().await;
-        active
+        self.active_tasks
             .entry(session_key.to_string())
-            .or_default()
+            .or_insert_with(DashMap::new)
             .insert(task_id, handle);
     }
 
     async fn unregister_task(&self, session_key: &str, task_id: &TaskId) {
-        let mut active = self.active_tasks.lock().await;
-        if let Some(tasks) = active.get_mut(session_key) {
+        if let Some(tasks) = self.active_tasks.get(session_key) {
             tasks.remove(task_id);
             if tasks.is_empty() {
-                active.remove(session_key);
+                drop(tasks); // Release the reference before removing
+                self.active_tasks.remove(session_key);
             }
         }
     }
 
     async fn handle_stop(&self, msg: InboundMessage) {
         let session_key = msg.session_key();
-        let cancelled_main = {
-            let mut active = self.active_tasks.lock().await;
-            if let Some(handles) = active.remove(&session_key) {
-                let mut count = 0usize;
-                for (_, h) in handles {
-                    if !h.is_finished() {
-                        h.abort();
-                        count += 1;
-                    }
+
+        // Cancel all tasks for this session
+        let cancelled_main = if let Some((_, handles)) = self.active_tasks.remove(&session_key) {
+            let mut count = 0usize;
+            for entry in handles.iter() {
+                let handle = entry.value();
+                if !handle.is_finished() {
+                    handle.abort();
+                    count += 1;
                 }
-                count
-            } else {
-                0usize
             }
+            count
+        } else {
+            0usize
         };
 
         let cancelled_sub = self.tools.cancel_spawn_by_session(&session_key).await;
@@ -207,13 +217,11 @@ impl AgentLoop {
     async fn dispatch(&self, msg: InboundMessage) {
         // Get or create per-session lock for concurrent processing
         let session_key = msg.session_key();
-        let lock = {
-            let mut locks = self.session_locks.write().await;
-            locks
-                .entry(session_key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
+        let lock = self
+            .session_locks
+            .entry(session_key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
 
         let _guard = lock.lock().await;
 
@@ -251,28 +259,41 @@ impl AgentLoop {
             }
         }
 
-        // Clean up unused locks periodically
-        self.cleanup_session_locks().await;
+        // Periodic cleanup with rate limiting
+        self.cleanup_session_locks_if_needed().await;
+    }
+
+    /// Removes locks for sessions that are no longer active
+    /// Only runs if CLEANUP_INTERVAL has elapsed since last cleanup
+    async fn cleanup_session_locks_if_needed(&self) {
+        let should_cleanup = {
+            let mut last = self.last_cleanup.lock().await;
+            if last.elapsed() > Self::CLEANUP_INTERVAL {
+                *last = Instant::now();
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_cleanup {
+            self.cleanup_session_locks().await;
+        }
     }
 
     /// Removes locks for sessions that are no longer active
     async fn cleanup_session_locks(&self) {
-        let mut locks = self.session_locks.write().await;
-        locks.retain(|session_key, lock| {
+        self.session_locks.retain(|session_key, lock| {
             // Keep lock if it's currently held or if there are active tasks
             Arc::strong_count(lock) > 1 || self.has_active_tasks(session_key)
         });
     }
 
     fn has_active_tasks(&self, session_key: &str) -> bool {
-        if let Ok(tasks) = self.active_tasks.try_lock() {
-            tasks
-                .get(session_key)
-                .map(|t| !t.is_empty())
-                .unwrap_or(false)
-        } else {
-            true // Assume active if we can't check
-        }
+        self.active_tasks
+            .get(session_key)
+            .map(|tasks| !tasks.is_empty())
+            .unwrap_or(false)
     }
 
     async fn process_message(&self, msg: InboundMessage) -> Result<Option<OutboundMessage>> {
@@ -767,7 +788,7 @@ mod tests {
         use crate::agent::AgentLoopBuilder;
         use crate::bus::MessageBus;
 
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
 
@@ -881,25 +902,18 @@ mod tests {
 
         // Manually create a lock by simulating dispatch
         let session_key = "cli:direct".to_string();
-        {
-            let mut locks = agent.session_locks.write().await;
-            locks.insert(session_key.clone(), Arc::new(Mutex::new(())));
-        }
+        agent
+            .session_locks
+            .insert(session_key.clone(), Arc::new(Mutex::new(())));
 
         // Verify lock exists
-        {
-            let locks = agent.session_locks.read().await;
-            assert!(locks.contains_key(&session_key));
-        }
+        assert!(agent.session_locks.contains_key(&session_key));
 
         // Trigger cleanup (no active tasks, so should be removed)
         agent.cleanup_session_locks().await;
 
         // Lock should be removed
-        {
-            let locks = agent.session_locks.read().await;
-            assert!(!locks.contains_key(&session_key));
-        }
+        assert!(!agent.session_locks.contains_key(&session_key));
     }
 
     #[tokio::test]

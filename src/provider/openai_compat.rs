@@ -13,6 +13,7 @@ use crate::provider::{
 };
 use crate::types::provider_openai::{ChatCompletionPayload, OpenAIChatResponse, ThinkingBlock};
 
+#[derive(Debug)]
 pub struct OpenAICompatProvider {
     api_key: String,
     api_base: Option<String>,

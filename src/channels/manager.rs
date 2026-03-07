@@ -16,13 +16,13 @@ use crate::observability::TARGET_CHANNELS;
 
 pub struct ChannelManager {
     config: ChannelsConfig,
-    bus: Arc<MessageBus>,
+    bus: MessageBus,
     channels: HashMap<String, Arc<dyn ChannelAdapter>>,
     dispatch_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ChannelManager {
-    pub fn new(config: ChannelsConfig, bus: Arc<MessageBus>) -> Result<Self> {
+    pub fn new(config: ChannelsConfig, bus: MessageBus) -> Result<Self> {
         let mut channels: HashMap<String, Arc<dyn ChannelAdapter>> = HashMap::new();
         channels.insert("cli".to_string(), Arc::new(CliChannel::new()));
 
@@ -171,7 +171,7 @@ mod tests {
             serde_json::Value::String("x".to_string()),
         );
 
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let out = ChannelManager::new(cfg.channels, bus);
         assert!(out.is_err());
         assert!(
@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn manager_dispatches_to_cli_channel() {
         let cfg = ChannelsConfig::default();
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let manager = ChannelManager::new(cfg, bus.clone()).expect("manager new");
         manager.start_all().await.expect("manager start");
 

@@ -57,6 +57,7 @@ use crate::utils::helpers::ensure_dir;
 /// - Automatic memory consolidation and summarization
 /// - Memory importance scoring and pruning
 /// - Multi-agent shared memory spaces
+#[derive(Debug, Clone)]
 pub struct MemoryStore {
     memory_dir: PathBuf,
     memory_file: PathBuf,

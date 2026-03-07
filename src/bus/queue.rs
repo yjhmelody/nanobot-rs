@@ -39,6 +39,7 @@ use crate::bus::events::{InboundMessage, OutboundMessage};
 /// let msg2 = sub2.recv().await.ok();
 /// # }
 /// ```
+#[derive(Debug, Clone)]
 pub struct MessageBus {
     inbound_tx: broadcast::Sender<InboundMessage>,
     outbound_tx: broadcast::Sender<OutboundMessage>,

@@ -12,14 +12,14 @@ use crate::utils::helpers::get_data_path;
 
 pub struct RuntimeBundle {
     pub config: Config,
-    pub bus: Arc<MessageBus>,
+    pub bus: MessageBus,
     pub agent: Arc<AgentLoop>,
     pub cron: Arc<CronService>,
     pub heartbeat: Arc<HeartbeatService>,
 }
 
 pub async fn build_runtime(config: Config) -> Result<RuntimeBundle> {
-    let bus = Arc::new(MessageBus::new());
+    let bus = MessageBus::new();
     let provider = make_provider(&config)?;
     let workspace = config.workspace_path();
 

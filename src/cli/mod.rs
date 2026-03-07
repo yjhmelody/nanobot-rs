@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::agent::AgentLoop;
+use crate::bus::MessageBus;
 use crate::bus::{InboundMessage, MessageMetadata, OutboundMessage};
 use crate::channels::ChannelManager;
 use crate::config::{Config, get_config_path, load_config, save_config};
@@ -310,7 +311,7 @@ impl SessionTargetPicker {
 
 struct GatewayCronJobHandler {
     agent: Arc<AgentLoop>,
-    bus: Arc<crate::bus::MessageBus>,
+    bus: MessageBus,
 }
 
 #[async_trait]
@@ -370,7 +371,7 @@ impl HeartbeatExecuteHandler for GatewayHeartbeatExecuteHandler {
 
 #[derive(Clone)]
 struct GatewayHeartbeatNotifyHandler {
-    bus: Arc<crate::bus::MessageBus>,
+    bus: MessageBus,
     picker: Arc<SessionTargetPicker>,
 }
 

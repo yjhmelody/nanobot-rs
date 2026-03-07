@@ -19,7 +19,7 @@ const TELEGRAM_TEXT_LIMIT: usize = 4000;
 
 pub struct TelegramChannel {
     config: GenericChannelConfig,
-    bus: Arc<MessageBus>,
+    bus: MessageBus,
     client: Client,
     token: String,
     api_base: String,
@@ -29,7 +29,7 @@ pub struct TelegramChannel {
 }
 
 impl TelegramChannel {
-    pub fn new(config: GenericChannelConfig, bus: Arc<MessageBus>) -> Result<Self> {
+    pub fn new(config: GenericChannelConfig, bus: MessageBus) -> Result<Self> {
         let token = extra_string(&config, &["token", "botToken"])
             .ok_or_else(|| anyhow::anyhow!("telegram.token is required"))?;
         if token.trim().is_empty() {

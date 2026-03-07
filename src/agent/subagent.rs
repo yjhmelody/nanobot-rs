@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use regex::Regex;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -18,26 +17,47 @@ use crate::provider::{
 use crate::task_id::TaskId;
 use crate::tools::{ToolContext, ToolRegistry};
 
-pub struct SubagentManager {
+struct SubagentManagerInner {
     provider: Arc<dyn LLMProvider>,
     workspace: std::path::PathBuf,
-    bus: Arc<MessageBus>,
+    bus: MessageBus,
     tools: Arc<ToolRegistry>,
     model: String,
     temperature: f32,
     max_tokens: i32,
     reasoning_effort: Option<String>,
     /// task id => task handle
-    running_tasks: Mutex<HashMap<TaskId, JoinHandle<()>>>,
+    /// Using DashMap for lock-free concurrent access
+    running_tasks: DashMap<TaskId, JoinHandle<()>>,
     /// session => running tasks
-    session_tasks: Mutex<HashMap<String, HashSet<TaskId>>>,
+    /// Using nested DashMap for better concurrent access
+    session_tasks: DashMap<String, DashMap<TaskId, ()>>,
+}
+
+impl std::fmt::Debug for SubagentManagerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubagentManagerInner")
+            .field("workspace", &self.workspace)
+            .field("model", &self.model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("running_tasks", &"<DashMap>")
+            .field("session_tasks", &"<DashMap>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SubagentManager {
+    inner: Arc<SubagentManagerInner>,
 }
 
 impl SubagentManager {
     pub(crate) fn new(
         provider: Arc<dyn LLMProvider>,
         workspace: std::path::PathBuf,
-        bus: Arc<MessageBus>,
+        bus: MessageBus,
         tools: Arc<ToolRegistry>,
         model: String,
         temperature: f32,
@@ -45,20 +65,28 @@ impl SubagentManager {
         reasoning_effort: Option<String>,
     ) -> Self {
         Self {
-            provider,
-            workspace,
-            bus,
-            tools,
-            model,
-            temperature,
-            max_tokens,
-            reasoning_effort,
-            running_tasks: Mutex::new(HashMap::new()),
-            session_tasks: Mutex::new(HashMap::new()),
+            inner: Arc::new(SubagentManagerInner {
+                provider,
+                workspace,
+                bus,
+                tools,
+                model,
+                temperature,
+                max_tokens,
+                reasoning_effort,
+                running_tasks: DashMap::new(),
+                session_tasks: DashMap::new(),
+            }),
         }
     }
 
-    pub async fn spawn(
+    pub async fn cancel_by_session(&self, session_key: &str) -> usize {
+        self.inner.cancel_by_session(session_key).await
+    }
+}
+
+impl SubagentManagerInner {
+    async fn spawn_impl(
         self: &Arc<Self>,
         task: String,
         label: Option<String>,
@@ -87,13 +115,12 @@ impl SubagentManager {
             }
         });
 
-        {
-            let mut running = self.running_tasks.lock().await;
-            running.insert(task_id, handle);
-        }
+        self.running_tasks.insert(task_id, handle);
         if let Some(session) = session_key {
-            let mut sessions = self.session_tasks.lock().await;
-            sessions.entry(session).or_default().insert(task_id);
+            self.session_tasks
+                .entry(session)
+                .or_insert_with(DashMap::new)
+                .insert(task_id, ());
         }
 
         info!(
@@ -108,23 +135,17 @@ impl SubagentManager {
         )
     }
 
-    pub async fn cancel_by_session(&self, session_key: &str) -> usize {
-        let ids = {
-            let mut sessions = self.session_tasks.lock().await;
-            sessions
-                .remove(session_key)
-                .map(|set| set.into_iter().collect::<Vec<_>>())
-                .unwrap_or_default()
+    async fn cancel_by_session(&self, session_key: &str) -> usize {
+        // Remove all task IDs for this session
+        let ids = if let Some((_, tasks)) = self.session_tasks.remove(session_key) {
+            tasks.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        } else {
+            return 0;
         };
 
-        if ids.is_empty() {
-            return 0;
-        }
-
         let mut cancelled = 0usize;
-        let mut running = self.running_tasks.lock().await;
         for id in ids {
-            if let Some(handle) = running.remove(&id) {
+            if let Some((_, handle)) = self.running_tasks.remove(&id) {
                 if !handle.is_finished() {
                     handle.abort();
                     cancelled += 1;
@@ -136,13 +157,13 @@ impl SubagentManager {
     }
 
     async fn cleanup_task(&self, task_id: &TaskId, session_key: Option<&str>) {
-        self.running_tasks.lock().await.remove(task_id);
+        self.running_tasks.remove(task_id);
         if let Some(session_key) = session_key {
-            let mut sessions = self.session_tasks.lock().await;
-            if let Some(ids) = sessions.get_mut(session_key) {
-                ids.remove(task_id);
-                if ids.is_empty() {
-                    sessions.remove(session_key);
+            if let Some(tasks) = self.session_tasks.get(session_key) {
+                tasks.remove(task_id);
+                if tasks.is_empty() {
+                    drop(tasks); // Release the reference before removing
+                    self.session_tasks.remove(session_key);
                 }
             }
         }
@@ -173,9 +194,9 @@ impl SubagentManager {
         let outcome = run_subagent_loop_impl(
             task,
             &tool_context,
-            &self.provider,
+            self.provider.as_ref(),
             &self.workspace,
-            &self.tools,
+            self.tools.as_ref(),
             &self.model,
             self.temperature,
             self.max_tokens,
@@ -224,9 +245,8 @@ impl SubagentManager {
 /// This allows SubagentManager to be used as a SpawnService without
 /// creating a circular dependency with ToolRegistry.
 ///
-/// Note: Since SpawnService trait methods receive &self but SubagentManager::spawn
-/// requires &Arc<Self>, we need to wrap self in an Arc. This is safe because
-/// SubagentManager is always used behind an Arc in practice.
+/// The trait implementation delegates to the internal Arc-based implementation,
+/// ensuring consistent behavior and proper resource cleanup.
 #[async_trait]
 impl SpawnService for SubagentManager {
     async fn spawn(
@@ -237,103 +257,13 @@ impl SpawnService for SubagentManager {
         origin_chat_id: String,
         session_key: Option<String>,
     ) -> String {
-        let task_id = TaskId::new();
-        let display_label = label.unwrap_or_else(|| truncate(&task, 30));
-
-        // Clone the Arc fields we need for the spawned task
-        let provider = self.provider.clone();
-        let workspace = self.workspace.clone();
-        let bus = self.bus.clone();
-        let tools = self.tools.clone();
-        let model = self.model.clone();
-        let temperature = self.temperature;
-        let max_tokens = self.max_tokens;
-        let reasoning_effort = self.reasoning_effort.clone();
-
-        let handle = tokio::spawn({
-            let display_label = display_label.clone();
-            let task = task.clone();
-
-            async move {
-                let tool_context = ToolContext {
-                    channel: origin_channel.clone(),
-                    chat_id: origin_chat_id.clone(),
-                    session_key: format!("{}:{}", origin_channel, origin_chat_id),
-                    message_id: None,
-                };
-
-                let outcome = run_subagent_loop_impl(
-                    &task,
-                    &tool_context,
-                    &provider,
-                    &workspace,
-                    &tools,
-                    &model,
-                    temperature,
-                    max_tokens,
-                    reasoning_effort.as_deref(),
-                )
-                .await;
-
-                match outcome {
-                    Ok(result) => {
-                        info!(target: TARGET_SUBAGENT, "subagent [{}] completed", task_id);
-                        announce_result_impl(
-                            &task_id.to_string(),
-                            &display_label,
-                            &task,
-                            &result,
-                            &origin_channel,
-                            &origin_chat_id,
-                            "ok",
-                            &bus,
-                        );
-                    }
-                    Err(err) => {
-                        error!(
-                            target: TARGET_SUBAGENT,
-                            "subagent [{}] failed: {}",
-                            task_id,
-                            err
-                        );
-                        announce_result_impl(
-                            &task_id.to_string(),
-                            &display_label,
-                            &task,
-                            &format!("Error: {}", err),
-                            &origin_channel,
-                            &origin_chat_id,
-                            "error",
-                            &bus,
-                        );
-                    }
-                }
-            }
-        });
-
-        {
-            let mut running = self.running_tasks.lock().await;
-            running.insert(task_id, handle);
-        }
-        if let Some(session) = session_key {
-            let mut sessions = self.session_tasks.lock().await;
-            sessions.entry(session).or_default().insert(task_id);
-        }
-
-        info!(
-            target: TARGET_SUBAGENT,
-            "spawned subagent [{}]: {}",
-            task_id,
-            display_label
-        );
-        format!(
-            "Subagent [{}] started (id: {}). I'll notify you when it completes.",
-            display_label, task_id
-        )
+        self.inner
+            .spawn_impl(task, label, origin_channel, origin_chat_id, session_key)
+            .await
     }
 
     async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
-        Ok(self.cancel_by_session(session_key).await)
+        Ok(self.inner.cancel_by_session(session_key).await)
     }
 }
 
@@ -367,9 +297,9 @@ fn strip_think(text: Option<&str>) -> Option<String> {
 async fn run_subagent_loop_impl(
     task: &str,
     tool_context: &ToolContext,
-    provider: &Arc<dyn LLMProvider>,
+    provider: &dyn LLMProvider,
     workspace: &std::path::Path,
-    tools: &Arc<ToolRegistry>,
+    tools: &ToolRegistry,
     model: &str,
     temperature: f32,
     max_tokens: i32,
@@ -386,7 +316,7 @@ async fn run_subagent_loop_impl(
         workspace.display(),
     )];
 
-    let skills = SkillsLoader::new(workspace).build_skills_summary();
+    let skills = SkillsLoader::new(workspace).build_skills_summary().await;
     if !skills.trim().is_empty() {
         parts.push(format!(
             "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{}",
@@ -472,7 +402,7 @@ fn announce_result_impl(
     origin_channel: &str,
     origin_chat_id: &str,
     status: &str,
-    bus: &Arc<MessageBus>,
+    bus: &MessageBus,
 ) {
     let status_text = if status == "ok" {
         "completed successfully"
@@ -512,6 +442,7 @@ mod tests {
     use crate::provider::{ChatRequest, LLMResponse, UsageStats};
     use async_trait::async_trait;
 
+    #[derive(Debug)]
     struct MockProvider {
         response: String,
     }
@@ -570,7 +501,7 @@ mod tests {
         let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let tools = Arc::new(ToolRegistry::new(
             workspace.clone(),
             false,
@@ -611,6 +542,7 @@ mod tests {
         use tokio::time::Duration;
 
         // Create a provider that delays to ensure task is still running
+        #[derive(Debug)]
         struct SlowProvider;
 
         #[async_trait]
@@ -636,7 +568,7 @@ mod tests {
         let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let bus = Arc::new(MessageBus::new());
+        let bus = MessageBus::new();
         let tools = Arc::new(ToolRegistry::new(
             workspace.clone(),
             false,

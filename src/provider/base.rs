@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use async_trait::async_trait;
 
 use crate::tools::base::ToolDefinition;
@@ -15,6 +17,7 @@ pub struct ChatRequest {
 
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
-    async fn chat(&self, req: ChatRequest) -> LLMResponse;
     fn default_model(&self) -> &str;
+
+    async fn chat(&self, req: ChatRequest) -> LLMResponse;
 }

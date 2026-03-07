@@ -9,6 +9,8 @@ use crate::types::provider::{
     AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole,
 };
 
+// TODO: design a cache for context
+#[derive(Debug, Clone)]
 pub struct ContextBuilder {
     workspace: PathBuf,
     memory: MemoryStore,
@@ -65,7 +67,7 @@ impl ContextBuilder {
     pub async fn build_system_prompt(&self) -> String {
         let mut parts = vec![self.identity_section()];
 
-        let bootstrap = self.load_bootstrap_files();
+        let bootstrap = self.load_bootstrap_files().await;
         if !bootstrap.trim().is_empty() {
             parts.push(bootstrap);
         }
@@ -75,15 +77,15 @@ impl ContextBuilder {
             parts.push(format!("# Memory\n\n{}", memory));
         }
 
-        let always = self.skills.get_always_skills();
+        let always = self.skills.get_always_skills().await;
         if !always.is_empty() {
-            let content = self.skills.load_skills_for_context(&always);
+            let content = self.skills.load_skills_for_context(&always).await;
             if !content.trim().is_empty() {
                 parts.push(format!("# Active Skills\n\n{}", content));
             }
         }
 
-        let summary = self.skills.build_skills_summary();
+        let summary = self.skills.build_skills_summary().await;
         if !summary.trim().is_empty() {
             parts.push(format!(
                 "# Skills\n\nThe following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.\nSkills with available=\"false\" need dependencies installed first - you can try installing them with apt/brew.\n\n{}",
@@ -114,7 +116,7 @@ impl ContextBuilder {
     /// Returns a vector of chat messages ready for the LLM API.
     pub async fn build_messages(
         &self,
-        history: Vec<ChatMessage>,
+        history: impl IntoIterator<Item = ChatMessage>,
         current_message: &str,
         media: Option<&[String]>,
         channel: Option<&str>,
@@ -231,11 +233,11 @@ impl ContextBuilder {
         )
     }
 
-    fn load_bootstrap_files(&self) -> String {
+    async fn load_bootstrap_files(&self) -> String {
         let mut parts = Vec::new();
         for file in Self::BOOTSTRAP_FILES {
             let path = self.workspace.join(file);
-            if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 parts.push(format!("## {}\n\n{}", file, content));
             }
         }
@@ -309,15 +311,15 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn load_bootstrap_files_reads_existing_files() {
+    #[tokio::test]
+    async fn load_bootstrap_files_reads_existing_files() {
         let workspace = temp_workspace("bootstrap");
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::write(workspace.join("SOUL.md"), "# Soul\n\nBe helpful").expect("write soul");
         fs::write(workspace.join("USER.md"), "# User\n\nName: Alice").expect("write user");
 
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
-        let bootstrap = builder.load_bootstrap_files();
+        let bootstrap = builder.load_bootstrap_files().await;
 
         assert!(bootstrap.contains("SOUL.md"));
         assert!(bootstrap.contains("Be helpful"));
@@ -327,13 +329,13 @@ mod tests {
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn load_bootstrap_files_skips_missing_files() {
+    #[tokio::test]
+    async fn load_bootstrap_files_skips_missing_files() {
         let workspace = temp_workspace("bootstrap-missing");
         fs::create_dir_all(&workspace).expect("create workspace");
 
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
-        let bootstrap = builder.load_bootstrap_files();
+        let bootstrap = builder.load_bootstrap_files().await;
 
         // Should not fail, just return empty or partial content
         assert!(!bootstrap.contains("SOUL.md") || bootstrap.is_empty());

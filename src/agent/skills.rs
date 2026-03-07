@@ -1,8 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
-
-use walkdir::WalkDir;
 
 use crate::types::agent::{SkillMeta, SkillMetaNode};
 
@@ -13,6 +10,7 @@ pub struct SkillInfo {
     pub source: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct SkillsLoader {
     workspace_skills: PathBuf,
 }
@@ -24,22 +22,27 @@ impl SkillsLoader {
         }
     }
 
-    pub fn list_skills(&self, filter_unavailable: bool) -> Vec<SkillInfo> {
+    pub async fn list_skills(&self, filter_unavailable: bool) -> Vec<SkillInfo> {
         let mut skills = Vec::new();
 
-        if self.workspace_skills.exists() {
-            for entry in WalkDir::new(&self.workspace_skills)
-                .min_depth(1)
-                .max_depth(1)
-                .into_iter()
-                .flatten()
-            {
+        if tokio::fs::try_exists(&self.workspace_skills)
+            .await
+            .unwrap_or(false)
+        {
+            let mut entries = match tokio::fs::read_dir(&self.workspace_skills).await {
+                Ok(entries) => entries,
+                Err(_) => return Vec::new(),
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
                 let dir = entry.path();
-                if !dir.is_dir() {
+                let is_dir = entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false);
+                if !is_dir {
                     continue;
                 }
+
                 let file = dir.join("SKILL.md");
-                if file.exists() {
+                if tokio::fs::try_exists(&file).await.unwrap_or(false) {
                     let name = dir
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -55,52 +58,61 @@ impl SkillsLoader {
         }
 
         if filter_unavailable {
-            skills
-                .into_iter()
-                .filter(|s| self.check_requirements(&self.get_skill_meta(&s.name)))
-                .collect()
+            let mut filtered = Vec::new();
+            for skill in skills {
+                let meta = self.get_skill_meta(&skill.name).await;
+                if self.check_requirements(&meta) {
+                    filtered.push(skill);
+                }
+            }
+            filtered
         } else {
             skills
         }
     }
 
-    pub fn load_skill(&self, name: &str) -> Option<String> {
+    pub async fn load_skill(&self, name: &str) -> Option<String> {
         let workspace = self.workspace_skills.join(name).join("SKILL.md");
-        if workspace.exists() {
-            return fs::read_to_string(workspace).ok();
+        if tokio::fs::try_exists(&workspace).await.unwrap_or(false) {
+            return tokio::fs::read_to_string(workspace).await.ok();
         }
 
         None
     }
 
-    pub fn get_always_skills(&self) -> Vec<String> {
-        self.list_skills(true)
-            .into_iter()
-            .filter_map(|s| {
-                let frontmatter = self.get_skill_metadata(&s.name)?;
-                let skill_meta = self.parse_skill_meta(
-                    frontmatter
-                        .get("metadata")
-                        .map(|s| s.as_str())
-                        .unwrap_or(""),
-                );
-                let always = if skill_meta.always {
-                    true
-                } else {
-                    frontmatter
-                        .get("always")
-                        .map(|v| v == "true")
-                        .unwrap_or(false)
-                };
-                if always { Some(s.name) } else { None }
-            })
-            .collect()
+    pub async fn get_always_skills(&self) -> Vec<String> {
+        let mut always_skills = Vec::new();
+
+        for skill in self.list_skills(true).await {
+            let Some(frontmatter) = self.get_skill_metadata(&skill.name).await else {
+                continue;
+            };
+            let skill_meta = self.parse_skill_meta(
+                frontmatter
+                    .get("metadata")
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
+            );
+            let always = if skill_meta.always {
+                true
+            } else {
+                frontmatter
+                    .get("always")
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+            };
+            if always {
+                always_skills.push(skill.name);
+            }
+        }
+
+        always_skills
     }
 
-    pub fn load_skills_for_context(&self, skill_names: &[String]) -> String {
+    pub async fn load_skills_for_context(&self, skill_names: &[String]) -> String {
         let mut parts = Vec::new();
         for name in skill_names {
-            if let Some(content) = self.load_skill(name) {
+            if let Some(content) = self.load_skill(name).await {
                 parts.push(format!(
                     "### Skill: {}\n\n{}",
                     name,
@@ -111,8 +123,8 @@ impl SkillsLoader {
         parts.join("\n\n---\n\n")
     }
 
-    pub fn build_skills_summary(&self) -> String {
-        let all = self.list_skills(false);
+    pub async fn build_skills_summary(&self) -> String {
+        let all = self.list_skills(false).await;
         if all.is_empty() {
             return String::new();
         }
@@ -121,9 +133,10 @@ impl SkillsLoader {
         for skill in all {
             let desc = self
                 .get_skill_metadata(&skill.name)
+                .await
                 .and_then(|m| m.get("description").cloned())
                 .unwrap_or_else(|| skill.name.clone());
-            let meta = self.get_skill_meta(&skill.name);
+            let meta = self.get_skill_meta(&skill.name).await;
             let available = self.check_requirements(&meta);
 
             lines.push(format!(
@@ -156,8 +169,8 @@ impl SkillsLoader {
         lines.join("\n")
     }
 
-    fn get_skill_meta(&self, name: &str) -> SkillMeta {
-        let frontmatter = self.get_skill_metadata(name);
+    async fn get_skill_meta(&self, name: &str) -> SkillMeta {
+        let frontmatter = self.get_skill_metadata(name).await;
         let raw = frontmatter
             .and_then(|m| m.get("metadata").cloned())
             .unwrap_or_default();
@@ -203,8 +216,8 @@ impl SkillsLoader {
         missing
     }
 
-    fn get_skill_metadata(&self, name: &str) -> Option<HashMap<String, String>> {
-        let content = self.load_skill(name)?;
+    async fn get_skill_metadata(&self, name: &str) -> Option<HashMap<String, String>> {
+        let content = self.load_skill(name).await?;
         parse_frontmatter(&content)
     }
 }
@@ -317,13 +330,13 @@ Content here"#;
         assert_eq!(xml_escape("a<b&c>d"), "a&lt;b&amp;c&gt;d");
     }
 
-    #[test]
-    fn list_skills_finds_workspace_skills() {
+    #[tokio::test]
+    async fn list_skills_finds_workspace_skills() {
         let workspace = temp_workspace("list");
         create_skill(&workspace, "test-skill", "# Test");
 
         let loader = SkillsLoader::new(&workspace);
-        let skills = loader.list_skills(false);
+        let skills = loader.list_skills(false).await;
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "test-skill");
@@ -332,13 +345,13 @@ Content here"#;
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn list_skills_only_returns_workspace_sources() {
+    #[tokio::test]
+    async fn list_skills_only_returns_workspace_sources() {
         let workspace = temp_workspace("workspace-only");
         create_skill(&workspace, "common-skill", "# Workspace version");
 
         let loader = SkillsLoader::new(&workspace);
-        let skills = loader.list_skills(false);
+        let skills = loader.list_skills(false).await;
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "common-skill");
@@ -347,13 +360,13 @@ Content here"#;
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn load_skill_returns_content() {
+    #[tokio::test]
+    async fn load_skill_returns_content() {
         let workspace = temp_workspace("load");
         create_skill(&workspace, "my-skill", "# My Skill\n\nContent here");
 
         let loader = SkillsLoader::new(&workspace);
-        let content = loader.load_skill("my-skill").expect("load");
+        let content = loader.load_skill("my-skill").await.expect("load");
 
         assert!(content.contains("My Skill"));
         assert!(content.contains("Content here"));
@@ -361,19 +374,19 @@ Content here"#;
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn load_skill_returns_none_for_missing() {
+    #[tokio::test]
+    async fn load_skill_returns_none_for_missing() {
         let workspace = temp_workspace("missing");
         fs::create_dir_all(&workspace).expect("create workspace");
 
         let loader = SkillsLoader::new(&workspace);
-        assert!(loader.load_skill("nonexistent").is_none());
+        assert!(loader.load_skill("nonexistent").await.is_none());
 
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn get_always_skills_filters_by_metadata() {
+    #[tokio::test]
+    async fn get_always_skills_filters_by_metadata() {
         let workspace = temp_workspace("always");
         create_skill(
             &workspace,
@@ -386,7 +399,7 @@ always: true
         create_skill(&workspace, "manual", "# Manual skill");
 
         let loader = SkillsLoader::new(&workspace);
-        let always = loader.get_always_skills();
+        let always = loader.get_always_skills().await;
 
         assert!(always.contains(&"always-on".to_string()));
         assert!(!always.contains(&"manual".to_string()));
@@ -394,14 +407,16 @@ always: true
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn load_skills_for_context_combines_multiple() {
+    #[tokio::test]
+    async fn load_skills_for_context_combines_multiple() {
         let workspace = temp_workspace("context");
         create_skill(&workspace, "skill1", "# Skill 1");
         create_skill(&workspace, "skill2", "# Skill 2");
 
         let loader = SkillsLoader::new(&workspace);
-        let context = loader.load_skills_for_context(&["skill1".to_string(), "skill2".to_string()]);
+        let context = loader
+            .load_skills_for_context(&["skill1".to_string(), "skill2".to_string()])
+            .await;
 
         assert!(context.contains("Skill: skill1"));
         assert!(context.contains("Skill: skill2"));
@@ -410,8 +425,8 @@ always: true
         let _ = fs::remove_dir_all(workspace);
     }
 
-    #[test]
-    fn build_skills_summary_generates_xml() {
+    #[tokio::test]
+    async fn build_skills_summary_generates_xml() {
         let workspace = temp_workspace("summary");
         create_skill(
             &workspace,
@@ -423,7 +438,7 @@ description: A test skill
         );
 
         let loader = SkillsLoader::new(&workspace);
-        let summary = loader.build_skills_summary();
+        let summary = loader.build_skills_summary().await;
 
         assert!(summary.contains("<skills>"));
         assert!(summary.contains("<name>test-skill</name>"));

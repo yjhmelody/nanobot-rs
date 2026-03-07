@@ -21,7 +21,7 @@ pub struct ToolRegistryBuilder {
     restrict_to_workspace: bool,
     exec_config: ExecToolConfig,
     web_config: WebToolsConfig,
-    bus: Option<Arc<MessageBus>>,
+    bus: Option<MessageBus>,
     spawn_service: Option<Arc<dyn SpawnService>>,
     cron_service: Option<Arc<CronService>>,
     custom_tools: Vec<Arc<dyn Tool>>,
@@ -61,7 +61,7 @@ impl ToolRegistryBuilder {
     }
 
     /// Sets the message bus for the message tool.
-    pub fn with_bus(mut self, bus: Arc<MessageBus>) -> Self {
+    pub fn with_bus(mut self, bus: MessageBus) -> Self {
         self.bus = Some(bus);
         self
     }

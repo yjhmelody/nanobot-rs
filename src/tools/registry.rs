@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::agent::{SpawnService, SubagentManager};
+use crate::agent::SpawnService;
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, WebToolsConfig};
 use crate::cron::CronService;
@@ -32,7 +32,7 @@ impl ToolRegistry {
         restrict_to_workspace: bool,
         exec_config: ExecToolConfig,
         web_config: WebToolsConfig,
-        bus: Option<Arc<MessageBus>>,
+        bus: Option<MessageBus>,
         spawn_service: Option<Arc<dyn SpawnService>>,
         cron_service: Option<Arc<CronService>>,
     ) -> Self {
@@ -108,21 +108,6 @@ impl ToolRegistry {
             return;
         }
         self.tools.write().remove(name);
-    }
-
-    /// Sets the spawn service after initial construction.
-    ///
-    /// This is used to break the circular dependency between ToolRegistry and SubagentManager.
-    ///
-    /// # Deprecated
-    ///
-    /// This method is deprecated. Use the constructor parameter instead.
-    #[deprecated(note = "Use constructor parameter spawn_service instead")]
-    pub fn set_spawn_manager(&self, manager: Arc<SubagentManager>) {
-        let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(manager));
-        self.tools
-            .write()
-            .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
     /// Sets the spawn service after initial construction.
