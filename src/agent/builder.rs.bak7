@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 
 use crate::agent::{AgentLoop, ContextBuilder, SubagentManager};
 use crate::bus::MessageBus;
@@ -191,16 +191,6 @@ impl AgentLoopBuilder {
             self.config.max_tokens,
             self.config.reasoning_effort.clone(),
         ));
-
-
-        // Register ACP tool if configured
-        if let Some(acp_config) = &self.acp_config {
-            if acp_config.enabled {
-                let acp_tool = Arc::new(ACPTool::new(acp_config.clone()));
-                tools.register_dynamic_tool(acp_tool)
-                    .context("Failed to register ACP tool")?;
-            }
-        }
 
         // Set the spawn service in ToolRegistry (SubagentManager implements SpawnService)
         tools.set_spawn_service(subagent_manager);

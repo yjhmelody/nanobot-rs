@@ -27,7 +27,6 @@ impl Default for Config {
             providers: ProvidersConfig::default(),
             gateway: GatewayConfig::default(),
             tools: ToolsConfig::default(),
-            acp: None,
         }
     }
 }

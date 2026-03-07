@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 
 use crate::agent::{AgentLoop, ContextBuilder, SubagentManager};
 use crate::bus::MessageBus;
