@@ -419,7 +419,7 @@ fn announce_result_impl(
         channel: "system".to_string(),
         sender_id: "subagent".to_string(),
         chat_id: format!("{}:{}", origin_channel, origin_chat_id),
-        content,
+        content: content.into(),
         timestamp: chrono::Utc::now(),
         media: Vec::new(),
         metadata: MessageMetadata::default(),

@@ -230,7 +230,7 @@ async fn gateway(args: GatewayArgs) -> Result<()> {
                 channel: "cli".to_string(),
                 sender_id: "user".to_string(),
                 chat_id: "gateway".to_string(),
-                content: input,
+                content: input.into(),
                 timestamp: chrono::Utc::now(),
                 media: Vec::new(),
                 metadata: MessageMetadata::default(),

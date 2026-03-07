@@ -121,23 +121,6 @@ impl ToolRegistry {
             .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
-    /// Sets the runtime context for all tools.
-    ///
-    /// This propagates context information (channel, chat_id, session_key, message_id)
-    /// to all stateful tools that need it for execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - Runtime context containing channel and session information
-    ///
-    /// # Deprecated
-    ///
-    /// This method is deprecated. Context is now passed directly to execute().
-    #[deprecated(note = "Context is now passed directly to execute()")]
-    pub async fn set_context(&self, _ctx: ToolContext) {
-        // No-op: context is now passed to execute()
-    }
-
     pub async fn start_turn(&self) {
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {

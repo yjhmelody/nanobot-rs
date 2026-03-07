@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -10,7 +10,7 @@ use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
 use crate::agent::ContextBuilder;
-use crate::bus::{InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
+use crate::bus::{InboundCommand, InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
 use crate::config::schema::ChannelsConfig;
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
@@ -91,7 +91,7 @@ impl AgentLoop {
                 break;
             }
 
-            if msg.content.trim().eq_ignore_ascii_case("/stop") {
+            if msg.command() == Some(InboundCommand::Stop) {
                 self.handle_stop(msg).await;
                 continue;
             }
@@ -119,7 +119,7 @@ impl AgentLoop {
             channel: "system".to_string(),
             sender_id: "system".to_string(),
             chat_id: "cli:direct".to_string(),
-            content: "__nanobot_stop__".to_string(),
+            content: "__nanobot_stop__".into(),
             timestamp: chrono::Utc::now(),
             media: Vec::new(),
             metadata: MessageMetadata::default(),
@@ -150,7 +150,7 @@ impl AgentLoop {
             channel: channel.to_string(),
             sender_id: "user".to_string(),
             chat_id: chat_id.to_string(),
-            content: content.to_string(),
+            content: content.into(),
             timestamp: chrono::Utc::now(),
             media: Vec::new(),
             metadata: MessageMetadata::default(),
@@ -301,51 +301,12 @@ impl AgentLoop {
             return self.process_system_message(msg).await;
         }
 
-        let cmd = msg.content.trim().to_lowercase();
-        if cmd == "/help" {
-            return Ok(Some(OutboundMessage {
-                channel: msg.channel,
-                chat_id: msg.chat_id,
-                content: "🐈 nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/help - Show available commands".to_string(),
-                reply_to: None,
-                media: Vec::new(),
-                metadata: MessageMetadata::default(),
-            }));
+        if let Some(command) = msg.command() {
+            return self.process_builtin_command(msg, command).await;
         }
 
         let session_key = msg.session_key();
         let mut session = self.sessions.get_or_create(&session_key).await?;
-
-        if cmd == "/stop" {
-            let cancelled = self.tools.cancel_spawn_by_session(&session_key).await;
-            let content = if cancelled > 0 {
-                format!("⏹ Stopped {} task(s).", cancelled)
-            } else {
-                "No active task to stop.".to_string()
-            };
-            return Ok(Some(OutboundMessage {
-                channel: msg.channel,
-                chat_id: msg.chat_id,
-                content,
-                reply_to: None,
-                media: Vec::new(),
-                metadata: MessageMetadata::default(),
-            }));
-        }
-
-        if cmd == "/new" {
-            session.clear();
-            self.sessions.save(&session).await?;
-            self.sessions.invalidate(&session.key).await;
-            return Ok(Some(OutboundMessage {
-                channel: msg.channel,
-                chat_id: msg.chat_id,
-                content: "New session started.".to_string(),
-                reply_to: None,
-                media: Vec::new(),
-                metadata: MessageMetadata::default(),
-            }));
-        }
 
         // Build tool context once and reuse
         let tool_context = ToolContext {
@@ -363,7 +324,7 @@ impl AgentLoop {
             .context
             .build_messages(
                 history,
-                &msg.content,
+                msg.content_text(),
                 if msg.media.is_empty() {
                     None
                 } else {
@@ -396,6 +357,54 @@ impl AgentLoop {
         }))
     }
 
+    async fn process_builtin_command(
+        &self,
+        msg: InboundMessage,
+        command: InboundCommand,
+    ) -> Result<Option<OutboundMessage>> {
+        match command {
+            InboundCommand::Help => Ok(Some(OutboundMessage {
+                channel: msg.channel,
+                chat_id: msg.chat_id,
+                content: "🐈 nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/help - Show available commands".to_string(),
+                reply_to: None,
+                media: Vec::new(),
+                metadata: MessageMetadata::default(),
+            })),
+            InboundCommand::Stop => {
+                let cancelled = self.tools.cancel_spawn_by_session(&msg.session_key()).await;
+                let content = if cancelled > 0 {
+                    format!("⏹ Stopped {} task(s).", cancelled)
+                } else {
+                    "No active task to stop.".to_string()
+                };
+                Ok(Some(OutboundMessage {
+                    channel: msg.channel,
+                    chat_id: msg.chat_id,
+                    content,
+                    reply_to: None,
+                    media: Vec::new(),
+                    metadata: MessageMetadata::default(),
+                }))
+            }
+            InboundCommand::New => {
+                let session_key = msg.session_key();
+                let mut session = self.sessions.get_or_create(&session_key).await?;
+                session.clear();
+                self.sessions.save(&session).await?;
+                self.sessions.invalidate(&session.key).await;
+                Ok(Some(OutboundMessage {
+                    channel: msg.channel,
+                    chat_id: msg.chat_id,
+                    content: "New session started.".to_string(),
+                    reply_to: None,
+                    media: Vec::new(),
+                    metadata: MessageMetadata::default(),
+                }))
+            }
+        }
+    }
+
     async fn process_system_message(&self, msg: InboundMessage) -> Result<Option<OutboundMessage>> {
         let (channel, chat_id) = if let Some((c, id)) = msg.chat_id.split_once(':') {
             (c.to_string(), id.to_string())
@@ -420,7 +429,13 @@ impl AgentLoop {
         let history_len = history.len();
         let messages = self
             .context
-            .build_messages(history, &msg.content, None, Some(&channel), Some(&chat_id))
+            .build_messages(
+                history,
+                msg.content_text(),
+                None,
+                Some(&channel),
+                Some(&chat_id),
+            )
             .await;
 
         let start_index = messages.len() - 1 - history_len;

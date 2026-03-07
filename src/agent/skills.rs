@@ -36,7 +36,11 @@ impl SkillsLoader {
 
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let dir = entry.path();
-                let is_dir = entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false);
+                let is_dir = entry
+                    .file_type()
+                    .await
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or(false);
                 if !is_dir {
                     continue;
                 }

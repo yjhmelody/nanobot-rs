@@ -26,7 +26,7 @@ use crate::bus::events::{InboundMessage, OutboundMessage};
 ///     channel: "cli".to_string(),
 ///     sender_id: "user".to_string(),
 ///     chat_id: "direct".to_string(),
-///     content: "hello".to_string(),
+///     content: "hello".into(),
 ///     timestamp: Utc::now(),
 ///     media: vec![],
 ///     metadata: MessageMetadata::default(),
@@ -160,7 +160,7 @@ mod tests {
             channel: "cli".to_string(),
             sender_id: "user".to_string(),
             chat_id: "direct".to_string(),
-            content: "hello".to_string(),
+            content: "hello".into(),
             timestamp: Utc::now(),
             media: vec![],
             metadata: MessageMetadata::default(),
@@ -171,7 +171,7 @@ mod tests {
         let received = rx.recv().await.expect("receive");
 
         assert_eq!(received.channel, "cli");
-        assert_eq!(received.content, "hello");
+        assert_eq!(received.content_text(), "hello");
     }
 
     #[tokio::test]
@@ -187,7 +187,7 @@ mod tests {
             channel: "telegram".to_string(),
             sender_id: "user123".to_string(),
             chat_id: "chat456".to_string(),
-            content: "broadcast test".to_string(),
+            content: "broadcast test".into(),
             timestamp: Utc::now(),
             media: vec![],
             metadata: MessageMetadata::default(),
@@ -200,9 +200,9 @@ mod tests {
         let r2 = rx2.recv().await.expect("rx2 receive");
         let r3 = rx3.recv().await.expect("rx3 receive");
 
-        assert_eq!(r1.content, "broadcast test");
-        assert_eq!(r2.content, "broadcast test");
-        assert_eq!(r3.content, "broadcast test");
+        assert_eq!(r1.content_text(), "broadcast test");
+        assert_eq!(r2.content_text(), "broadcast test");
+        assert_eq!(r3.content_text(), "broadcast test");
     }
 
     #[tokio::test]
@@ -234,7 +234,7 @@ mod tests {
             channel: "cli".to_string(),
             sender_id: "user".to_string(),
             chat_id: "direct".to_string(),
-            content: "hello".to_string(),
+            content: "hello".into(),
             timestamp: Utc::now(),
             media: vec![],
             metadata: MessageMetadata::default(),
@@ -269,7 +269,7 @@ mod tests {
             channel: "cli".to_string(),
             sender_id: "user".to_string(),
             chat_id: "direct".to_string(),
-            content: "first".to_string(),
+            content: "first".into(),
             timestamp: Utc::now(),
             media: vec![],
             metadata: MessageMetadata::default(),
@@ -287,7 +287,7 @@ mod tests {
 
         // Publish second message
         let msg2 = InboundMessage {
-            content: "second".to_string(),
+            content: "second".into(),
             ..msg1
         };
         bus.publish_inbound(msg2.clone()).ok();
@@ -295,11 +295,11 @@ mod tests {
         // rx1 receives both messages
         let r1_msg1 = rx1.recv().await.expect("rx1 first");
         let r1_msg2 = rx1.recv().await.expect("rx1 second");
-        assert_eq!(r1_msg1.content, "first");
-        assert_eq!(r1_msg2.content, "second");
+        assert_eq!(r1_msg1.content_text(), "first");
+        assert_eq!(r1_msg2.content_text(), "second");
 
         // rx2 only receives second message
         let r2_msg = rx2.recv().await.expect("rx2 receive");
-        assert_eq!(r2_msg.content, "second");
+        assert_eq!(r2_msg.content_text(), "second");
     }
 }

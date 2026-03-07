@@ -138,7 +138,7 @@ impl ChannelAdapter for TelegramChannel {
                         channel: "telegram".to_string(),
                         sender_id: sender,
                         chat_id: message.chat.id.to_string(),
-                        content: text,
+                        content: text.into(),
                         timestamp: chrono::Utc::now(),
                         media: Vec::new(),
                         metadata: MessageMetadata {

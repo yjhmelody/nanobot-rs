@@ -1,1 +1,3 @@
-pub use crate::types::bus::{InboundMessage, MessageMetadata, OutboundMessage};
+pub use crate::types::bus::{
+    InboundCommand, InboundContent, InboundMessage, MessageMetadata, OutboundMessage,
+};
