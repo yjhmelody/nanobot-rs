@@ -1,10 +1,9 @@
-//! ACP (Agent Client Protocol) integration module
-//!
-//! This module provides integration with ACP agents (codex, claude, pi, gemini, opencode)
-//! as tools that can be called by the nanobot-rs agent.
+//! ACP (Agent Client Protocol) integration
 
 pub mod client;
 pub mod config;
+pub mod simple_client;
 
 pub use client::ACPClient;
 pub use config::{ACPConfig, AgentConfig};
+pub use simple_client::SimpleClient;
