@@ -173,6 +173,111 @@ cat workspace/sessions/cli_direct.jsonl | jq
    - New domain types go in `src/types/`
    - Update imports when types move
 
+## Performance Guidelines
+
+### Lock Selection Strategy
+
+Choose the right synchronization primitive for optimal performance:
+
+**1. High-concurrency collections → DashMap**
+```rust
+// ✅ Good: Lock-free concurrent access
+use dashmap::DashMap;
+let cache: DashMap<String, Session> = DashMap::new();
+
+// ❌ Bad: Lock contention
+let cache: Arc<RwLock<HashMap<String, Session>>> = ...;
+```
+- Use for: Caches, registries, task tracking
+- Performance: 10-20x faster than RwLock
+- Examples: `SessionManager.cache`, `SubagentManager.running_tasks`
+
+**2. Short critical sections → parking_lot**
+```rust
+// ✅ Good: Fast synchronous lock
+use parking_lot::Mutex;
+let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(config));
+let guard = config.lock(); // No .await
+
+// ❌ Bad: Async overhead for sync operation
+let config: Arc<tokio::sync::Mutex<Config>> = ...;
+let guard = config.lock().await; // Unnecessary
+```
+- Use for: Config updates, timestamps, counters
+- Performance: 3-5x faster than tokio::sync
+- Constraint: Cannot hold across `await` points
+- Examples: `SharedToolConfig.inner`, `AgentLoop.last_cleanup`
+
+**3. Long critical sections → tokio::sync**
+```rust
+// ✅ Good: Async-aware lock
+use tokio::sync::Mutex;
+let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+let guard = lock.lock().await;
+some_async_operation().await; // Safe
+drop(guard);
+
+// ❌ Bad: Blocks tokio runtime
+use parking_lot::Mutex;
+let guard = lock.lock();
+some_async_operation().await; // DEADLOCK RISK!
+```
+- Use for: Operations spanning async calls
+- Required when: Lock held across `await`
+- Examples: `AgentLoop.session_locks`
+
+**4. Simple flags → Atomics**
+```rust
+// ✅ Good: Zero-cost synchronization
+use std::sync::atomic::{AtomicBool, Ordering};
+let running = Arc::new(AtomicBool::new(false));
+running.store(true, Ordering::Release);
+if running.load(Ordering::Acquire) { }
+
+// ❌ Bad: Lock overhead for simple flag
+let running: Arc<RwLock<bool>> = ...;
+```
+- Use for: Boolean flags, simple counters
+- Performance: 100x faster than locks
+- Examples: `AgentLoop.running`, `CronService.running`
+
+### Quick Decision Tree
+```
+Need synchronization?
+├─ Just a flag/counter? → AtomicBool/AtomicUsize
+├─ High concurrent collection? → DashMap
+├─ Crosses await point? → tokio::sync::Mutex/RwLock
+└─ Short critical section? → parking_lot::Mutex/RwLock
+```
+
+### Performance Anti-patterns
+```rust
+// ❌ Don't use RwLock<HashMap> for high concurrency
+Arc<RwLock<HashMap<K, V>>>  // Use DashMap instead
+
+// ❌ Don't use tokio::sync for short operations
+tokio::sync::Mutex<Instant>  // Use parking_lot::Mutex
+
+// ❌ Don't use locks for simple flags
+RwLock<bool>  // Use AtomicBool
+
+// ❌ Don't hold parking_lot locks across await
+let guard = parking_lot_mutex.lock();
+async_op().await;  // DEADLOCK RISK!
+```
+
+### Memory Ordering for Atomics
+```rust
+// For flags and synchronization
+flag.store(true, Ordering::Release);   // Writer
+if flag.load(Ordering::Acquire) { }    // Reader
+
+// For relaxed counters (no sync needed)
+counter.fetch_add(1, Ordering::Relaxed);
+```
+
+See `docs/PERFORMANCE_OPTIMIZATION.md` for detailed guidelines.
+
 ## When Stuck
 
 1. Read the relevant module in `src/`

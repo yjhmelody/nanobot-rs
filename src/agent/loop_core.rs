@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use regex::Regex;
-use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
@@ -43,11 +43,13 @@ pub struct AgentLoop {
     pub(crate) running: Arc<AtomicBool>,
     /// Per-session locks for concurrent message processing
     /// Using DashMap eliminates the outer RwLock, reducing lock contention
-    pub(crate) session_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// Note: Must use tokio::sync::Mutex here because locks are held across await points
+    pub(crate) session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Active tasks per session
     /// Using nested DashMap for better concurrent access
     pub(crate) active_tasks: Arc<DashMap<String, DashMap<TaskId, AbortHandle>>>,
     /// Last cleanup timestamp for periodic maintenance
+    /// Using parking_lot::Mutex for better performance (short critical section, no await)
     pub(crate) last_cleanup: Arc<Mutex<Instant>>,
 }
 
@@ -220,7 +222,7 @@ impl AgentLoop {
         let lock = self
             .session_locks
             .entry(session_key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
 
         let _guard = lock.lock().await;
@@ -267,7 +269,7 @@ impl AgentLoop {
     /// Only runs if CLEANUP_INTERVAL has elapsed since last cleanup
     async fn cleanup_session_locks_if_needed(&self) {
         let should_cleanup = {
-            let mut last = self.last_cleanup.lock().await;
+            let mut last = self.last_cleanup.lock();
             if last.elapsed() > Self::CLEANUP_INTERVAL {
                 *last = Instant::now();
                 true
@@ -919,7 +921,7 @@ mod tests {
         let session_key = "cli:direct".to_string();
         agent
             .session_locks
-            .insert(session_key.clone(), Arc::new(Mutex::new(())));
+            .insert(session_key.clone(), Arc::new(tokio::sync::Mutex::new(())));
 
         // Verify lock exists
         assert!(agent.session_locks.contains_key(&session_key));

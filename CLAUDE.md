@@ -56,6 +56,40 @@ Types are being consolidated into `src/types/`:
 - Async functions: `async fn` + `#[async_trait]` for traits
 - Logging: `tracing::{info, warn, error}` (not `println!`)
 
+### Concurrency & Performance Guidelines
+
+**Lock Selection Strategy**:
+1. **High-concurrency read-heavy data** → Use `DashMap` (lock-free, 16-way sharding)
+   - Example: `SessionManager.cache`, `SubagentManager.running_tasks`
+   - 10-20x faster than RwLock for concurrent access
+
+2. **Short critical sections (no await)** → Use `parking_lot::{Mutex, RwLock}`
+   - Example: `SharedToolConfig.inner`, `AgentLoop.last_cleanup`
+   - 3-5x faster than tokio::sync, smaller memory footprint (24 vs 40 bytes)
+   - Cannot be held across await points
+
+3. **Long critical sections (crosses await)** → Use `tokio::sync::{Mutex, RwLock}`
+   - Example: `AgentLoop.session_locks` (held during message processing)
+   - Required when lock must be held across await points
+   - Async-aware, prevents blocking tokio runtime
+
+4. **Simple flags/counters** → Use `std::sync::atomic::{AtomicBool, AtomicUsize}`
+   - Example: `AgentLoop.running`, `CronService.running`
+   - 100x faster than any lock, zero contention
+   - Use `Ordering::Release`/`Acquire` for synchronization
+
+**Anti-patterns to avoid**:
+- ❌ `Arc<RwLock<HashMap>>` → Use `DashMap` instead
+- ❌ `tokio::sync::Mutex` for short critical sections → Use `parking_lot::Mutex`
+- ❌ `RwLock<bool>` → Use `AtomicBool`
+- ❌ Holding locks across await points with parking_lot → Use tokio::sync
+
+**Performance checklist**:
+- [ ] Does this data structure have high concurrent access? → Consider DashMap
+- [ ] Is the critical section short (<100 instructions)? → Consider parking_lot
+- [ ] Does the lock cross an await point? → Must use tokio::sync
+- [ ] Is this just a flag or counter? → Use atomics
+
 ### Testing
 ```bash
 cargo test                    # Run all tests

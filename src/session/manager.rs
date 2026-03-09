@@ -1,12 +1,10 @@
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 
 pub use crate::types::session::{Session, SessionEntry, SessionSummary};
 use crate::types::session::{SessionMetadata, SessionMetadataLine};
@@ -14,7 +12,7 @@ use crate::utils::helpers::{ensure_dir, safe_filename};
 
 pub struct SessionManager {
     sessions_dir: PathBuf,
-    cache: Arc<RwLock<HashMap<String, Session>>>,
+    cache: DashMap<String, Session>,
 }
 
 impl SessionManager {
@@ -44,21 +42,18 @@ impl SessionManager {
         let sessions_dir = ensure_dir(&workspace.join("sessions"))?;
         Ok(Self {
             sessions_dir,
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: DashMap::new(),
         })
     }
 
     pub async fn get_or_create(&self, key: &str) -> Result<Session> {
-        if let Some(hit) = self.cache.read().await.get(key).cloned() {
-            return Ok(hit);
+        if let Some(hit) = self.cache.get(key) {
+            return Ok(hit.value().clone());
         }
 
         let loaded = self.load_session(key)?;
         let session = loaded.unwrap_or_else(|| Session::new(key));
-        self.cache
-            .write()
-            .await
-            .insert(key.to_string(), session.clone());
+        self.cache.insert(key.to_string(), session.clone());
         Ok(session)
     }
 
@@ -81,15 +76,12 @@ impl SessionManager {
             writeln!(file, "{}", serde_json::to_string(msg)?)?;
         }
 
-        self.cache
-            .write()
-            .await
-            .insert(session.key.clone(), session.clone());
+        self.cache.insert(session.key.clone(), session.clone());
         Ok(())
     }
 
     pub async fn invalidate(&self, key: &str) {
-        self.cache.write().await.remove(key);
+        self.cache.remove(key);
     }
 
     /// Lists all available sessions in the workspace.

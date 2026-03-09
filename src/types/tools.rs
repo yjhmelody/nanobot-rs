@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -205,6 +206,13 @@ pub(crate) struct SpawnArgs {
 pub(crate) struct ExecArgs {
     pub(crate) command: String,
     pub(crate) working_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ACPExecuteArgs {
+    pub(crate) agent_id: String,
+    pub(crate) task: String,
+    pub(crate) cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]

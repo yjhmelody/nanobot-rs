@@ -1,14 +1,31 @@
-//! ACP Client implementation
+//! ACP Client implementation based on the official Rust SDK.
 
-use anyhow::{Result, Context};
-use tokio::process::{Command, Child};
-use std::process::Stdio;
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use agent_client_protocol::{
+    Agent, ClientSideConnection, ContentBlock, Implementation, InitializeRequest,
+    NewSessionRequest, PromptRequest, ProtocolVersion, SessionId, StopReason,
+};
+use anyhow::{Context, Result, anyhow};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tracing::{info, warn};
+
+use crate::acp::simple_client::SimpleClient;
+
+const INIT_TIMEOUT: Duration = Duration::from_secs(20);
+const EXECUTE_TIMEOUT: Duration = Duration::from_secs(1_200);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct ACPClient {
     agent_id: String,
-    process: Child,
+    command_tx: mpsc::UnboundedSender<ActorCommand>,
+    actor_thread: Option<JoinHandle<()>>,
 }
 
 impl ACPClient {
@@ -18,63 +35,376 @@ impl ACPClient {
         cwd: Option<PathBuf>,
         env: HashMap<String, String>,
     ) -> Result<Self> {
-        let mut cmd = Command::new(&command);
-        
-        if let Some(cwd) = cwd {
-            cmd.current_dir(cwd);
+        let session_cwd = resolve_session_cwd(cwd)?;
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+
+        let thread_name = format!("acp-{}", sanitize_thread_label(&agent_id));
+        let actor_thread = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || run_actor_thread(command, env, session_cwd, command_rx, ready_tx))
+            .context("failed to spawn ACP actor thread")?;
+
+        let mut actor_thread = Some(actor_thread);
+        match tokio::time::timeout(INIT_TIMEOUT, ready_rx)
+            .await
+            .context("ACP client initialization timed out")?
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                join_actor_thread(actor_thread.take())
+                    .await
+                    .context("joining ACP actor thread after init failure")?;
+                return Err(err.context("ACP client initialization failed"));
+            }
+            Err(err) => {
+                join_actor_thread(actor_thread.take())
+                    .await
+                    .context("joining ACP actor thread after channel close")?;
+                return Err(anyhow!("ACP actor startup channel closed: {}", err));
+            }
         }
-        
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
-        
-        cmd.stdin(Stdio::piped())
-           .stdout(Stdio::piped())
-           .stderr(Stdio::piped());
-        
-        let process = cmd.spawn()
-            .context(format!("Failed to spawn ACP agent: {}", agent_id))?;
-        
+
         Ok(Self {
             agent_id,
-            process,
+            command_tx,
+            actor_thread,
         })
     }
-    
+
     pub async fn execute(&mut self, task: &str) -> Result<String> {
-        // MVP: 简化实现
-        // TODO: 使用官方 SDK 实现完整的 ACP 协议
-        Ok(format!(
-            "ACP agent '{}' would execute task: {}\n\
-             (Note: This is a MVP placeholder. Full ACP protocol implementation coming in Phase 2)",
-            self.agent_id, task
-        ))
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(ActorCommand::Execute {
+                task: task.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow!("ACP actor is not running for '{}'", self.agent_id))?;
+
+        match tokio::time::timeout(EXECUTE_TIMEOUT, reply_rx)
+            .await
+            .context("ACP execute request timed out")?
+        {
+            Ok(result) => result,
+            Err(err) => Err(anyhow!("ACP execute response channel closed: {}", err)),
+        }
     }
-    
+
     pub async fn close(mut self) -> Result<()> {
-        self.process.kill().await?;
+        info!("closing ACP client for '{}'", self.agent_id);
+        let mut shutdown_result = Ok(());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(ActorCommand::Shutdown { reply: reply_tx })
+            .is_ok()
+        {
+            shutdown_result = match tokio::time::timeout(CLOSE_TIMEOUT, reply_rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(err)) => Err(anyhow!("ACP shutdown channel closed: {}", err)),
+                Err(_) => Err(anyhow!("ACP shutdown timed out")),
+            };
+        }
+
+        let join_result = join_actor_thread(self.actor_thread.take()).await;
+        match (shutdown_result, join_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(err), Ok(())) => Err(err),
+            (Ok(()), Err(err)) => Err(err),
+            (Err(shutdown_err), Err(join_err)) => Err(anyhow!(
+                "ACP shutdown failed: {}; actor join failed: {}",
+                shutdown_err,
+                join_err
+            )),
+        }
+    }
+}
+
+enum ActorCommand {
+    Execute {
+        task: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+fn run_actor_thread(
+    command: String,
+    env: HashMap<String, String>,
+    session_cwd: PathBuf,
+    mut command_rx: mpsc::UnboundedReceiver<ActorCommand>,
+    ready_tx: oneshot::Sender<Result<()>>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            let _ = ready_tx.send(Err(anyhow!("failed to build ACP runtime: {}", err)));
+            return;
+        }
+    };
+
+    runtime.block_on(async move {
+        let local_set = tokio::task::LocalSet::new();
+        local_set
+            .run_until(async move {
+                let mut actor = match ACPActor::initialize(command, env, session_cwd).await {
+                    Ok(actor) => {
+                        let _ = ready_tx.send(Ok(()));
+                        actor
+                    }
+                    Err(err) => {
+                        let _ = ready_tx.send(Err(err));
+                        return;
+                    }
+                };
+
+                actor.run_loop(&mut command_rx).await;
+            })
+            .await;
+    });
+}
+
+struct ACPActor {
+    process: Child,
+    connection: ClientSideConnection,
+    session_id: SessionId,
+    client: SimpleClient,
+}
+
+impl ACPActor {
+    async fn initialize(
+        command: String,
+        env: HashMap<String, String>,
+        session_cwd: PathBuf,
+    ) -> Result<Self> {
+        let mut process_cmd = Command::new(&command);
+        process_cmd.current_dir(&session_cwd);
+        process_cmd.stdin(Stdio::piped());
+        process_cmd.stdout(Stdio::piped());
+        process_cmd.stderr(Stdio::null());
+        for (key, value) in env {
+            process_cmd.env(key, value);
+        }
+
+        let mut process = process_cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn ACP agent process '{}'", command))?;
+        let outgoing = process
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("ACP process stdin unavailable"))?;
+        let incoming = process
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("ACP process stdout unavailable"))?;
+
+        let client = SimpleClient::new(session_cwd.clone());
+        let capabilities = client.capabilities();
+
+        let (connection, io_task) = ClientSideConnection::new(
+            client.clone(),
+            outgoing.compat_write(),
+            incoming.compat(),
+            |future| {
+                tokio::task::spawn_local(future);
+            },
+        );
+
+        tokio::task::spawn_local(async move {
+            if let Err(err) = io_task.await {
+                warn!("ACP transport loop exited with error: {}", err);
+            }
+        });
+
+        let initialize_request = InitializeRequest::new(ProtocolVersion::LATEST)
+            .client_capabilities(capabilities)
+            .client_info(Implementation::new("nanobot-rs", env!("CARGO_PKG_VERSION")));
+
+        let initialize_response = connection
+            .initialize(initialize_request)
+            .await
+            .map_err(|err| anyhow!("ACP initialize failed: {}", err))?;
+        info!(
+            "ACP initialized with protocol version {}",
+            initialize_response.protocol_version
+        );
+
+        let new_session_response = connection
+            .new_session(NewSessionRequest::new(session_cwd))
+            .await
+            .map_err(|err| anyhow!("ACP new_session failed: {}", err))?;
+
+        Ok(Self {
+            process,
+            connection,
+            session_id: new_session_response.session_id,
+            client,
+        })
+    }
+
+    async fn run_loop(&mut self, command_rx: &mut mpsc::UnboundedReceiver<ActorCommand>) {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                ActorCommand::Execute { task, reply } => {
+                    let _ = reply.send(self.execute_turn(task).await);
+                }
+                ActorCommand::Shutdown { reply } => {
+                    let _ = reply.send(self.shutdown().await);
+                    return;
+                }
+            }
+        }
+
+        let _ = self.shutdown().await;
+    }
+
+    async fn execute_turn(&mut self, task: String) -> Result<String> {
+        self.client.begin_turn(&self.session_id).await;
+
+        let prompt_request =
+            PromptRequest::new(self.session_id.clone(), vec![ContentBlock::from(task)]);
+        match self.connection.prompt(prompt_request).await {
+            Ok(response) => Ok(self
+                .client
+                .take_turn_output(&self.session_id, response.stop_reason)
+                .await),
+            Err(err) => {
+                let partial = self
+                    .client
+                    .take_turn_output(&self.session_id, StopReason::Cancelled)
+                    .await;
+                let partial_output = if partial.starts_with("(ACP turn finished:") {
+                    String::new()
+                } else {
+                    partial
+                };
+
+                if partial_output.is_empty() {
+                    Err(anyhow!("ACP prompt failed: {}", err))
+                } else {
+                    Err(anyhow!(
+                        "ACP prompt failed: {}. Partial output:\n{}",
+                        err,
+                        partial_output
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        self.client.close_all_terminals().await;
+
+        if self
+            .process
+            .try_wait()
+            .context("checking ACP process status")?
+            .is_none()
+        {
+            self.process
+                .kill()
+                .await
+                .context("killing ACP process during shutdown")?;
+        }
+        let _ = self.process.wait().await;
         Ok(())
+    }
+}
+
+fn resolve_session_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
+    let cwd = if let Some(cwd) = cwd {
+        cwd
+    } else {
+        std::env::current_dir().context("reading current directory for ACP session")?
+    };
+
+    if cwd.is_absolute() {
+        Ok(cwd)
+    } else {
+        Ok(std::env::current_dir()
+            .context("reading current directory for ACP relative path")?
+            .join(cwd))
+    }
+}
+
+async fn join_actor_thread(thread: Option<JoinHandle<()>>) -> Result<()> {
+    let Some(thread) = thread else {
+        return Ok(());
+    };
+
+    tokio::task::spawn_blocking(move || {
+        thread
+            .join()
+            .map_err(|_| anyhow!("ACP actor thread panicked"))
+    })
+    .await
+    .context("waiting for ACP actor thread")?
+}
+
+fn sanitize_thread_label(agent_id: &str) -> String {
+    let sanitized = agent_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "agent".to_string()
+    } else {
+        sanitized
     }
 }
 
 #[cfg(test)]
 mod tests {
-    
-    
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn resolve_session_cwd_makes_relative_path_absolute() {
+        let path = resolve_session_cwd(Some(PathBuf::from("src"))).expect("resolve path");
+        assert!(path.is_absolute());
+        assert!(path.ends_with("src"));
+    }
+
+    #[test]
+    fn sanitize_thread_label_replaces_unsupported_chars() {
+        assert_eq!(sanitize_thread_label("codex@main"), "codex_main");
+        assert_eq!(sanitize_thread_label(""), "agent");
+    }
+
     #[tokio::test]
-    async fn test_acp_client_execute() {
-        // Mock test for MVP
-        let agent_id = "codex".to_string();
-        let task = "Create a hello world program";
-        
-        // Just verify the format
-        let result = format!(
-            "ACP agent '{}' would execute task: {}\n\
-             (Note: This is a MVP placeholder. Full ACP protocol implementation coming in Phase 2)",
-            agent_id, task
+    #[ignore = "requires local codex CLI and valid auth/session"]
+    async fn smoke_local_codex() {
+        let cwd = std::env::current_dir().expect("current dir");
+        let command = std::env::var("ACP_SMOKE_COMMAND").unwrap_or_else(|_| "codex".to_string());
+        let mut client = ACPClient::spawn(
+            "codex".to_string(),
+            command,
+            Some(cwd),
+            HashMap::new(),
+        )
+        .await
+        .expect("spawn ACP client");
+
+        let output = client
+            .execute("Reply with one short sentence that confirms ACP is working.")
+            .await
+            .expect("execute prompt");
+        assert!(
+            !output.trim().is_empty(),
+            "codex output should not be empty"
         );
-        
-        assert!(result.contains("codex"));
-        assert!(result.contains("hello world"));
+
+        client.close().await.expect("close ACP client");
     }
 }

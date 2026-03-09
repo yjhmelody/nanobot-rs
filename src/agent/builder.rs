@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 
 use crate::agent::{AgentLoop, ContextBuilder, SubagentManager};
 use crate::bus::MessageBus;
@@ -11,8 +11,8 @@ use crate::cron::CronService;
 use crate::provider::LLMProvider;
 use crate::session::SessionManager;
 use crate::tools::ToolRegistry;
-use crate::tools::mcp::MCPManager;
 use crate::tools::acp::ACPTool;
+use crate::tools::mcp::MCPManager;
 
 /// Configuration for AgentLoop that groups related parameters.
 #[derive(Debug, Clone)]
@@ -192,12 +192,12 @@ impl AgentLoopBuilder {
             self.config.reasoning_effort.clone(),
         ));
 
-
         // Register ACP tool if configured
         if let Some(acp_config) = &self.acp_config {
             if acp_config.enabled {
                 let acp_tool = Arc::new(ACPTool::new(acp_config.clone()));
-                tools.register_dynamic_tool(acp_tool)
+                tools
+                    .register_dynamic_tool(acp_tool)
                     .context("Failed to register ACP tool")?;
             }
         }
@@ -229,7 +229,7 @@ impl AgentLoopBuilder {
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_locks: Arc::new(dashmap::DashMap::new()),
             active_tasks: Arc::new(dashmap::DashMap::new()),
-            last_cleanup: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
+            last_cleanup: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
         })
     }
 }

@@ -1,20 +1,17 @@
-//! ACP Tool - Execute coding tasks using ACP agents
+//! ACP tool for delegating coding tasks to ACP agents.
 
-use std::collections::BTreeMap;
 use async_trait::async_trait;
-use serde::Deserialize;
 
 use crate::acp::client::ACPClient;
-use crate::acp::config::ACPConfig;
+use crate::acp::config::{ACPConfig, AgentConfig};
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{Tool, ToolContext, ToolDefinition, JsonSchema, JsonSchemaType};
+use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::types::tools::ACPExecuteArgs;
 
-#[derive(Debug, Deserialize)]
-struct ACPExecuteRequest {
-    agent_id: String,
-    task: String,
-    cwd: Option<String>,
-}
+const ACP_EXECUTE_TOOL_NAME: &str = "acp_execute";
+const ACP_EXECUTE_DESCRIPTION: &str = "Execute a coding task using an ACP agent. \
+Use this for complex coding tasks that require multi-file edits, refactoring, or \
+end-to-end feature implementation.";
 
 pub struct ACPTool {
     config: ACPConfig,
@@ -24,133 +21,266 @@ impl ACPTool {
     pub fn new(config: ACPConfig) -> Self {
         Self { config }
     }
+
+    fn parse_execute_args(&self, args_json: &str) -> Result<ACPExecuteArgs> {
+        parse_args::<ACPExecuteArgs>(args_json).map_err(|err| match err {
+            NanobotError::InvalidToolArgs { message, .. } => {
+                NanobotError::invalid_tool_args(self.name(), message)
+            }
+            other => other,
+        })
+    }
+
+    fn allowed_agents(&self) -> Vec<String> {
+        let mut allowed = self
+            .config
+            .allowed_agents
+            .iter()
+            .map(|agent| agent.trim())
+            .filter(|agent| !agent.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        allowed.sort_unstable();
+        allowed.dedup();
+        allowed
+    }
+
+    fn configured_agents(&self) -> Vec<String> {
+        let mut configured = self.config.agents.keys().cloned().collect::<Vec<_>>();
+        configured.sort_unstable();
+        configured
+    }
+
+    fn definition_agent_schema(&self) -> JsonSchema {
+        let allowed_agents = self.allowed_agents();
+        let mut schema = JsonSchema::string(Some("ACP agent id used to execute the task"));
+        if !allowed_agents.is_empty() {
+            schema = schema.with_enum(allowed_agents.iter().map(String::as_str).collect());
+        }
+        schema
+    }
+
+    fn definition_description(&self) -> String {
+        let allowed_agents = self.allowed_agents();
+        if allowed_agents.is_empty() {
+            ACP_EXECUTE_DESCRIPTION.to_string()
+        } else {
+            format!(
+                "{} Allowed agents: {}.",
+                ACP_EXECUTE_DESCRIPTION,
+                allowed_agents.join(", ")
+            )
+        }
+    }
+
+    fn resolve_agent_config(&self, agent_id: &str) -> Result<&AgentConfig> {
+        let allowed_agents = self.allowed_agents();
+        if allowed_agents.is_empty() {
+            return Err(NanobotError::invalid_tool_args(
+                self.name(),
+                "No ACP agents are allowed. Configure `acp.allowed_agents` first.",
+            ));
+        }
+        if !allowed_agents.iter().any(|allowed| allowed == agent_id) {
+            return Err(NanobotError::invalid_tool_args(
+                self.name(),
+                format!(
+                    "Agent '{}' is not allowed. Allowed agents: {}",
+                    agent_id,
+                    allowed_agents.join(", ")
+                ),
+            ));
+        }
+
+        let agent_config = self.config.agents.get(agent_id).ok_or_else(|| {
+            let configured = self.configured_agents();
+            let configured_text = if configured.is_empty() {
+                "none".to_string()
+            } else {
+                configured.join(", ")
+            };
+            NanobotError::invalid_tool_args(
+                self.name(),
+                format!(
+                    "Agent '{}' is not configured. Configured agents: {}",
+                    agent_id, configured_text
+                ),
+            )
+        })?;
+
+        if agent_config.command.trim().is_empty() {
+            return Err(NanobotError::invalid_tool_args(
+                self.name(),
+                format!("Agent '{}' is configured with an empty command", agent_id),
+            ));
+        }
+
+        Ok(agent_config)
+    }
+
+    async fn execute_request(&self, request: ACPExecuteArgs) -> Result<String> {
+        let ACPExecuteArgs {
+            agent_id,
+            task,
+            cwd,
+        } = request;
+        let agent_config = self.resolve_agent_config(&agent_id)?;
+        let command = agent_config.command.clone();
+        let env = agent_config.env.clone();
+
+        let mut client = ACPClient::spawn(agent_id, command, cwd, env)
+            .await
+            .map_err(|err| NanobotError::tool_execution(self.name(), err))?;
+
+        let execution_result = client.execute(&task).await;
+        let close_result = client.close().await;
+
+        match (execution_result, close_result) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Ok(_), Err(close_err)) => Err(NanobotError::tool_execution(
+                self.name(),
+                anyhow::anyhow!(
+                    "ACP execution finished but failed to close process: {}",
+                    close_err
+                ),
+            )),
+            (Err(exec_err), Ok(())) => Err(NanobotError::tool_execution(self.name(), exec_err)),
+            (Err(exec_err), Err(close_err)) => Err(NanobotError::tool_execution(
+                self.name(),
+                anyhow::anyhow!(
+                    "ACP execution failed: {}; additionally failed to close process: {}",
+                    exec_err,
+                    close_err
+                ),
+            )),
+        }
+    }
 }
 
 #[async_trait]
 impl Tool for ACPTool {
     fn name(&self) -> &str {
-        "acp_execute"
+        ACP_EXECUTE_TOOL_NAME
     }
-    
+
     fn definition(&self) -> ToolDefinition {
-        let mut properties = BTreeMap::new();
-        
-        properties.insert(
-            "agent_id".to_string(),
-            JsonSchema {
-                schema_type: JsonSchemaType::String,
-                description: Some("The ACP agent to use: codex (OpenAI), claude (Anthropic), cursor (IDE), windsurf (Codeium), cline (open-source)".to_string()),
-                enum_values: Some(vec![
-                    "codex".to_string(),
-                    "claude".to_string(),
-                    "cursor".to_string(),
-                    "windsurf".to_string(),
-                    "cline".to_string(),
-                ]),
-                properties: BTreeMap::new(),
-                required: Vec::new(),
-                items: None,
-                minimum: None,
-                maximum: None,
-            },
-        );
-        
-        properties.insert(
-            "task".to_string(),
-            JsonSchema {
-                schema_type: JsonSchemaType::String,
-                description: Some("The coding task to execute. Be specific and clear.".to_string()),
-                properties: BTreeMap::new(),
-                required: Vec::new(),
-                enum_values: None,
-                items: None,
-                minimum: None,
-                maximum: None,
-            },
-        );
-        
-        properties.insert(
-            "cwd".to_string(),
-            JsonSchema {
-                schema_type: JsonSchemaType::String,
-                description: Some("Working directory (optional)".to_string()),
-                properties: BTreeMap::new(),
-                required: Vec::new(),
-                enum_values: None,
-                items: None,
-                minimum: None,
-                maximum: None,
-            },
-        );
-        
         ToolDefinition::function(
             self.name(),
-            "Execute a coding task using an ACP agent (codex, claude, cursor, windsurf, cline). \
-             Use this for complex coding tasks that require multiple file operations, \
-             code generation, refactoring, or building complete features.",
-            JsonSchema::object(properties, vec!["agent_id", "task"]),
+            &self.definition_description(),
+            JsonSchema::object(
+                schema_props([
+                    ("agent_id", self.definition_agent_schema()),
+                    (
+                        "task",
+                        JsonSchema::string(Some("Coding task to execute by the ACP agent")),
+                    ),
+                    (
+                        "cwd",
+                        JsonSchema::string(Some(
+                            "Optional working directory for the ACP agent process",
+                        )),
+                    ),
+                ]),
+                vec!["agent_id", "task"],
+            ),
         )
     }
-    
-    async fn execute(&self, args: &str, _context: &ToolContext) -> Result<String> {
-        let req: ACPExecuteRequest = serde_json::from_str(args)
-            .map_err(|e| NanobotError::invalid_tool_args(self.name(), format!("Failed to parse arguments: {}", e)))?;
-        
-        // 验证 agent_id
-        if !self.config.allowed_agents.contains(&req.agent_id) {
-            return Err(NanobotError::invalid_tool_args(
-                self.name(),
-                format!(
-                    "Agent '{}' is not allowed. Allowed agents: {:?}",
-                    req.agent_id,
-                    self.config.allowed_agents
-                )
-            ));
-        }
-        
-        // 获取 agent 配置
-        let agent_config = self.config.agents.get(&req.agent_id)
-            .ok_or_else(|| NanobotError::invalid_tool_args(
-                self.name(),
-                format!("Agent '{}' not configured", req.agent_id)
-            ))?;
-        
-        // 创建 ACP Client
-        let mut client = ACPClient::spawn(
-            req.agent_id.clone(),
-            agent_config.command.clone(),
-            req.cwd.map(|s| s.into()),
-            agent_config.env.clone(),
-        ).await
-        .map_err(|e| NanobotError::tool_execution(self.name(), e))?;
-        
-        // 执行任务
-        let result = client.execute(&req.task).await
-            .map_err(|e| NanobotError::tool_execution(self.name(), e))?;
-        
-        // 关闭 client
-        client.close().await
-            .map_err(|e| NanobotError::tool_execution(self.name(), e))?;
-        
-        Ok(result)
+
+    async fn execute(&self, args_json: &str, _context: &ToolContext) -> Result<String> {
+        let request = self.parse_execute_args(args_json)?;
+        self.execute_request(request).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_acp_tool_metadata() {
-        let config = ACPConfig::default();
-        let tool = ACPTool::new(config);
-        
+    fn acp_tool_metadata_has_required_fields() {
+        let tool = ACPTool::new(ACPConfig::default());
+
         assert_eq!(tool.name(), "acp_execute");
-        
-        let def = tool.definition();
-        assert_eq!(def.function.name, "acp_execute");
-        assert!(def.function.description.contains("ACP agent"));
-        assert!(def.function.parameters.required.contains(&"agent_id".to_string()));
-        assert!(def.function.parameters.required.contains(&"task".to_string()));
+
+        let definition = tool.definition();
+        assert_eq!(definition.function.name, "acp_execute");
+        assert!(definition.function.description.contains("ACP agent"));
+        assert!(
+            definition
+                .function
+                .parameters
+                .required
+                .contains(&"agent_id".to_string())
+        );
+        assert!(
+            definition
+                .function
+                .parameters
+                .required
+                .contains(&"task".to_string())
+        );
+    }
+
+    #[test]
+    fn definition_uses_allowed_agents_from_config() {
+        let mut config = ACPConfig::default();
+        config.allowed_agents = vec![
+            "codex".to_string(),
+            "claude".to_string(),
+            "codex".to_string(),
+            "  ".to_string(),
+        ];
+        let tool = ACPTool::new(config);
+
+        let definition = tool.definition();
+        let agent_schema = definition
+            .function
+            .parameters
+            .properties
+            .get("agent_id")
+            .expect("agent_id schema");
+        assert_eq!(
+            agent_schema.enum_values.as_ref(),
+            Some(&vec!["claude".to_string(), "codex".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_agent_config_rejects_disallowed_agent() {
+        let tool = ACPTool::new(ACPConfig::default());
+        let err = tool
+            .resolve_agent_config("unknown-agent")
+            .expect_err("unknown agent should be rejected");
+        assert!(err.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn resolve_agent_config_rejects_when_allowed_agents_empty() {
+        let mut config = ACPConfig::default();
+        config.allowed_agents.clear();
+        let tool = ACPTool::new(config);
+
+        let err = tool
+            .resolve_agent_config("codex")
+            .expect_err("empty allowed agents should fail");
+        assert!(err.to_string().contains("No ACP agents are allowed"));
+    }
+
+    #[tokio::test]
+    async fn execute_returns_tool_scoped_parse_error() {
+        let tool = ACPTool::new(ACPConfig::default());
+        let err = tool
+            .execute(
+                r#"{"task":"missing required field agent_id"}"#,
+                &ToolContext {
+                    channel: "test".to_string(),
+                    chat_id: "test".to_string(),
+                    session_key: "test:test".to_string(),
+                    message_id: None,
+                },
+            )
+            .await
+            .expect_err("missing agent_id should fail");
+        assert!(err.to_string().contains("acp_execute"));
     }
 }
