@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod agent;
 pub mod bus;
 pub mod channels;

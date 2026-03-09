@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 
 use crate::agent::{AgentLoop, ContextBuilder, SubagentManager};
 use crate::bus::MessageBus;
@@ -12,6 +12,7 @@ use crate::provider::LLMProvider;
 use crate::session::SessionManager;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::MCPManager;
+use crate::tools::acp::ACPTool;
 
 /// Configuration for AgentLoop that groups related parameters.
 #[derive(Debug, Clone)]
@@ -78,6 +79,7 @@ pub struct AgentLoopBuilder {
     exec_config: ExecToolConfig,
     channels_config: ChannelsConfig,
     mcp_servers: HashMap<String, MCPServerConfig>,
+    acp_config: Option<crate::acp::config::ACPConfig>,
     restrict_to_workspace: bool,
 
     // Optional dependencies
@@ -102,6 +104,7 @@ impl AgentLoopBuilder {
             exec_config: ExecToolConfig::default(),
             channels_config: ChannelsConfig::default(),
             mcp_servers: HashMap::new(),
+            acp_config: None,
             restrict_to_workspace: false,
             cron_service: None,
         }
@@ -134,6 +137,12 @@ impl AgentLoopBuilder {
     /// Sets the MCP servers configuration.
     pub fn with_mcp_servers(mut self, servers: HashMap<String, MCPServerConfig>) -> Self {
         self.mcp_servers = servers;
+        self
+    }
+
+    /// Sets the ACP configuration.
+    pub fn with_acp_config(mut self, config: Option<crate::acp::config::ACPConfig>) -> Self {
+        self.acp_config = config;
         self
     }
 
@@ -182,6 +191,16 @@ impl AgentLoopBuilder {
             self.config.max_tokens,
             self.config.reasoning_effort.clone(),
         ));
+
+
+        // Register ACP tool if configured
+        if let Some(acp_config) = &self.acp_config {
+            if acp_config.enabled {
+                let acp_tool = Arc::new(ACPTool::new(acp_config.clone()));
+                tools.register_dynamic_tool(acp_tool)
+                    .context("Failed to register ACP tool")?;
+            }
+        }
 
         // Set the spawn service in ToolRegistry (SubagentManager implements SpawnService)
         tools.set_spawn_service(subagent_manager);

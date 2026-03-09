@@ -14,6 +14,9 @@ pub struct Config {
     pub providers: ProvidersConfig,
     pub gateway: GatewayConfig,
     pub tools: ToolsConfig,
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acp: Option<crate::acp::config::ACPConfig>,
 }
 
 impl Default for Config {
@@ -24,6 +27,7 @@ impl Default for Config {
             providers: ProvidersConfig::default(),
             gateway: GatewayConfig::default(),
             tools: ToolsConfig::default(),
+            acp: None,
         }
     }
 }

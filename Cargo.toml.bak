@@ -6,6 +6,7 @@ description = "Rust reimplementation of nanobot"
 license = "MIT"
 
 [dependencies]
+agent-client-protocol = "0.1"
 anyhow = "1.0"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -35,7 +36,6 @@ which = "8.0"
 html2text = "0.16"
 rmcp = { version = "1.1.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 parking_lot = "0.12"
-agent-client-protocol = "0.10.0"
 
 [dev-dependencies]
 mockall = "0.13"
