@@ -206,21 +206,13 @@ mod tests {
         use crate::acp::{ACPClient, build_acp_command};
 
         let cwd = std::env::current_dir().expect("current dir");
-        let (command, session_cwd) = build_acp_command(
-            "claude-agent-acp",
-            &[],
-            Some(cwd),
-            &HashMap::new(),
-        )
-        .expect("build command");
+        let (command, session_cwd) =
+            build_acp_command("claude-agent-acp", &[], Some(cwd), &HashMap::new())
+                .expect("build command");
 
-        let mut client = ACPClient::spawn(
-            "claude".to_string(),
-            command,
-            session_cwd,
-        )
-        .await
-        .expect("spawn claude-agent-acp");
+        let mut client = ACPClient::spawn("claude".to_string(), command, session_cwd)
+            .await
+            .expect("spawn claude-agent-acp");
 
         let output = client
             .execute("Reply with 'ACP OK' if you can read this.")
@@ -237,21 +229,12 @@ mod tests {
         use crate::acp::{ACPClient, build_acp_command};
 
         let cwd = std::env::current_dir().expect("current dir");
-        let (command, session_cwd) = build_acp_command(
-            "codex-acp",
-            &[],
-            Some(cwd),
-            &HashMap::new(),
-        )
-        .expect("build command");
+        let (command, session_cwd) =
+            build_acp_command("codex-acp", &[], Some(cwd), &HashMap::new()).expect("build command");
 
-        let mut client = ACPClient::spawn(
-            "codex".to_string(),
-            command,
-            session_cwd,
-        )
-        .await
-        .expect("spawn codex-acp");
+        let mut client = ACPClient::spawn("codex".to_string(), command, session_cwd)
+            .await
+            .expect("spawn codex-acp");
 
         let output = client
             .execute("Reply with 'ACP OK' if you can read this.")

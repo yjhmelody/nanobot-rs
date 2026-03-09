@@ -108,9 +108,9 @@ impl Config {
     /// assert_eq!(provider.as_deref(), Some("anthropic"));
     /// ```
     pub fn get_provider_name(&self, model: Option<&str>) -> Option<String> {
-        let forced = self.agents.defaults.provider.trim();
+        let forced = normalize_provider_name(&self.agents.defaults.provider);
         if !forced.is_empty() && forced != "auto" {
-            return Some(forced.replace('-', "_"));
+            return Some(forced);
         }
 
         let target_model = model.unwrap_or(&self.agents.defaults.model).to_lowercase();
@@ -126,7 +126,7 @@ impl Config {
 
         let specs = provider_specs();
         if let Some((prefix, _)) = target_model.split_once('/') {
-            let prefix = prefix.replace('-', "_");
+            let prefix = normalize_provider_name(prefix);
             if let Some(spec) = specs.iter().find(|s| s.name == prefix) {
                 if self
                     .provider_config(&spec.name)
@@ -237,7 +237,7 @@ impl Config {
     /// - aihubmix, siliconflow, volcengine
     /// - openai_codex, github_copilot
     pub fn provider_config(&self, name: &str) -> Option<&ProviderConfig> {
-        match name {
+        match normalize_provider_name(name).as_str() {
             "custom" => Some(&self.providers.custom),
             "anthropic" => Some(&self.providers.anthropic),
             "openai" => Some(&self.providers.openai),
@@ -258,6 +258,48 @@ impl Config {
             _ => None,
         }
     }
+}
+
+fn normalize_provider_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let collapsed = collapse_provider_name(trimmed);
+    for canonical in [
+        "custom",
+        "anthropic",
+        "openai",
+        "openrouter",
+        "deepseek",
+        "groq",
+        "zhipu",
+        "dashscope",
+        "vllm",
+        "gemini",
+        "moonshot",
+        "minimax",
+        "aihubmix",
+        "siliconflow",
+        "volcengine",
+        "openai_codex",
+        "github_copilot",
+        "auto",
+    ] {
+        if collapse_provider_name(canonical) == collapsed {
+            return canonical.to_string();
+        }
+    }
+
+    trimmed.to_lowercase().replace('-', "_")
+}
+
+fn collapse_provider_name(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -744,6 +786,22 @@ mod tests {
         let cfg = Config::default();
         let name = cfg.get_provider_name(Some("openai-codex/codex-mini-latest"));
         assert_eq!(name.as_deref(), Some("openai_codex"));
+    }
+
+    #[test]
+    fn forced_provider_accepts_camel_case_alias() {
+        let mut cfg = Config::default();
+        cfg.agents.defaults.provider = "githubCopilot".to_string();
+
+        let name = cfg.get_provider_name(Some("gpt-5.4"));
+        assert_eq!(name.as_deref(), Some("github_copilot"));
+    }
+
+    #[test]
+    fn provider_config_accepts_camel_case_alias() {
+        let cfg = Config::default();
+        assert!(cfg.provider_config("githubCopilot").is_some());
+        assert!(cfg.provider_config("openaiCodex").is_some());
     }
 
     #[test]

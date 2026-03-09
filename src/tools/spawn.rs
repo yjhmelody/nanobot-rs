@@ -6,7 +6,9 @@ use serde_json::json;
 
 use crate::agent::SpawnService;
 use crate::error::Result;
-use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
+use crate::tools::base::{
+    Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
+};
 use crate::types::SessionKey;
 use crate::types::tools::SpawnArgs;
 

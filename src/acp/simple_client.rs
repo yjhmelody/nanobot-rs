@@ -23,21 +23,38 @@ use tracing::{debug, warn};
 #[derive(Clone)]
 pub struct SimpleClient {
     state: Arc<Mutex<SimpleClientState>>,
+    allow_fs: bool,
+    allow_terminal: bool,
 }
 
 impl SimpleClient {
     pub fn new(default_cwd: PathBuf) -> Self {
+        Self::with_permissions(default_cwd, true, true)
+    }
+
+    pub fn prompt_only(default_cwd: PathBuf) -> Self {
+        Self::with_permissions(default_cwd, false, false)
+    }
+
+    fn with_permissions(default_cwd: PathBuf, allow_fs: bool, allow_terminal: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(SimpleClientState::new(default_cwd))),
+            allow_fs,
+            allow_terminal,
         }
     }
 
     pub fn capabilities(&self) -> ClientCapabilities {
-        ClientCapabilities::new()
-            .fs(FileSystemCapabilities::new()
+        let capabilities = ClientCapabilities::new();
+        let capabilities = if self.allow_fs {
+            capabilities.fs(FileSystemCapabilities::new()
                 .read_text_file(true)
                 .write_text_file(true))
-            .terminal(true)
+        } else {
+            capabilities
+        };
+
+        capabilities.terminal(self.allow_terminal)
     }
 
     pub async fn begin_turn(&self, session_id: &SessionId) {

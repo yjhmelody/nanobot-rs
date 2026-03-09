@@ -6,7 +6,9 @@ use serde_json::json;
 use crate::acp::client::ACPClient;
 use crate::acp::config::{ACPConfig, AgentConfig};
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
+use crate::tools::base::{
+    Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
+};
 use crate::types::tools::ACPExecuteArgs;
 
 const ACP_EXECUTE_TOOL_NAME: &str = "acp_execute";

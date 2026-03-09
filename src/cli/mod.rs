@@ -1,12 +1,15 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
 
+use crate::acp::ACPConfig;
 use crate::agent::AgentLoop;
 use crate::bus::MessageBus;
 use crate::bus::{InboundMessage, MessageMetadata, OutboundMessage};
@@ -32,6 +35,7 @@ pub enum Commands {
     Agent(AgentArgs),
     Gateway(GatewayArgs),
     Status,
+    Provider(ProviderArgs),
 }
 
 #[derive(Debug, Args)]
@@ -54,12 +58,41 @@ pub struct GatewayArgs {
     pub port: u16,
 }
 
+#[derive(Debug, Args)]
+pub struct ProviderArgs {
+    #[command(subcommand)]
+    pub command: ProviderCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProviderCommands {
+    Login(ProviderLoginArgs),
+    Status(ProviderStatusArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProviderLoginArgs {
+    pub provider: String,
+    #[arg(long)]
+    pub host: Option<String>,
+    #[arg(long = "config-dir")]
+    pub config_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProviderStatusArgs {
+    pub provider: String,
+    #[arg(long = "config-dir")]
+    pub config_dir: Option<PathBuf>,
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Onboard(args) => onboard(args).await,
         Commands::Agent(args) => agent(args).await,
         Commands::Gateway(args) => gateway(args).await,
         Commands::Status => status().await,
+        Commands::Provider(args) => provider(args).await,
     }
 }
 
@@ -285,6 +318,145 @@ async fn status() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn provider(args: ProviderArgs) -> Result<()> {
+    match args.command {
+        ProviderCommands::Login(args) => provider_login(args).await,
+        ProviderCommands::Status(args) => provider_status(args).await,
+    }
+}
+
+async fn provider_login(args: ProviderLoginArgs) -> Result<()> {
+    let provider = normalize_provider_name(&args.provider)?;
+    if provider != "github_copilot" {
+        bail!("provider '{}' is not supported by this command", provider);
+    }
+
+    let config = load_config(None)?;
+    let command_name = copilot_command_name(&config);
+    let mut command = TokioCommand::new(&command_name);
+    command.stdin(Stdio::inherit());
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+    command.arg("login");
+
+    if let Some(host) = args.host.as_deref() {
+        command.arg("--host").arg(host);
+    }
+    if let Some(config_dir) = args.config_dir.as_ref() {
+        command.arg("--config-dir").arg(config_dir);
+    }
+
+    let status = command
+        .status()
+        .await
+        .map_err(|err| anyhow!("failed to launch '{}': {}", command_name, err))?;
+
+    if !status.success() {
+        bail!(
+            "GitHub Copilot login exited with status {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    Ok(())
+}
+
+async fn provider_status(args: ProviderStatusArgs) -> Result<()> {
+    let provider = normalize_provider_name(&args.provider)?;
+    if provider != "github_copilot" {
+        bail!("provider '{}' is not supported by this command", provider);
+    }
+
+    let config = load_config(None)?;
+    let command_name = copilot_command_name(&config);
+    let binary_path = which::which(&command_name).ok();
+    let version = TokioCommand::new(&command_name)
+        .arg("--version")
+        .output()
+        .await
+        .ok();
+    let env_token = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .is_some();
+    let config_dir = resolve_copilot_config_dir(args.config_dir);
+
+    println!("Provider: github_copilot");
+    println!("Command: {}", command_name);
+    println!(
+        "Binary: {}",
+        binary_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not found on PATH".to_string())
+    );
+    println!(
+        "Version: {}",
+        version
+            .as_ref()
+            .and_then(|output| String::from_utf8(output.stdout.clone()).ok())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "Env token: {}",
+        if env_token { "present" } else { "absent" }
+    );
+    println!(
+        "Config dir: {} {}",
+        config_dir.display(),
+        if config_dir.exists() { "✓" } else { "✗" }
+    );
+    println!(
+        "Credential store: not introspected (Copilot may still be logged in via system keychain)"
+    );
+
+    Ok(())
+}
+
+fn normalize_provider_name(raw: &str) -> Result<String> {
+    let name = raw.trim().replace('-', "_");
+    if name.is_empty() {
+        bail!("provider name cannot be empty");
+    }
+    Ok(name)
+}
+
+fn copilot_command_name(config: &Config) -> String {
+    config
+        .acp
+        .as_ref()
+        .and_then(|acp| acp.agents.get("copilot"))
+        .map(|agent| agent.command.clone())
+        .filter(|command| !command.trim().is_empty())
+        .or_else(|| {
+            ACPConfig::default()
+                .agents
+                .get("copilot")
+                .map(|agent| agent.command.clone())
+        })
+        .unwrap_or_else(|| "copilot".to_string())
+}
+
+fn resolve_copilot_config_dir(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    if let Ok(home) = std::env::var("COPILOT_HOME")
+        && !home.trim().is_empty()
+    {
+        return PathBuf::from(home);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".copilot")
 }
 
 struct SessionTargetPicker {

@@ -10,7 +10,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
+use crate::tools::base::{
+    Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
+};
 use crate::tools::config::SharedToolConfig;
 
 pub fn build_tools(config: SharedToolConfig) -> Vec<Arc<dyn Tool>> {

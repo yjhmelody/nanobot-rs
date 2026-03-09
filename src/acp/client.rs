@@ -28,10 +28,35 @@ pub struct ACPClient {
 }
 
 impl ACPClient {
-    pub async fn spawn(
+    pub async fn spawn(agent_id: String, command: Command, session_cwd: PathBuf) -> Result<Self> {
+        Self::spawn_with_client(
+            agent_id,
+            command,
+            session_cwd.clone(),
+            SimpleClient::new(session_cwd),
+        )
+        .await
+    }
+
+    pub async fn spawn_prompt_only(
         agent_id: String,
         command: Command,
         session_cwd: PathBuf,
+    ) -> Result<Self> {
+        Self::spawn_with_client(
+            agent_id,
+            command,
+            session_cwd.clone(),
+            SimpleClient::prompt_only(session_cwd),
+        )
+        .await
+    }
+
+    async fn spawn_with_client(
+        agent_id: String,
+        command: Command,
+        session_cwd: PathBuf,
+        client: SimpleClient,
     ) -> Result<Self> {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -39,7 +64,7 @@ impl ACPClient {
         let thread_name = format!("acp-{}", sanitize_thread_label(&agent_id));
         let actor_thread = std::thread::Builder::new()
             .name(thread_name)
-            .spawn(move || run_actor_thread(command, session_cwd, command_rx, ready_tx))
+            .spawn(move || run_actor_thread(command, session_cwd, client, command_rx, ready_tx))
             .context("failed to spawn ACP actor thread")?;
 
         let mut actor_thread = Some(actor_thread);
@@ -130,6 +155,7 @@ enum ActorCommand {
 fn run_actor_thread(
     command: Command,
     session_cwd: PathBuf,
+    client: SimpleClient,
     mut command_rx: mpsc::UnboundedReceiver<ActorCommand>,
     ready_tx: oneshot::Sender<Result<()>>,
 ) {
@@ -148,7 +174,7 @@ fn run_actor_thread(
         let local_set = tokio::task::LocalSet::new();
         local_set
             .run_until(async move {
-                let mut actor = match ACPActor::initialize(command, session_cwd).await {
+                let mut actor = match ACPActor::initialize(command, session_cwd, client).await {
                     Ok(actor) => {
                         let _ = ready_tx.send(Ok(()));
                         actor
@@ -176,6 +202,7 @@ impl ACPActor {
     async fn initialize(
         mut command: Command,
         session_cwd: PathBuf,
+        client: SimpleClient,
     ) -> Result<Self> {
         let mut process = command
             .spawn()
@@ -189,7 +216,6 @@ impl ACPActor {
             .take()
             .ok_or_else(|| anyhow!("ACP process stdout unavailable"))?;
 
-        let client = SimpleClient::new(session_cwd.clone());
         let capabilities = client.capabilities();
 
         let (connection, io_task) = ClientSideConnection::new(
@@ -403,8 +429,13 @@ mod tests {
         let command_str =
             std::env::var("ACP_SMOKE_COMMAND").unwrap_or_else(|_| "codex-acp".to_string());
 
-        let (command, session_cwd) = build_acp_command(&command_str, &[], Some(cwd), &std::collections::HashMap::new())
-            .expect("build command");
+        let (command, session_cwd) = build_acp_command(
+            &command_str,
+            &[],
+            Some(cwd),
+            &std::collections::HashMap::new(),
+        )
+        .expect("build command");
 
         let mut client = ACPClient::spawn("codex".to_string(), command, session_cwd)
             .await

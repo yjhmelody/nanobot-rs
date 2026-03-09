@@ -8,7 +8,9 @@ use serde_json::json;
 use tokio::process::Command;
 
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
+use crate::tools::base::{
+    Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
+};
 use crate::tools::config::SharedToolConfig;
 use crate::types::tools::ExecArgs;
 

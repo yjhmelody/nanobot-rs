@@ -87,8 +87,7 @@ impl OpenAICompatProvider {
         let trimmed = base.trim_end_matches('/');
 
         // If the URL already contains a complete endpoint path, use it as-is
-        if trimmed.ends_with("/chat/completions")
-            || trimmed.ends_with("/responses") {
+        if trimmed.ends_with("/chat/completions") || trimmed.ends_with("/responses") {
             return trimmed.to_string();
         }
 
@@ -454,10 +453,7 @@ mod tests {
             "openai".to_string(),
             HashMap::new(),
         );
-        assert_eq!(
-            provider.endpoint(),
-            "https://api.openai.com/v1/responses"
-        );
+        assert_eq!(provider.endpoint(), "https://api.openai.com/v1/responses");
     }
 
     #[test]
@@ -484,10 +480,7 @@ mod tests {
             "openai".to_string(),
             HashMap::new(),
         );
-        assert_eq!(
-            provider.endpoint(),
-            "https://api.openai.com/v1/responses"
-        );
+        assert_eq!(provider.endpoint(), "https://api.openai.com/v1/responses");
     }
 
     #[test]
@@ -514,10 +507,7 @@ mod tests {
             "openai".to_string(),
             HashMap::new(),
         );
-        assert_eq!(
-            provider.endpoint(),
-            "https://api.openai.com/v1/responses"
-        );
+        assert_eq!(provider.endpoint(), "https://api.openai.com/v1/responses");
     }
 
     #[test]

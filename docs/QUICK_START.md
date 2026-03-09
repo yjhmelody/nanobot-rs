@@ -64,7 +64,7 @@ Edit `~/.nanobot/config.json` and add your API key:
 }
 ```
 
-**Note:** GitHub Copilot uses OAuth authentication and doesn't require an API key. The provider will authenticate automatically when you use models with the `github-copilot/` or `github_copilot/` prefix.
+**Note:** GitHub Copilot uses OAuth authentication and doesn't require an API key. Authenticate first with `copilot login` or `nanobot-rs provider login github_copilot`, then use models with the `github-copilot/` or `github_copilot/` prefix.
 
 **Supported Providers:**
 - `anthropic` - Claude models
@@ -89,6 +89,9 @@ nanobot-rs agent -m "Hello! What can you do?"
 #### Using GitHub Copilot
 
 ```bash
+# Authenticate once
+nanobot-rs provider login github_copilot
+
 # Set model with github-copilot prefix
 nanobot-rs agent -m "Explain this code" -s "copilot:session1"
 ```

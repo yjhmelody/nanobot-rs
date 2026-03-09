@@ -300,9 +300,9 @@ mod tests {
 
     #[tokio::test]
     async fn registry_with_optional_tools_includes_spawn_and_cron() {
+        use crate::agent::SubagentManager;
         use crate::bus::MessageBus;
         use crate::cron::CronService;
-        use crate::agent::SubagentManager;
 
         let workspace = std::env::temp_dir().join("nanobot-reg-with-optional");
         let bus = MessageBus::new();
