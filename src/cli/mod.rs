@@ -100,6 +100,7 @@ async fn onboard(args: OnboardArgs) -> Result<()> {
 
 async fn agent(args: AgentArgs) -> Result<()> {
     let config = load_config(None)?;
+    tracing::debug!("load config: {:#?}", config);
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
     sync_workspace_templates(&workspace, true).await?;
 

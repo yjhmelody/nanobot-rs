@@ -31,13 +31,21 @@ impl OpenAICompatProvider {
         provider_name: String,
         extra_headers: HashMap<String, String>,
     ) -> Self {
+        // Build client with TLS support
+        // Note: By default, reqwest uses system proxy settings from environment variables
+        // If you need to disable proxy, set NO_PROXY=* environment variable
+        let client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             api_key,
             api_base,
             default_model,
             provider_name,
             extra_headers,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -75,8 +83,22 @@ impl OpenAICompatProvider {
             .api_base
             .clone()
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        // TODO: this api is deprecated
-        format!("{}/chat/completions", base.trim_end_matches('/'))
+
+        let trimmed = base.trim_end_matches('/');
+
+        // If the URL already contains a complete endpoint path, use it as-is
+        if trimmed.ends_with("/chat/completions")
+            || trimmed.ends_with("/responses") {
+            return trimmed.to_string();
+        }
+
+        // Use /v1/responses for OpenAI provider (both official and compatible gateways)
+        // Use /v1/chat/completions for other providers
+        if self.provider_name == "openai" {
+            format!("{}/responses", trimmed)
+        } else {
+            format!("{}/chat/completions", trimmed)
+        }
     }
 
     fn headers(&self) -> HeaderMap {
@@ -405,6 +427,126 @@ mod tests {
         assert_eq!(
             out.thinking_blocks,
             Some(vec!["think-1".to_string(), "think-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn endpoint_appends_chat_completions_to_base_url() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            Some("https://api.example.com/v1".to_string()),
+            "gpt-4".to_string(),
+            "custom".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn endpoint_uses_responses_for_official_openai() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            Some("https://api.openai.com/v1".to_string()),
+            "gpt-4".to_string(),
+            "openai".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn endpoint_uses_responses_for_openai_gateway() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            Some("https://gmn.chuangzuoli.com/v1".to_string()),
+            "gpt-4".to_string(),
+            "openai".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://gmn.chuangzuoli.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn endpoint_uses_responses_for_openai_without_api_base() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            None,
+            "gpt-4".to_string(),
+            "openai".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn endpoint_does_not_duplicate_chat_completions() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            Some("https://api.example.com/v1/chat/completions".to_string()),
+            "gpt-4".to_string(),
+            "custom".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn endpoint_does_not_duplicate_responses() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            Some("https://api.openai.com/v1/responses".to_string()),
+            "gpt-4".to_string(),
+            "openai".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn endpoint_handles_trailing_slash() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            Some("https://api.example.com/v1/".to_string()),
+            "gpt-4".to_string(),
+            "custom".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn endpoint_uses_default_when_no_api_base() {
+        let provider = OpenAICompatProvider::new(
+            "test-key".to_string(),
+            None,
+            "gpt-4".to_string(),
+            "custom".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            provider.endpoint(),
+            "https://api.openai.com/v1/chat/completions"
         );
     }
 }
