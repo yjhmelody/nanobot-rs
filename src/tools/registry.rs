@@ -14,7 +14,8 @@ use crate::tools::config::SharedToolConfig;
 use crate::tools::cron::CronTool;
 use crate::tools::message::MessageTool;
 use crate::tools::spawn::SpawnTool;
-use crate::tools::{filesystem, shell, web};
+use crate::tools::{filesystem, search, shell, web};
+use crate::types::SessionKey;
 
 /// Central dispatcher for built-in tools.
 ///
@@ -48,6 +49,10 @@ impl ToolRegistry {
         tools.insert(shell_tool.name().to_string(), shell_tool);
 
         for tool in web::build_tools(config.clone()) {
+            tools.insert(tool.name().to_string(), tool);
+        }
+
+        for tool in search::build_tools(config.clone()) {
             tools.insert(tool.name().to_string(), tool);
         }
 
@@ -138,11 +143,14 @@ impl ToolRegistry {
         false
     }
 
-    pub async fn cancel_spawn_by_session(&self, session_key: &str) -> usize {
+    pub async fn cancel_spawn_by_session(&self, session_key: &SessionKey) -> usize {
         let mut cancelled = 0usize;
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
-            cancelled += tool.cancel_by_session(session_key).await.unwrap_or(0);
+            cancelled += tool
+                .cancel_by_session(session_key.as_str())
+                .await
+                .unwrap_or(0);
         }
         cancelled
     }
@@ -172,11 +180,12 @@ impl ToolRegistry {
     /// ```no_run
     /// # use nanobot_rs::tools::registry::ToolRegistry;
     /// # use nanobot_rs::tools::base::ToolContext;
+    /// # use nanobot_rs::types::SessionKey;
     /// # async fn example(registry: &ToolRegistry) -> nanobot_rs::error::Result<()> {
     /// let ctx = ToolContext {
     ///     channel: "cli".to_string(),
     ///     chat_id: "direct".to_string(),
-    ///     session_key: "cli:direct".to_string(),
+    ///     session_key: SessionKey::from("cli:direct"),
     ///     message_id: None,
     /// };
     /// let result = registry.execute("read_file", r#"{"path": "/tmp/test.txt"}"#, &ctx).await?;
@@ -244,6 +253,7 @@ mod tests {
 
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
     use crate::tools::base::{JsonSchema, ToolDefinition};
+    use crate::types::SessionKey;
 
     #[allow(unused)]
     struct DummyProvider;
@@ -349,7 +359,7 @@ mod tests {
         let ctx = ToolContext {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
-            session_key: "cli:direct".to_string(),
+            session_key: SessionKey::from("cli:direct"),
             message_id: Some("m1".to_string()),
         };
 

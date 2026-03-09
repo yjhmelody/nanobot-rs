@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod message;
 pub mod registry;
 pub mod registry_builder;
+pub mod search;
 pub mod shell;
 pub mod spawn;
 pub mod web;
