@@ -64,3 +64,183 @@ impl Default for ACPConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_has_correct_structure() {
+        let config = ACPConfig::default();
+
+        assert!(config.enabled);
+        assert_eq!(config.default_agent, "claude");
+        assert_eq!(config.allowed_agents.len(), 3);
+        assert_eq!(config.agents.len(), 3);
+    }
+
+    #[test]
+    fn default_config_includes_all_acp_agents() {
+        let config = ACPConfig::default();
+
+        assert!(config.agents.contains_key("claude"));
+        assert!(config.agents.contains_key("codex"));
+        assert!(config.agents.contains_key("copilot"));
+    }
+
+    #[test]
+    fn default_config_has_correct_commands() {
+        let config = ACPConfig::default();
+
+        assert_eq!(config.agents.get("claude").unwrap().command, "claude-agent-acp");
+        assert_eq!(config.agents.get("codex").unwrap().command, "codex-acp");
+        assert_eq!(config.agents.get("copilot").unwrap().command, "github-copilot-cli");
+    }
+
+    #[test]
+    fn default_agent_is_in_allowed_list() {
+        let config = ACPConfig::default();
+
+        assert!(config.allowed_agents.contains(&config.default_agent));
+    }
+
+    #[test]
+    fn all_allowed_agents_have_configs() {
+        let config = ACPConfig::default();
+
+        for agent in &config.allowed_agents {
+            assert!(
+                config.agents.contains_key(agent),
+                "allowed agent '{}' should have a config",
+                agent
+            );
+        }
+    }
+
+    #[test]
+    fn agent_config_serialization() {
+        let mut env = HashMap::new();
+        env.insert("API_KEY".to_string(), "test".to_string());
+
+        let agent = AgentConfig {
+            command: "test-command".to_string(),
+            env,
+        };
+
+        let json = serde_json::to_string(&agent).unwrap();
+        let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.command, "test-command");
+        assert_eq!(deserialized.env.get("API_KEY").unwrap(), "test");
+    }
+
+    #[test]
+    fn acp_config_serialization() {
+        let config = ACPConfig::default();
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ACPConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.enabled, config.enabled);
+        assert_eq!(deserialized.default_agent, config.default_agent);
+        assert_eq!(deserialized.allowed_agents, config.allowed_agents);
+        assert_eq!(deserialized.agents.len(), config.agents.len());
+    }
+
+    // Optional: Test if ACP binaries are available (non-blocking)
+    #[test]
+    #[ignore = "requires local ACP binaries installed"]
+    fn check_claude_agent_acp_available() {
+        let output = std::process::Command::new("which")
+            .arg("claude-agent-acp")
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout);
+                println!("claude-agent-acp found at: {}", path.trim());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local ACP binaries installed"]
+    fn check_codex_acp_available() {
+        let output = std::process::Command::new("which")
+            .arg("codex-acp")
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout);
+                println!("codex-acp found at: {}", path.trim());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local ACP binaries installed"]
+    fn check_copilot_cli_available() {
+        let output = std::process::Command::new("which")
+            .arg("github-copilot-cli")
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout);
+                println!("github-copilot-cli found at: {}", path.trim());
+            }
+        }
+    }
+
+    // Integration test that can be run when binaries are available
+    #[tokio::test]
+    #[ignore = "requires local ACP binaries and valid auth"]
+    async fn smoke_test_claude_agent_acp() {
+        use crate::acp::ACPClient;
+        use std::path::PathBuf;
+
+        let cwd = std::env::current_dir().expect("current dir");
+        let mut client = ACPClient::spawn(
+            "claude".to_string(),
+            "claude-agent-acp".to_string(),
+            Some(cwd),
+            HashMap::new(),
+        )
+        .await
+        .expect("spawn claude-agent-acp");
+
+        let output = client
+            .execute("Reply with 'ACP OK' if you can read this.")
+            .await
+            .expect("execute prompt");
+
+        assert!(!output.trim().is_empty());
+        client.close().await.expect("close client");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local ACP binaries and valid auth"]
+    async fn smoke_test_codex_acp() {
+        use crate::acp::ACPClient;
+        use std::path::PathBuf;
+
+        let cwd = std::env::current_dir().expect("current dir");
+        let mut client = ACPClient::spawn(
+            "codex".to_string(),
+            "codex-acp".to_string(),
+            Some(cwd),
+            HashMap::new(),
+        )
+        .await
+        .expect("spawn codex-acp");
+
+        let output = client
+            .execute("Reply with 'ACP OK' if you can read this.")
+            .await
+            .expect("execute prompt");
+
+        assert!(!output.trim().is_empty());
+        client.close().await.expect("close client");
+    }
+}
