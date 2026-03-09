@@ -56,6 +56,38 @@ where
     entries.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
+/// Build a ToolDefinition from a JSON value using serde_json::json! macro.
+///
+/// This is a more concise way to define tool schemas compared to the builder pattern.
+///
+/// # Example
+///
+/// ```ignore
+/// use serde_json::json;
+/// use nanobot_rs::tools::base::tool_definition_from_json;
+///
+/// let def = tool_definition_from_json(json!({
+///     "type": "function",
+///     "function": {
+///         "name": "read_file",
+///         "description": "Read a file",
+///         "parameters": {
+///             "type": "object",
+///             "properties": {
+///                 "path": {
+///                     "type": "string",
+///                     "description": "File path"
+///                 }
+///             },
+///             "required": ["path"]
+///         }
+///     }
+/// }));
+/// ```
+pub fn tool_definition_from_json(value: serde_json::Value) -> ToolDefinition {
+    serde_json::from_value(value).expect("invalid tool definition JSON")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

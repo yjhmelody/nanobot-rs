@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::SessionKey;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolContext {
     /// Current channel name (e.g. `cli`, `telegram`).
@@ -10,7 +12,7 @@ pub struct ToolContext {
     /// Current conversation id within the channel.
     pub chat_id: String,
     /// Session key used for cancellation and state scoping.
-    pub session_key: String,
+    pub session_key: SessionKey,
     /// Optional source message id for threaded/reply scenarios.
     pub message_id: Option<String>,
 }

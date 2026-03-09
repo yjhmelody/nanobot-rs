@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use serde_json::json;
 use tokio::fs as async_fs;
 
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::tools::config::SharedToolConfig;
 use crate::types::tools::{EditFileArgs, ListDirArgs, ReadFileArgs, WriteFileArgs};
 
@@ -41,14 +42,23 @@ impl ReadFileTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "read_file",
-                "Read the contents of a file at the given path.",
-                JsonSchema::object(
-                    schema_props([("path", JsonSchema::string(Some("The file path to read")))]),
-                    vec!["path"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read the contents of a file at the given path.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "The file path to read"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -87,20 +97,27 @@ impl WriteFileTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "write_file",
-                "Write content to a file at the given path. Creates parent directories if needed.",
-                JsonSchema::object(
-                    schema_props([
-                        (
-                            "path",
-                            JsonSchema::string(Some("The file path to write to")),
-                        ),
-                        ("content", JsonSchema::string(Some("The content to write"))),
-                    ]),
-                    vec!["path", "content"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "Write content to a file at the given path. Creates parent directories if needed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "The file path to write to"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "The content to write"
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -139,24 +156,31 @@ impl EditFileTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "edit_file",
-                "Edit a file by replacing old_text with new_text. The old_text must exist exactly in the file.",
-                JsonSchema::object(
-                    schema_props([
-                        ("path", JsonSchema::string(Some("The file path to edit"))),
-                        (
-                            "old_text",
-                            JsonSchema::string(Some("The exact text to find and replace")),
-                        ),
-                        (
-                            "new_text",
-                            JsonSchema::string(Some("The text to replace with")),
-                        ),
-                    ]),
-                    vec!["path", "old_text", "new_text"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "edit_file",
+                    "description": "Edit a file by replacing old_text with new_text. The old_text must exist exactly in the file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "The file path to edit"
+                            },
+                            "old_text": {
+                                "type": "string",
+                                "description": "The exact text to find and replace"
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "The text to replace with"
+                            }
+                        },
+                        "required": ["path", "old_text", "new_text"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -195,17 +219,23 @@ impl ListDirTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "list_dir",
-                "List the contents of a directory.",
-                JsonSchema::object(
-                    schema_props([(
-                        "path",
-                        JsonSchema::string(Some("The directory path to list")),
-                    )]),
-                    vec!["path"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": "List the contents of a directory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "The directory path to list"
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }))
         })
         .clone()
     }

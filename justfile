@@ -29,6 +29,14 @@ check:
 test:
   cargo test --all-targets --all-features
 
+# Run local offline end-to-end verification
+e2e:
+  cargo test --test e2e_local -- --nocapture
+
+# Run local end-to-end verification including optional codex MCP connect
+e2e-codex:
+  cargo test --test e2e_local codex_mcp_connect_smoke -- --ignored --nocapture
+
 # Local CI parity
 ci: fmt-check lint test
 

@@ -15,6 +15,7 @@ use crate::config::{Config, get_config_path, load_config, save_config};
 use crate::cron::{CronJob, CronJobHandler};
 use crate::heartbeat::{HeartbeatExecuteHandler, HeartbeatNotifyHandler};
 use crate::runtime::build_runtime;
+use crate::types::SessionKey;
 use crate::utils::helpers::{get_workspace_path, sync_workspace_templates};
 
 #[derive(Debug, Parser)]
@@ -234,7 +235,7 @@ async fn gateway(args: GatewayArgs) -> Result<()> {
                 timestamp: chrono::Utc::now(),
                 media: Vec::new(),
                 metadata: MessageMetadata::default(),
-                session_key_override: Some(session.clone()),
+                session_key_override: Some(SessionKey::from(session.clone())),
             };
             let _ = bus_for_input.publish_inbound(msg);
         }

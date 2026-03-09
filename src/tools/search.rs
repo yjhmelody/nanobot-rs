@@ -5,11 +5,12 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::tools::config::SharedToolConfig;
 
 pub fn build_tools(config: SharedToolConfig) -> Vec<Arc<dyn Tool>> {
@@ -98,22 +99,47 @@ impl SearchFilesTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "search_files",
-                "Search for text in files using ripgrep. Fast full-text search across the codebase with regex support.",
-                JsonSchema::object(
-                    schema_props([
-                        ("query", JsonSchema::string(Some("Search query (supports regex if regex=true)"))),
-                        ("path", JsonSchema::string(Some("Directory or file to search (optional, defaults to workspace root)"))),
-                        ("caseSensitive", JsonSchema::string(Some("Case sensitive search (default: false)"))),
-                        ("regex", JsonSchema::string(Some("Treat query as regex (default: false)"))),
-                        ("filePattern", JsonSchema::string(Some("File pattern to filter (e.g., '*.rs', '*.{js,ts}')"))),
-                        ("limit", JsonSchema::integer(Some("Maximum number of results (default: 50)"))),
-                        ("contextLines", JsonSchema::integer(Some("Number of context lines before/after match (default: 2)"))),
-                    ]),
-                    vec!["query"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "search_files",
+                    "description": "Search for text in files using ripgrep. Fast full-text search across the codebase with regex support.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query (supports regex if regex=true)"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Directory or file to search (optional, defaults to workspace root)"
+                            },
+                            "caseSensitive": {
+                                "type": "string",
+                                "description": "Case sensitive search (default: false)"
+                            },
+                            "regex": {
+                                "type": "string",
+                                "description": "Treat query as regex (default: false)"
+                            },
+                            "filePattern": {
+                                "type": "string",
+                                "description": "File pattern to filter (e.g., '*.rs', '*.{js,ts}')"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results (default: 50)"
+                            },
+                            "contextLines": {
+                                "type": "integer",
+                                "description": "Number of context lines before/after match (default: 2)"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -160,21 +186,43 @@ impl GrepCodeTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "grep_code",
-                "Search for text in code files with language-specific filtering. Automatically excludes common non-code files.",
-                JsonSchema::object(
-                    schema_props([
-                        ("query", JsonSchema::string(Some("Search query"))),
-                        ("path", JsonSchema::string(Some("Directory to search (optional, defaults to workspace root)"))),
-                        ("language", JsonSchema::string(Some("Filter by language (e.g., 'rust', 'python', 'javascript')"))),
-                        ("caseSensitive", JsonSchema::string(Some("Case sensitive search (default: false)"))),
-                        ("limit", JsonSchema::integer(Some("Maximum number of results (default: 50)"))),
-                        ("contextLines", JsonSchema::integer(Some("Number of context lines before/after match (default: 2)"))),
-                    ]),
-                    vec!["query"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "grep_code",
+                    "description": "Search for text in code files with language-specific filtering. Automatically excludes common non-code files.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query"
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "Directory to search (optional, defaults to workspace root)"
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Filter by language (e.g., 'rust', 'python', 'javascript')"
+                            },
+                            "caseSensitive": {
+                                "type": "string",
+                                "description": "Case sensitive search (default: false)"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results (default: 50)"
+                            },
+                            "contextLines": {
+                                "type": "integer",
+                                "description": "Number of context lines before/after match (default: 2)"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -237,8 +285,10 @@ async fn search_with_ripgrep(
 
     // Basic flags
     cmd.arg("--json")
-        .arg("--max-count").arg(limit.to_string())
-        .arg("--context").arg(context_lines.to_string());
+        .arg("--max-count")
+        .arg(limit.to_string())
+        .arg("--context")
+        .arg(context_lines.to_string());
 
     // Case sensitivity
     if !case_sensitive {
@@ -264,13 +314,15 @@ async fn search_with_ripgrep(
     cmd.arg(query).arg(&search_path);
 
     // Execute
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
         NanobotError::tool_execution(
             "search_files",
-            anyhow::anyhow!("Failed to spawn ripgrep: {}. Make sure 'rg' is installed.", e),
+            anyhow::anyhow!(
+                "Failed to spawn ripgrep: {}. Make sure 'rg' is installed.",
+                e
+            ),
         )
     })?;
 
@@ -287,24 +339,39 @@ async fn search_with_ripgrep(
 
     let stdout_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout);
-        reader.read_to_end(&mut stdout_data).await.map(|_| stdout_data)
+        reader
+            .read_to_end(&mut stdout_data)
+            .await
+            .map(|_| stdout_data)
     });
 
     let stderr_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
-        reader.read_to_end(&mut stderr_data).await.map(|_| stderr_data)
+        reader
+            .read_to_end(&mut stderr_data)
+            .await
+            .map(|_| stderr_data)
     });
 
     let status = child.wait().await.map_err(|e| {
-        NanobotError::tool_execution("search_files", anyhow::anyhow!("Failed to wait for ripgrep: {}", e))
+        NanobotError::tool_execution(
+            "search_files",
+            anyhow::anyhow!("Failed to wait for ripgrep: {}", e),
+        )
     })?;
 
     let stdout_data = stdout_task.await.map_err(|e| {
-        NanobotError::tool_execution("search_files", anyhow::anyhow!("Failed to read stdout: {}", e))
+        NanobotError::tool_execution(
+            "search_files",
+            anyhow::anyhow!("Failed to read stdout: {}", e),
+        )
     })??;
 
     let stderr_data = stderr_task.await.map_err(|e| {
-        NanobotError::tool_execution("search_files", anyhow::anyhow!("Failed to read stderr: {}", e))
+        NanobotError::tool_execution(
+            "search_files",
+            anyhow::anyhow!("Failed to read stderr: {}", e),
+        )
     })??;
 
     // ripgrep returns exit code 1 when no matches found, which is not an error
@@ -324,7 +391,10 @@ async fn search_with_ripgrep(
     };
 
     serde_json::to_string_pretty(&response).map_err(|e| {
-        NanobotError::tool_execution("search_files", anyhow::anyhow!("Failed to serialize results: {}", e))
+        NanobotError::tool_execution(
+            "search_files",
+            anyhow::anyhow!("Failed to serialize results: {}", e),
+        )
     })
 }
 
@@ -332,13 +402,9 @@ async fn search_with_ripgrep(
 #[serde(tag = "type")]
 enum RipgrepMessage {
     #[serde(rename = "match")]
-    Match {
-        data: RipgrepMatch,
-    },
+    Match { data: RipgrepMatch },
     #[serde(rename = "context")]
-    Context {
-        data: RipgrepContext,
-    },
+    Context { data: RipgrepContext },
     #[serde(other)]
     Other,
 }
@@ -353,9 +419,9 @@ struct RipgrepMatch {
 
 #[derive(Debug, Deserialize)]
 struct RipgrepContext {
-    path: RipgrepPath,
+    // path: RipgrepPath,
     lines: RipgrepLines,
-    line_number: usize,
+    // line_number: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,7 +439,7 @@ struct RipgrepSubmatch {
     #[serde(rename = "match")]
     match_text: RipgrepMatchText,
     start: usize,
-    end: usize,
+    // end: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,16 +488,13 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> Result<Vec<SearchResult>> {
 
                 // Start new match
                 let column = data.submatches.first().map(|s| s.start).unwrap_or(0);
-                let match_text = data.submatches.first()
+                let match_text = data
+                    .submatches
+                    .first()
                     .map(|s| s.match_text.text.clone())
                     .unwrap_or_else(|| data.lines.text.clone());
 
-                current_match = Some((
-                    data.path.text,
-                    data.line_number,
-                    column,
-                    match_text,
-                ));
+                current_match = Some((data.path.text, data.line_number, column, match_text));
             }
             RipgrepMessage::Context { data } => {
                 if current_match.is_some() {
@@ -464,23 +527,47 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> Result<Vec<SearchResult>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SessionKey;
 
     #[tokio::test]
     async fn search_files_tool_definition_is_valid() {
         let def = SearchFilesTool::definition_static();
         assert_eq!(def.function.name, "search_files");
-        assert!(def.function.parameters.required.contains(&"query".to_string()));
-        assert!(!def.function.parameters.required.contains(&"path".to_string()));
-        assert!(!def.function.parameters.required.contains(&"limit".to_string()));
+        assert!(
+            def.function
+                .parameters
+                .required
+                .contains(&"query".to_string())
+        );
+        assert!(
+            !def.function
+                .parameters
+                .required
+                .contains(&"path".to_string())
+        );
+        assert!(
+            !def.function
+                .parameters
+                .required
+                .contains(&"limit".to_string())
+        );
     }
 
     #[tokio::test]
     async fn grep_code_tool_definition_is_valid() {
         let def = GrepCodeTool::definition_static();
         assert_eq!(def.function.name, "grep_code");
-        assert!(def.function.parameters.required.contains(&"query".to_string()));
-        assert!(!def.function.parameters.required.contains(&"language".to_string()));
+        assert!(
+            def.function
+                .parameters
+                .required
+                .contains(&"query".to_string())
+        );
+        assert!(
+            !def.function
+                .parameters
+                .required
+                .contains(&"language".to_string())
+        );
     }
 
     #[test]

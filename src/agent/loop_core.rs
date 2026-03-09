@@ -16,13 +16,14 @@ use crate::error::Result;
 use crate::observability::TARGET_AGENT;
 use crate::provider::{ChatRequest, LLMProvider};
 use crate::session::{Session, SessionEntry, SessionManager};
-use crate::task_id::TaskId;
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
+use crate::types::SessionKey;
 use crate::types::agent::PreviewValue;
 use crate::types::provider::{
     AssistantFunctionCall, AssistantToolCall, ChatMessage, MessageContent, MessageRole,
 };
+use crate::types::task::TaskId;
 
 pub struct AgentLoop {
     pub bus: MessageBus,
@@ -44,10 +45,10 @@ pub struct AgentLoop {
     /// Per-session locks for concurrent message processing
     /// Using DashMap eliminates the outer RwLock, reducing lock contention
     /// Note: Must use tokio::sync::Mutex here because locks are held across await points
-    pub(crate) session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Active tasks per session
     /// Using nested DashMap for better concurrent access
-    pub(crate) active_tasks: Arc<DashMap<String, DashMap<TaskId, AbortHandle>>>,
+    pub(crate) active_tasks: Arc<DashMap<SessionKey, DashMap<TaskId, AbortHandle>>>,
     /// Last cleanup timestamp for periodic maintenance
     /// Using parking_lot::Mutex for better performance (short critical section, no await)
     pub(crate) last_cleanup: Arc<Mutex<Instant>>,
@@ -125,7 +126,7 @@ impl AgentLoop {
             timestamp: chrono::Utc::now(),
             media: Vec::new(),
             metadata: MessageMetadata::default(),
-            session_key_override: Some("__nanobot_stop__".to_string()),
+            session_key_override: Some(SessionKey::from("__nanobot_stop__")),
         });
 
         // Abort all active tasks using DashMap iteration
@@ -156,21 +157,21 @@ impl AgentLoop {
             timestamp: chrono::Utc::now(),
             media: Vec::new(),
             metadata: MessageMetadata::default(),
-            session_key_override: Some(session_key.to_string()),
+            session_key_override: Some(SessionKey::from(session_key)),
         };
 
         let out = self.process_message(msg).await?;
         Ok(out.map(|m| m.content).unwrap_or_default())
     }
 
-    async fn register_task(&self, session_key: &str, task_id: TaskId, handle: AbortHandle) {
+    async fn register_task(&self, session_key: &SessionKey, task_id: TaskId, handle: AbortHandle) {
         self.active_tasks
-            .entry(session_key.to_string())
+            .entry(session_key.clone())
             .or_insert_with(DashMap::new)
             .insert(task_id, handle);
     }
 
-    async fn unregister_task(&self, session_key: &str, task_id: &TaskId) {
+    async fn unregister_task(&self, session_key: &SessionKey, task_id: &TaskId) {
         if let Some(tasks) = self.active_tasks.get(session_key) {
             tasks.remove(task_id);
             if tasks.is_empty() {
@@ -291,7 +292,7 @@ impl AgentLoop {
         });
     }
 
-    fn has_active_tasks(&self, session_key: &str) -> bool {
+    fn has_active_tasks(&self, session_key: &SessionKey) -> bool {
         self.active_tasks
             .get(session_key)
             .map(|tasks| !tasks.is_empty())
@@ -308,7 +309,7 @@ impl AgentLoop {
         }
 
         let session_key = msg.session_key();
-        let mut session = self.sessions.get_or_create(&session_key).await?;
+        let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
 
         // Build tool context once and reuse
         let tool_context = ToolContext {
@@ -391,7 +392,7 @@ impl AgentLoop {
             }
             InboundCommand::New => {
                 let session_key = msg.session_key();
-                let mut session = self.sessions.get_or_create(&session_key).await?;
+                let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
                 session.clear();
                 self.sessions.save(&session).await?;
                 self.sessions.invalidate(&session.key).await;
@@ -414,8 +415,8 @@ impl AgentLoop {
             ("cli".to_string(), msg.chat_id.clone())
         };
 
-        let session_key = format!("{}:{}", channel, chat_id);
-        let mut session = self.sessions.get_or_create(&session_key).await?;
+        let session_key = SessionKey::new(&channel, &chat_id);
+        let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
 
         // Build tool context once and reuse
         let tool_context = ToolContext {
@@ -918,7 +919,7 @@ mod tests {
         let agent = create_test_agent(provider).await;
 
         // Manually create a lock by simulating dispatch
-        let session_key = "cli:direct".to_string();
+        let session_key = SessionKey::from("cli:direct");
         agent
             .session_locks
             .insert(session_key.clone(), Arc::new(tokio::sync::Mutex::new(())));

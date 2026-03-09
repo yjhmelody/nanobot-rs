@@ -1,11 +1,12 @@
 //! ACP tool for delegating coding tasks to ACP agents.
 
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::acp::client::ACPClient;
 use crate::acp::config::{ACPConfig, AgentConfig};
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::types::tools::ACPExecuteArgs;
 
 const ACP_EXECUTE_TOOL_NAME: &str = "acp_execute";
@@ -51,11 +52,14 @@ impl ACPTool {
         configured
     }
 
-    fn definition_agent_schema(&self) -> JsonSchema {
+    fn definition_agent_schema(&self) -> serde_json::Value {
         let allowed_agents = self.allowed_agents();
-        let mut schema = JsonSchema::string(Some("ACP agent id used to execute the task"));
+        let mut schema = json!({
+            "type": "string",
+            "description": "ACP agent id used to execute the task"
+        });
         if !allowed_agents.is_empty() {
-            schema = schema.with_enum(allowed_agents.iter().map(String::as_str).collect());
+            schema["enum"] = json!(allowed_agents);
         }
         schema
     }
@@ -125,10 +129,16 @@ impl ACPTool {
             cwd,
         } = request;
         let agent_config = self.resolve_agent_config(&agent_id)?;
-        let command = agent_config.command.clone();
-        let env = agent_config.env.clone();
 
-        let mut client = ACPClient::spawn(agent_id, command, cwd, env)
+        let (command, session_cwd) = crate::acp::build_acp_command(
+            &agent_config.command,
+            &agent_config.args,
+            cwd,
+            &agent_config.env,
+        )
+        .map_err(|err| NanobotError::tool_execution(self.name(), err))?;
+
+        let mut client = ACPClient::spawn(agent_id, command, session_cwd)
             .await
             .map_err(|err| NanobotError::tool_execution(self.name(), err))?;
 
@@ -164,26 +174,28 @@ impl Tool for ACPTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(
-            self.name(),
-            &self.definition_description(),
-            JsonSchema::object(
-                schema_props([
-                    ("agent_id", self.definition_agent_schema()),
-                    (
-                        "task",
-                        JsonSchema::string(Some("Coding task to execute by the ACP agent")),
-                    ),
-                    (
-                        "cwd",
-                        JsonSchema::string(Some(
-                            "Optional working directory for the ACP agent process",
-                        )),
-                    ),
-                ]),
-                vec!["agent_id", "task"],
-            ),
-        )
+        tool_definition_from_json(json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": self.definition_description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": self.definition_agent_schema(),
+                        "task": {
+                            "type": "string",
+                            "description": "Coding task to execute by the ACP agent"
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Optional working directory for the ACP agent process"
+                        }
+                    },
+                    "required": ["agent_id", "task"]
+                }
+            }
+        }))
     }
 
     async fn execute(&self, args_json: &str, _context: &ToolContext) -> Result<String> {
@@ -195,6 +207,7 @@ impl Tool for ACPTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SessionKey;
 
     #[test]
     fn acp_tool_metadata_has_required_fields() {
@@ -275,7 +288,7 @@ mod tests {
                 &ToolContext {
                     channel: "test".to_string(),
                     chat_id: "test".to_string(),
-                    session_key: "test:test".to_string(),
+                    session_key: SessionKey::from("test:test"),
                     message_id: None,
                 },
             )

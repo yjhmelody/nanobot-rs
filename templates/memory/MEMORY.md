@@ -1,20 +1,23 @@
-# MEMORY.md
+# Long-term Memory
 
-Long-term memory for important information, decisions, and learnings.
+This file stores important information that should persist across sessions.
 
-## Format
+## User Information
 
-Use clear sections and dates. Examples:
+(Important facts about the user)
 
-### Technical Decisions
+## Preferences
 
-**2024-03-01**: Chose Rust for performance and safety
+(User preferences learned over time)
 
-### Important Context
+## Project Context
 
-- User prefers concise responses
-- Working timezone: UTC+8
+(Information about ongoing projects)
+
+## Important Notes
+
+(Things to remember)
 
 ---
 
-Keep this file focused. Use daily notes in `memory/YYYY-MM-DD.md` for routine logs.
+*This file is automatically updated by nanobot when important information should be remembered.*

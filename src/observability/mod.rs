@@ -41,6 +41,8 @@ struct ObservabilityProviders {
 static INIT: OnceLock<()> = OnceLock::new();
 static PROVIDERS: OnceLock<ObservabilityProviders> = OnceLock::new();
 
+pub const ENV_NANOBOT_OTLP_TRACES: &str = "NANOBOT_OTLP_TRACES_ENABLED";
+
 pub fn init() {
     INIT.get_or_init(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -52,7 +54,7 @@ pub fn init() {
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
             "OTEL_EXPORTER_OTLP_ENDPOINT",
         ]);
-        let traces_enabled = env_flag("NANOBOT_OTLP_TRACES_ENABLED", true);
+        let traces_enabled = env_flag(ENV_NANOBOT_OTLP_TRACES, true);
 
         let resource = Resource::builder_empty()
             .with_attributes([

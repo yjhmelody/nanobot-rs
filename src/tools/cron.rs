@@ -3,10 +3,11 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+use serde_json::json;
 
 use crate::cron::{AddJobParams, CronSchedule, CronScheduleKind, CronService};
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::types::tools::{CronAction, CronArgs};
 
 pub struct CronTool {
@@ -21,47 +22,48 @@ impl CronTool {
     pub fn definition() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "cron",
-                "Schedule reminders and recurring tasks. Actions: add, once, list, remove.",
-                JsonSchema::object(
-                    schema_props([
-                        (
-                            "action",
-                            JsonSchema::string(Some("Action to perform"))
-                                .with_enum(vec!["add", "once", "list", "remove"]),
-                        ),
-                        (
-                            "message",
-                            JsonSchema::string(Some("Reminder message (for add)")),
-                        ),
-                        (
-                            "every_seconds",
-                            JsonSchema::integer(Some("Interval in seconds (for recurring tasks)")),
-                        ),
-                        (
-                            "cron_expr",
-                            JsonSchema::string(Some(
-                                "Cron expression like '0 9 * * *' (for scheduled tasks)",
-                            )),
-                        ),
-                        (
-                            "tz",
-                            JsonSchema::string(Some(
-                                "IANA timezone for cron expressions (e.g. 'America/Vancouver')",
-                            )),
-                        ),
-                        (
-                            "at",
-                            JsonSchema::string(Some(
-                                "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')",
-                            )),
-                        ),
-                        ("job_id", JsonSchema::string(Some("Job ID (for remove)"))),
-                    ]),
-                    vec!["action"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "cron",
+                    "description": "Schedule reminders and recurring tasks. Actions: add, once, list, remove.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "Action to perform",
+                                "enum": ["add", "once", "list", "remove"]
+                            },
+                            "message": {
+                                "type": "string",
+                                "description": "Reminder message (for add)"
+                            },
+                            "every_seconds": {
+                                "type": "integer",
+                                "description": "Interval in seconds (for recurring tasks)"
+                            },
+                            "cron_expr": {
+                                "type": "string",
+                                "description": "Cron expression like '0 9 * * *' (for scheduled tasks)"
+                            },
+                            "tz": {
+                                "type": "string",
+                                "description": "IANA timezone for cron expressions (e.g. 'America/Vancouver')"
+                            },
+                            "at": {
+                                "type": "string",
+                                "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')"
+                            },
+                            "job_id": {
+                                "type": "string",
+                                "description": "Job ID (for remove)"
+                            }
+                        },
+                        "required": ["action"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -283,7 +285,7 @@ fn parse_at_to_ms(input: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::base::parse_args;
+    use crate::types::SessionKey;
 
     fn temp_store_path(case: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -315,7 +317,7 @@ mod tests {
         let ctx = ToolContext {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
-            session_key: "cli:direct".to_string(),
+            session_key: SessionKey::from("cli:direct"),
             message_id: None,
         };
 
@@ -356,7 +358,7 @@ mod tests {
         let ctx = ToolContext {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
-            session_key: "cli:direct".to_string(),
+            session_key: SessionKey::from("cli:direct"),
             message_id: None,
         };
 
@@ -386,7 +388,7 @@ mod tests {
         let ctx = ToolContext {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
-            session_key: "cli:direct".to_string(),
+            session_key: SessionKey::from("cli:direct"),
             message_id: None,
         };
 

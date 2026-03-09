@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::bus::MessageBus;
 use crate::bus::events::{MessageMetadata, OutboundMessage};
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::types::tools::MessageArgs;
 
 pub struct MessageTool {
@@ -22,38 +23,38 @@ impl MessageTool {
     }
 
     pub fn definition() -> ToolDefinition {
-        ToolDefinition::function(
-            "message",
-            "Send a message to the user. Use this when you want to communicate something.",
-            JsonSchema::object(
-                schema_props([
-                    (
-                        "content",
-                        JsonSchema::string(Some("The message content to send")),
-                    ),
-                    (
-                        "channel",
-                        JsonSchema::string(Some(
-                            "Optional: target channel (telegram, discord, etc.)",
-                        )),
-                    ),
-                    (
-                        "chat_id",
-                        JsonSchema::string(Some("Optional: target chat/user ID")),
-                    ),
-                    (
-                        "media",
-                        JsonSchema::array(
-                            JsonSchema::string(None),
-                            Some(
-                                "Optional: list of file paths to attach (images, audio, documents)",
-                            ),
-                        ),
-                    ),
-                ]),
-                vec!["content"],
-            ),
-        )
+        tool_definition_from_json(json!({
+            "type": "function",
+            "function": {
+                "name": "message",
+                "description": "Send a message to the user. Use this when you want to communicate something.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The message content to send"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Optional: target channel (telegram, discord, etc.)"
+                        },
+                        "chat_id": {
+                            "type": "string",
+                            "description": "Optional: target chat/user ID"
+                        },
+                        "media": {
+                            "type": "array",
+                            "description": "Optional: list of file paths to attach (images, audio, documents)",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "required": ["content"]
+                }
+            }
+        }))
     }
 
     async fn execute_typed(&self, args: MessageArgs, ctx: &ToolContext) -> Result<String> {
@@ -130,6 +131,7 @@ impl Tool for MessageTool {
 mod tests {
     use super::*;
     use crate::bus::MessageBus;
+    use crate::types::SessionKey;
 
     #[tokio::test]
     async fn message_tool_sets_metadata_from_snake_case_fields() {
@@ -139,7 +141,7 @@ mod tests {
         let ctx = ToolContext {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
-            session_key: "cli:direct".to_string(),
+            session_key: SessionKey::from("cli:direct"),
             message_id: Some("orig-1".to_string()),
         };
 

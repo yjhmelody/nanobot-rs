@@ -299,11 +299,59 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Update test after SubagentManager refactoring
     async fn registry_with_optional_tools_includes_spawn_and_cron() {
-        // This test needs to be updated to work with the new SubagentManager
-        // that requires ToolRegistry, which creates a circular dependency in tests.
-        // The spawn tool is now added via set_spawn_manager() after registry creation.
+        use crate::bus::MessageBus;
+        use crate::cron::CronService;
+        use crate::agent::SubagentManager;
+
+        let workspace = std::env::temp_dir().join("nanobot-reg-with-optional");
+        let bus = MessageBus::new();
+        let cron_store = workspace.join("cron.json");
+        let cron = Arc::new(CronService::new(cron_store));
+
+        // Create registry without spawn service initially
+        let reg = ToolRegistry::new(
+            workspace.clone(),
+            false,
+            ExecToolConfig::default(),
+            WebToolsConfig::default(),
+            Some(bus.clone()),
+            None,
+            Some(cron),
+        );
+
+        // Verify cron is registered but spawn is not yet
+        let names = definition_names(reg.definitions());
+        assert!(names.contains("cron"));
+        assert!(!names.contains("spawn"));
+
+        // Create SubagentManager with the registry
+        let provider = Arc::new(DummyProvider);
+        let subagent_manager = Arc::new(SubagentManager::new(
+            provider,
+            workspace,
+            bus,
+            Arc::new(reg),
+            "test/model".to_string(),
+            0.7,
+            1000,
+            None,
+        ));
+
+        // Now set the spawn service
+        let reg2 = ToolRegistry::new(
+            std::env::temp_dir().join("nanobot-reg-with-spawn"),
+            false,
+            ExecToolConfig::default(),
+            WebToolsConfig::default(),
+            None,
+            Some(subagent_manager),
+            None,
+        );
+
+        // Verify spawn is now registered
+        let names = definition_names(reg2.definitions());
+        assert!(names.contains("spawn"));
     }
 
     struct EchoDynamicTool {

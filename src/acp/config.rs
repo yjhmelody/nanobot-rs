@@ -15,6 +15,8 @@ pub struct ACPConfig {
 pub struct AgentConfig {
     pub command: String,
     #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
     pub env: HashMap<String, String>,
 }
 
@@ -28,6 +30,7 @@ impl Default for ACPConfig {
             "claude".to_string(),
             AgentConfig {
                 command: "claude-agent-acp".to_string(),
+                args: vec![],
                 env: HashMap::new(),
             },
         );
@@ -38,6 +41,7 @@ impl Default for ACPConfig {
             "codex".to_string(),
             AgentConfig {
                 command: "codex-acp".to_string(),
+                args: vec![],
                 env: HashMap::new(),
             },
         );
@@ -47,7 +51,8 @@ impl Default for ACPConfig {
         agents.insert(
             "copilot".to_string(),
             AgentConfig {
-                command: "github-copilot-cli".to_string(),
+                command: "copilot".to_string(),
+                args: vec!["--acp".to_string()],
                 env: HashMap::new(),
             },
         );
@@ -92,9 +97,28 @@ mod tests {
     fn default_config_has_correct_commands() {
         let config = ACPConfig::default();
 
-        assert_eq!(config.agents.get("claude").unwrap().command, "claude-agent-acp");
+        assert_eq!(
+            config.agents.get("claude").unwrap().command,
+            "claude-agent-acp"
+        );
         assert_eq!(config.agents.get("codex").unwrap().command, "codex-acp");
-        assert_eq!(config.agents.get("copilot").unwrap().command, "github-copilot-cli");
+        assert_eq!(config.agents.get("copilot").unwrap().command, "copilot");
+    }
+
+    #[test]
+    fn copilot_has_acp_argument() {
+        let config = ACPConfig::default();
+        let copilot = config.agents.get("copilot").unwrap();
+
+        assert_eq!(copilot.args, vec!["--acp"]);
+    }
+
+    #[test]
+    fn claude_and_codex_have_no_arguments() {
+        let config = ACPConfig::default();
+
+        assert!(config.agents.get("claude").unwrap().args.is_empty());
+        assert!(config.agents.get("codex").unwrap().args.is_empty());
     }
 
     #[test]
@@ -124,6 +148,7 @@ mod tests {
 
         let agent = AgentConfig {
             command: "test-command".to_string(),
+            args: vec!["--flag".to_string(), "value".to_string()],
             env,
         };
 
@@ -131,6 +156,7 @@ mod tests {
         let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.command, "test-command");
+        assert_eq!(deserialized.args, vec!["--flag", "value"]);
         assert_eq!(deserialized.env.get("API_KEY").unwrap(), "test");
     }
 
@@ -151,61 +177,47 @@ mod tests {
     #[test]
     #[ignore = "requires local ACP binaries installed"]
     fn check_claude_agent_acp_available() {
-        let output = std::process::Command::new("which")
-            .arg("claude-agent-acp")
+        let output = std::process::Command::new("claude-agent-acp")
+            .arg("--help")
             .output();
-
-        if let Ok(output) = output {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout);
-                println!("claude-agent-acp found at: {}", path.trim());
-            }
-        }
+        output.expect("claude-agent-acp not available");
     }
 
     #[test]
     #[ignore = "requires local ACP binaries installed"]
     fn check_codex_acp_available() {
-        let output = std::process::Command::new("which")
-            .arg("codex-acp")
+        let output = std::process::Command::new("codex-acp")
+            .arg("--help")
             .output();
-
-        if let Ok(output) = output {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout);
-                println!("codex-acp found at: {}", path.trim());
-            }
-        }
+        output.expect("codex-acp not available");
     }
 
     #[test]
     #[ignore = "requires local ACP binaries installed"]
     fn check_copilot_cli_available() {
-        let output = std::process::Command::new("which")
-            .arg("github-copilot-cli")
-            .output();
-
-        if let Ok(output) = output {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout);
-                println!("github-copilot-cli found at: {}", path.trim());
-            }
-        }
+        let output = std::process::Command::new("copilot").arg("--help").output();
+        output.expect("copilot not available");
     }
 
     // Integration test that can be run when binaries are available
     #[tokio::test]
     #[ignore = "requires local ACP binaries and valid auth"]
     async fn smoke_test_claude_agent_acp() {
-        use crate::acp::ACPClient;
-        use std::path::PathBuf;
+        use crate::acp::{ACPClient, build_acp_command};
 
         let cwd = std::env::current_dir().expect("current dir");
+        let (command, session_cwd) = build_acp_command(
+            "claude-agent-acp",
+            &[],
+            Some(cwd),
+            &HashMap::new(),
+        )
+        .expect("build command");
+
         let mut client = ACPClient::spawn(
             "claude".to_string(),
-            "claude-agent-acp".to_string(),
-            Some(cwd),
-            HashMap::new(),
+            command,
+            session_cwd,
         )
         .await
         .expect("spawn claude-agent-acp");
@@ -222,15 +234,21 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires local ACP binaries and valid auth"]
     async fn smoke_test_codex_acp() {
-        use crate::acp::ACPClient;
-        use std::path::PathBuf;
+        use crate::acp::{ACPClient, build_acp_command};
 
         let cwd = std::env::current_dir().expect("current dir");
+        let (command, session_cwd) = build_acp_command(
+            "codex-acp",
+            &[],
+            Some(cwd),
+            &HashMap::new(),
+        )
+        .expect("build command");
+
         let mut client = ACPClient::spawn(
             "codex".to_string(),
-            "codex-acp".to_string(),
-            Some(cwd),
-            HashMap::new(),
+            command,
+            session_cwd,
         )
         .await
         .expect("spawn codex-acp");

@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::agent::SpawnService;
 use crate::error::Result;
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
+use crate::types::SessionKey;
 use crate::types::tools::SpawnArgs;
 
 pub struct SpawnTool {
@@ -20,25 +22,27 @@ impl SpawnTool {
     pub fn definition() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "spawn",
-                "Spawn a subagent to handle a task in the background. Use this for complex or time-consuming tasks that can run independently. The subagent will complete the task and report back when done.",
-                JsonSchema::object(
-                    schema_props([
-                        (
-                            "task",
-                            JsonSchema::string(Some("The task for the subagent to complete")),
-                        ),
-                        (
-                            "label",
-                            JsonSchema::string(Some(
-                                "Optional short label for the task (for display)",
-                            )),
-                        ),
-                    ]),
-                    vec!["task"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "spawn",
+                    "description": "Spawn a subagent to handle a task in the background. Use this for complex or time-consuming tasks that can run independently. The subagent will complete the task and report back when done.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "The task for the subagent to complete"
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "Optional short label for the task (for display)"
+                            }
+                        },
+                        "required": ["task"]
+                    }
+                }
+            }))
         })
         .clone()
     }
@@ -85,7 +89,9 @@ impl Tool for SpawnTool {
     }
 
     async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
-        self.service.cancel_by_session(session_key).await
+        self.service
+            .cancel_by_session(&SessionKey::from(session_key))
+            .await
     }
 }
 
@@ -129,12 +135,15 @@ mod tests {
             _label: Option<String>,
             _origin_channel: String,
             _origin_chat_id: String,
-            _session_key: Option<String>,
+            _session_key: Option<crate::types::SessionKey>,
         ) -> String {
             format!("Spawned: {}", task)
         }
 
-        async fn cancel_by_session(&self, _session_key: &str) -> Result<usize> {
+        async fn cancel_by_session(
+            &self,
+            _session_key: &crate::types::SessionKey,
+        ) -> Result<usize> {
             Ok(1)
         }
     }
@@ -159,7 +168,7 @@ mod tests {
         let ctx = ToolContext {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
-            session_key: "cli:direct".to_string(),
+            session_key: "cli:direct".into(),
             message_id: None,
         };
 

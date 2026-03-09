@@ -120,6 +120,7 @@ mod tests {
 
     use super::*;
     use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition};
+    use crate::types::SessionKey;
 
     #[test]
     fn builder_creates_registry_with_defaults() {
@@ -201,7 +202,7 @@ mod tests {
                 &ToolContext {
                     channel: "test".to_string(),
                     chat_id: "test".to_string(),
-                    session_key: "test:test".to_string(),
+                    session_key: SessionKey::from("test:test"),
                     message_id: None,
                 },
             )

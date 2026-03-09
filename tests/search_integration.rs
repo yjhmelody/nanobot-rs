@@ -1,8 +1,7 @@
-use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::fs;
 
-use nanobot_rs::tools::base::{Tool, ToolContext};
+use nanobot_rs::tools::base::ToolContext;
 use nanobot_rs::tools::config::SharedToolConfig;
 use nanobot_rs::tools::search::build_tools;
 use nanobot_rs::types::SessionKey;
@@ -27,12 +26,7 @@ async fn search_files_finds_matches_in_test_directory() {
     .await
     .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -44,10 +38,7 @@ async fn search_files_finds_matches_in_test_directory() {
         message_id: None,
     };
 
-    let result = tool
-        .execute(r#"{"query": "println"}"#, &ctx)
-        .await
-        .unwrap();
+    let result = tool.execute(r#"{"query": "println"}"#, &ctx).await.unwrap();
 
     assert!(result.contains("test1.rs") || result.contains("test2.rs"));
     assert!(result.contains("println"));
@@ -59,12 +50,9 @@ async fn grep_code_filters_by_language() {
     let workspace = temp.path().to_path_buf();
 
     // Create Rust file
-    fs::write(
-        workspace.join("code.rs"),
-        "fn rust_function() {}\n",
-    )
-    .await
-    .unwrap();
+    fs::write(workspace.join("code.rs"), "fn rust_function() {}\n")
+        .await
+        .unwrap();
 
     // Create Python file
     fs::write(
@@ -74,12 +62,7 @@ async fn grep_code_filters_by_language() {
     .await
     .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "grep_code").unwrap();
@@ -107,20 +90,12 @@ async fn search_files_respects_limit() {
 
     // Create multiple files with same content
     for i in 0..10 {
-        fs::write(
-            workspace.join(format!("file{}.txt", i)),
-            "target_word\n",
-        )
-        .await
-        .unwrap();
+        fs::write(workspace.join(format!("file{}.txt", i)), "target_word\n")
+            .await
+            .unwrap();
     }
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -154,12 +129,7 @@ async fn search_files_handles_no_matches() {
         .await
         .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -196,12 +166,7 @@ async fn search_files_supports_regex() {
     .await
     .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -229,19 +194,11 @@ async fn search_files_case_sensitive() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().to_path_buf();
 
-    fs::write(
-        workspace.join("test.txt"),
-        "Error\nerror\nERROR\n",
-    )
-    .await
-    .unwrap();
+    fs::write(workspace.join("test.txt"), "Error\nerror\nERROR\n")
+        .await
+        .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -254,10 +211,7 @@ async fn search_files_case_sensitive() {
     };
 
     // Case insensitive (default)
-    let result = tool
-        .execute(r#"{"query": "error"}"#, &ctx)
-        .await
-        .unwrap();
+    let result = tool.execute(r#"{"query": "error"}"#, &ctx).await.unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["total"].as_u64().unwrap(), 3);
 
@@ -285,12 +239,7 @@ async fn search_files_with_file_pattern() {
         .await
         .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -327,12 +276,7 @@ async fn search_files_with_subdirectory() {
         .await
         .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -358,12 +302,7 @@ async fn search_files_returns_error_for_nonexistent_path() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().to_path_buf();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -396,12 +335,7 @@ async fn search_files_with_context_lines() {
     .await
     .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -434,19 +368,11 @@ async fn grep_code_uses_literal_search_by_default() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().to_path_buf();
 
-    fs::write(
-        workspace.join("test.rs"),
-        "let x = 5;\nlet y = x + 1;\n",
-    )
-    .await
-    .unwrap();
+    fs::write(workspace.join("test.rs"), "let x = 5;\nlet y = x + 1;\n")
+        .await
+        .unwrap();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "grep_code").unwrap();
@@ -459,10 +385,7 @@ async fn grep_code_uses_literal_search_by_default() {
     };
 
     // Search for literal "x + 1" (not regex)
-    let result = tool
-        .execute(r#"{"query": "x + 1"}"#, &ctx)
-        .await
-        .unwrap();
+    let result = tool.execute(r#"{"query": "x + 1"}"#, &ctx).await.unwrap();
 
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["total"].as_u64().unwrap(), 1);
@@ -473,12 +396,7 @@ async fn search_files_handles_empty_workspace() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().to_path_buf();
 
-    let config = SharedToolConfig::new(
-        workspace,
-        false,
-        Default::default(),
-        Default::default(),
-    );
+    let config = SharedToolConfig::new(workspace, false, Default::default(), Default::default());
 
     let tools = build_tools(config);
     let tool = tools.iter().find(|t| t.name() == "search_files").unwrap();
@@ -498,4 +416,3 @@ async fn search_files_handles_empty_workspace() {
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["total"].as_u64().unwrap(), 0);
 }
-

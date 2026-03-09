@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
+use crate::types::SessionKey;
 
 /// Trait for spawning background subagent tasks.
 ///
@@ -28,7 +29,7 @@ pub trait SpawnService: Send + Sync {
         label: Option<String>,
         origin_channel: String,
         origin_chat_id: String,
-        session_key: Option<String>,
+        session_key: Option<SessionKey>,
     ) -> String;
 
     /// Cancels all tasks associated with a session.
@@ -40,5 +41,5 @@ pub trait SpawnService: Send + Sync {
     /// # Returns
     ///
     /// The number of tasks cancelled.
-    async fn cancel_by_session(&self, session_key: &str) -> Result<usize>;
+    async fn cancel_by_session(&self, session_key: &SessionKey) -> Result<usize>;
 }

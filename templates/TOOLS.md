@@ -1,28 +1,15 @@
-# TOOLS.md - Local Notes
+# Tool Usage Notes
 
-Skills define _how_ tools work. This file is for _your_ specifics.
+Tool signatures are provided automatically via function calling.
+This file documents non-obvious constraints and usage patterns.
 
-## What Goes Here
+## exec — Safety Limits
 
-Things like:
+- Commands have a configurable timeout (default 60s)
+- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
+- Output is truncated at 10,000 characters
+- `restrictToWorkspace` config can limit file access to the workspace
 
-- Device names and locations
-- SSH hosts and aliases
-- Preferred settings
-- Environment-specific details
+## cron — Scheduled Reminders
 
-## Examples
-
-```markdown
-### Devices
-
-- device-1 → Description
-
-### SSH
-
-- server → 192.168.1.100, user: admin
-```
-
----
-
-Add whatever helps you do your job. This is your cheat sheet.
+- Please refer to cron skill for usage.

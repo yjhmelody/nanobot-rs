@@ -1,47 +1,19 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use serde_json::json;
 use url::Url;
 
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::tools::config::SharedToolConfig;
 use crate::types::tools::{BraveSearchResponse, WebFetchArgs, WebFetchResponse, WebSearchArgs};
 
 pub fn definitions() -> Vec<ToolDefinition> {
-    static DEFS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
-    DEFS.get_or_init(|| {
-        vec![
-            ToolDefinition::function(
-                "web_search",
-                "Search the web. Returns titles, URLs, and snippets.",
-                JsonSchema::object(
-                    schema_props([
-                        ("query", JsonSchema::string(Some("Search query"))),
-                        (
-                            "count",
-                            JsonSchema::integer(Some("Results (1-10)"))
-                                .with_minimum(1)
-                                .with_maximum(10),
-                        ),
-                    ]),
-                    vec!["query"],
-                ),
-            ),
-            ToolDefinition::function(
-                "web_fetch",
-                "Fetch URL and extract readable content (HTML to text).",
-                JsonSchema::object(
-                    schema_props([
-                        ("url", JsonSchema::string(Some("URL to fetch"))),
-                        ("max_chars", JsonSchema::integer(None).with_minimum(100)),
-                    ]),
-                    vec!["url"],
-                ),
-            ),
-        ]
-    })
-    .clone()
+    vec![
+        WebSearchTool::definition_static(),
+        WebFetchTool::definition_static(),
+    ]
 }
 
 pub fn build_tools(config: SharedToolConfig) -> Vec<Arc<dyn Tool>> {
@@ -61,10 +33,33 @@ impl WebSearchTool {
     }
 
     fn definition_static() -> ToolDefinition {
-        definitions()
-            .into_iter()
-            .find(|d| d.function.name == "web_search")
-            .expect("web_search definition")
+        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+        DEF.get_or_init(|| {
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web. Returns titles, URLs, and snippets.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query"
+                            },
+                            "count": {
+                                "type": "integer",
+                                "description": "Results (1-10)",
+                                "minimum": 1,
+                                "maximum": 10
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }))
+        })
+        .clone()
     }
 }
 
@@ -100,10 +95,31 @@ impl WebFetchTool {
     }
 
     fn definition_static() -> ToolDefinition {
-        definitions()
-            .into_iter()
-            .find(|d| d.function.name == "web_fetch")
-            .expect("web_fetch definition")
+        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+        DEF.get_or_init(|| {
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "description": "Fetch URL and extract readable content (HTML to text).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "URL to fetch"
+                            },
+                            "max_chars": {
+                                "type": "integer",
+                                "minimum": 100
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                }
+            }))
+        })
+        .clone()
     }
 }
 

@@ -1,6 +1,5 @@
 //! ACP Client implementation based on the official Rust SDK.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::thread::JoinHandle;
@@ -31,18 +30,16 @@ pub struct ACPClient {
 impl ACPClient {
     pub async fn spawn(
         agent_id: String,
-        command: String,
-        cwd: Option<PathBuf>,
-        env: HashMap<String, String>,
+        command: Command,
+        session_cwd: PathBuf,
     ) -> Result<Self> {
-        let session_cwd = resolve_session_cwd(cwd)?;
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel();
 
         let thread_name = format!("acp-{}", sanitize_thread_label(&agent_id));
         let actor_thread = std::thread::Builder::new()
             .name(thread_name)
-            .spawn(move || run_actor_thread(command, env, session_cwd, command_rx, ready_tx))
+            .spawn(move || run_actor_thread(command, session_cwd, command_rx, ready_tx))
             .context("failed to spawn ACP actor thread")?;
 
         let mut actor_thread = Some(actor_thread);
@@ -131,8 +128,7 @@ enum ActorCommand {
 }
 
 fn run_actor_thread(
-    command: String,
-    env: HashMap<String, String>,
+    command: Command,
     session_cwd: PathBuf,
     mut command_rx: mpsc::UnboundedReceiver<ActorCommand>,
     ready_tx: oneshot::Sender<Result<()>>,
@@ -152,7 +148,7 @@ fn run_actor_thread(
         let local_set = tokio::task::LocalSet::new();
         local_set
             .run_until(async move {
-                let mut actor = match ACPActor::initialize(command, env, session_cwd).await {
+                let mut actor = match ACPActor::initialize(command, session_cwd).await {
                     Ok(actor) => {
                         let _ = ready_tx.send(Ok(()));
                         actor
@@ -178,22 +174,12 @@ struct ACPActor {
 
 impl ACPActor {
     async fn initialize(
-        command: String,
-        env: HashMap<String, String>,
+        mut command: Command,
         session_cwd: PathBuf,
     ) -> Result<Self> {
-        let mut process_cmd = Command::new(&command);
-        process_cmd.current_dir(&session_cwd);
-        process_cmd.stdin(Stdio::piped());
-        process_cmd.stdout(Stdio::piped());
-        process_cmd.stderr(Stdio::null());
-        for (key, value) in env {
-            process_cmd.env(key, value);
-        }
-
-        let mut process = process_cmd
+        let mut process = command
             .spawn()
-            .with_context(|| format!("failed to spawn ACP agent process '{}'", command))?;
+            .context("failed to spawn ACP agent process")?;
         let outgoing = process
             .stdin
             .take()
@@ -332,6 +318,35 @@ fn resolve_session_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Build a Command for spawning an ACP agent process.
+///
+/// This function assembles the command with proper configuration:
+/// - Sets the working directory
+/// - Configures stdin/stdout/stderr pipes
+/// - Applies environment variables
+/// - Adds command-line arguments
+pub fn build_acp_command(
+    command_str: &str,
+    args: &[String],
+    cwd: Option<PathBuf>,
+    env: &std::collections::HashMap<String, String>,
+) -> Result<(Command, PathBuf)> {
+    let session_cwd = resolve_session_cwd(cwd)?;
+
+    let mut command = Command::new(command_str);
+    command.args(args);
+    command.current_dir(&session_cwd);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
+
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    Ok((command, session_cwd))
+}
+
 async fn join_actor_thread(thread: Option<JoinHandle<()>>) -> Result<()> {
     let Some(thread) = thread else {
         return Ok(());
@@ -367,7 +382,6 @@ fn sanitize_thread_label(agent_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn resolve_session_cwd_makes_relative_path_absolute() {
@@ -386,15 +400,15 @@ mod tests {
     #[ignore = "requires local codex CLI and valid auth/session"]
     async fn smoke_local_codex() {
         let cwd = std::env::current_dir().expect("current dir");
-        let command = std::env::var("ACP_SMOKE_COMMAND").unwrap_or_else(|_| "codex".to_string());
-        let mut client = ACPClient::spawn(
-            "codex".to_string(),
-            command,
-            Some(cwd),
-            HashMap::new(),
-        )
-        .await
-        .expect("spawn ACP client");
+        let command_str =
+            std::env::var("ACP_SMOKE_COMMAND").unwrap_or_else(|_| "codex-acp".to_string());
+
+        let (command, session_cwd) = build_acp_command(&command_str, &[], Some(cwd), &std::collections::HashMap::new())
+            .expect("build command");
+
+        let mut client = ACPClient::spawn("codex".to_string(), command, session_cwd)
+            .await
+            .expect("spawn ACP client");
 
         let output = client
             .execute("Reply with one short sentence that confirms ACP is working.")

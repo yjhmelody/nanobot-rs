@@ -10,7 +10,11 @@
       "Bash(cargo run:*)",
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo update:*)"
+      "Bash(cargo update:*)",
+      "Bash(git add:*)",
+      "Bash(jq:*)",
+      "Bash(git commit:*)",
+      "WebFetch(domain:crates.io)"
     ]
   }
 }

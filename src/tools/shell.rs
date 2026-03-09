@@ -4,10 +4,11 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use regex::Regex;
+use serde_json::json;
 use tokio::process::Command;
 
 use crate::error::{NanobotError, Result};
-use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition, parse_args, schema_props};
+use crate::tools::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::tools::config::SharedToolConfig;
 use crate::types::tools::ExecArgs;
 
@@ -23,23 +24,27 @@ impl ShellTool {
     fn definition_static() -> ToolDefinition {
         static DEF: OnceLock<ToolDefinition> = OnceLock::new();
         DEF.get_or_init(|| {
-            ToolDefinition::function(
-                "exec",
-                "Execute a shell command and return its output. Use with caution.",
-                JsonSchema::object(
-                    schema_props([
-                        (
-                            "command",
-                            JsonSchema::string(Some("The shell command to execute")),
-                        ),
-                        (
-                            "working_dir",
-                            JsonSchema::string(Some("Optional working directory for the command")),
-                        ),
-                    ]),
-                    vec!["command"],
-                ),
-            )
+            tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "exec",
+                    "description": "Execute a shell command and return its output. Use with caution.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "The shell command to execute"
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Optional working directory for the command"
+                            }
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }))
         })
         .clone()
     }

@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::types::SessionKey;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageMetadata {
@@ -22,14 +24,14 @@ pub struct InboundMessage {
     #[serde(default)]
     pub metadata: MessageMetadata,
     #[serde(default)]
-    pub session_key_override: Option<String>,
+    pub session_key_override: Option<SessionKey>,
 }
 
 impl InboundMessage {
-    pub fn session_key(&self) -> String {
+    pub fn session_key(&self) -> SessionKey {
         self.session_key_override
             .clone()
-            .unwrap_or_else(|| format!("{}:{}", self.channel, self.chat_id))
+            .unwrap_or_else(|| SessionKey::new(&self.channel, &self.chat_id))
     }
 
     pub fn command(&self) -> Option<InboundCommand> {

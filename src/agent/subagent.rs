@@ -14,8 +14,9 @@ use crate::observability::TARGET_SUBAGENT;
 use crate::provider::{
     AssistantFunctionCall, AssistantToolCall, ChatMessage, ChatRequest, LLMProvider,
 };
-use crate::task_id::TaskId;
 use crate::tools::{ToolContext, ToolRegistry};
+use crate::types::SessionKey;
+use crate::types::task::TaskId;
 
 struct SubagentManagerInner {
     provider: Arc<dyn LLMProvider>,
@@ -31,7 +32,7 @@ struct SubagentManagerInner {
     running_tasks: DashMap<TaskId, JoinHandle<()>>,
     /// session => running tasks
     /// Using nested DashMap for better concurrent access
-    session_tasks: DashMap<String, DashMap<TaskId, ()>>,
+    session_tasks: DashMap<SessionKey, DashMap<TaskId, ()>>,
 }
 
 impl std::fmt::Debug for SubagentManagerInner {
@@ -80,7 +81,7 @@ impl SubagentManager {
         }
     }
 
-    pub async fn cancel_by_session(&self, session_key: &str) -> usize {
+    pub async fn cancel_by_session(&self, session_key: &SessionKey) -> usize {
         self.inner.cancel_by_session(session_key).await
     }
 }
@@ -92,7 +93,7 @@ impl SubagentManagerInner {
         label: Option<String>,
         origin_channel: String,
         origin_chat_id: String,
-        session_key: Option<String>,
+        session_key: Option<SessionKey>,
     ) -> String {
         let task_id = TaskId::new();
         let display_label = label.unwrap_or_else(|| truncate(&task, 30));
@@ -111,7 +112,7 @@ impl SubagentManagerInner {
                     &origin_chat_id,
                 )
                 .await;
-                this.cleanup_task(&task_id, session_key.as_deref()).await;
+                this.cleanup_task(&task_id, session_key.as_ref()).await;
             }
         });
 
@@ -135,7 +136,7 @@ impl SubagentManagerInner {
         )
     }
 
-    async fn cancel_by_session(&self, session_key: &str) -> usize {
+    async fn cancel_by_session(&self, session_key: &SessionKey) -> usize {
         // Remove all task IDs for this session
         let ids = if let Some((_, tasks)) = self.session_tasks.remove(session_key) {
             tasks.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
@@ -156,13 +157,13 @@ impl SubagentManagerInner {
         cancelled
     }
 
-    async fn cleanup_task(&self, task_id: &TaskId, session_key: Option<&str>) {
+    async fn cleanup_task(&self, task_id: &TaskId, session_key: Option<&SessionKey>) {
         self.running_tasks.remove(task_id);
         if let Some(session_key) = session_key {
             if let Some(tasks) = self.session_tasks.get(session_key) {
                 tasks.remove(task_id);
                 if tasks.is_empty() {
-                    drop(tasks); // Release the reference before removing
+                    drop(tasks);
                     self.session_tasks.remove(session_key);
                 }
             }
@@ -187,7 +188,7 @@ impl SubagentManagerInner {
         let tool_context = ToolContext {
             channel: origin_channel.to_string(),
             chat_id: origin_chat_id.to_string(),
-            session_key: format!("{}:{}", origin_channel, origin_chat_id),
+            session_key: SessionKey::new(origin_channel, origin_chat_id),
             message_id: None,
         };
 
@@ -255,14 +256,14 @@ impl SpawnService for SubagentManager {
         label: Option<String>,
         origin_channel: String,
         origin_chat_id: String,
-        session_key: Option<String>,
+        session_key: Option<SessionKey>,
     ) -> String {
         self.inner
             .spawn_impl(task, label, origin_channel, origin_chat_id, session_key)
             .await
     }
 
-    async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
+    async fn cancel_by_session(&self, session_key: &SessionKey) -> Result<usize> {
         Ok(self.inner.cancel_by_session(session_key).await)
     }
 }
@@ -529,7 +530,7 @@ mod tests {
                 Some("test".to_string()),
                 "cli".to_string(),
                 "direct".to_string(),
-                Some("cli:direct".to_string()),
+                Some(SessionKey::from("cli:direct")),
             )
             .await;
 
@@ -597,7 +598,7 @@ mod tests {
                 None,
                 "cli".to_string(),
                 "direct".to_string(),
-                Some("cli:direct".to_string()),
+                Some(SessionKey::from("cli:direct")),
             )
             .await;
 
@@ -605,11 +606,15 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Cancel by session
-        let cancelled = manager.cancel_by_session("cli:direct").await;
+        let cancelled = manager
+            .cancel_by_session(&SessionKey::from("cli:direct"))
+            .await;
         assert_eq!(cancelled, 1);
 
         // Verify no tasks remain
-        let cancelled_again = manager.cancel_by_session("cli:direct").await;
+        let cancelled_again = manager
+            .cancel_by_session(&SessionKey::from("cli:direct"))
+            .await;
         assert_eq!(cancelled_again, 0);
     }
 }

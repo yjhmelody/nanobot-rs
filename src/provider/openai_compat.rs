@@ -147,7 +147,7 @@ impl LLMProvider for OpenAICompatProvider {
         };
 
         if let Ok(payload_text) = serde_json::to_string(&payload) {
-            debug!(target: TARGET_PROVIDER, "provider request: {}", payload_text);
+            debug!(target: TARGET_PROVIDER, "provider request: {:#}", payload_text);
         }
 
         let res = self

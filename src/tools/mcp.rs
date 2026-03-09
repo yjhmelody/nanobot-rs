@@ -429,10 +429,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-
     use crate::config::schema::{ExecToolConfig, WebToolsConfig};
     use crate::tools::base::ToolContext;
     use crate::tools::registry::ToolRegistry;
+    use crate::types::SessionKey;
 
     fn definition_names(defs: Vec<ToolDefinition>) -> HashSet<String> {
         defs.into_iter().map(|d| d.function.name).collect()
@@ -816,7 +816,7 @@ while True:
         let ctx = ToolContext {
             channel: "test".to_string(),
             chat_id: "test".to_string(),
-            session_key: "test:test".to_string(),
+            session_key: SessionKey::from("test:test"),
             message_id: None,
         };
 
@@ -885,7 +885,7 @@ while True:
         let ctx = ToolContext {
             channel: "test".to_string(),
             chat_id: "test".to_string(),
-            session_key: "test:test".to_string(),
+            session_key: SessionKey::from("test:test"),
             message_id: None,
         };
 
