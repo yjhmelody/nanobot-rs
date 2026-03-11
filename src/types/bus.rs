@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::SessionKey;
 
+/// Metadata attached to inbound/outbound messages.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageMetadata {
@@ -10,6 +11,7 @@ pub struct MessageMetadata {
     pub message_id: Option<String>,
 }
 
+/// Message received from an external channel into the bus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundMessage {
@@ -43,6 +45,7 @@ impl InboundMessage {
     }
 }
 
+/// Built-in control commands encoded in inbound content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundCommand {
     Help,
@@ -69,6 +72,7 @@ impl InboundCommand {
     }
 }
 
+/// Inbound content that can be plain text or a parsed command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum InboundContent {
@@ -122,6 +126,7 @@ impl From<InboundContent> for String {
     }
 }
 
+/// Message emitted by the bus to an outbound channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboundMessage {

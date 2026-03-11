@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::traits::MemoryProvider;
 use super::memory_store::MemoryStore;
+use super::traits::MemoryProvider;
 
 /// Example: Memory provider that combines multiple sources.
 pub struct CompositeMemoryProvider {

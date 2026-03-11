@@ -25,10 +25,10 @@ tokio = { version = "1.44", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-opentelemetry = "0.32"
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.31", features = ["http-proto", "reqwest-client", "trace"] }
+# tracing-opentelemetry = "0.32"
+# opentelemetry = "0.31"
+# opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace"] }
+# opentelemetry-otlp = { version = "0.31", features = ["http-proto", "reqwest-client", "trace"] }
 url = "2.5"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 walkdir = "2.5"

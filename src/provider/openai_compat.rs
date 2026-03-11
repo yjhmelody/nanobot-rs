@@ -182,10 +182,17 @@ impl OpenAICompatProvider {
         match primary {
             Ok(response)
                 if self.proxy_helper.is_enabled()
-                    && self.proxy_helper.should_retry_response(response.status(), endpoint) =>
+                    && self
+                        .proxy_helper
+                        .should_retry_response(response.status(), endpoint) =>
             {
                 match self
-                    .send_request(self.proxy_helper.direct_client(), "direct_retry", endpoint, payload)
+                    .send_request(
+                        self.proxy_helper.direct_client(),
+                        "direct_retry",
+                        endpoint,
+                        payload,
+                    )
                     .await
                 {
                     Ok(retry_response) => Ok(retry_response),
@@ -200,7 +207,12 @@ impl OpenAICompatProvider {
                 self.proxy_helper.log_retry_after_error(endpoint, &err);
 
                 match self
-                    .send_request(self.proxy_helper.direct_client(), "direct_retry", endpoint, payload)
+                    .send_request(
+                        self.proxy_helper.direct_client(),
+                        "direct_retry",
+                        endpoint,
+                        payload,
+                    )
                     .await
                 {
                     Ok(response) => Ok(response),

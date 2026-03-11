@@ -4,26 +4,32 @@ You are an AI assistant working on the nanobot-rs project. This guide defines ho
 
 ## Core Principles
 
-1. **Read before writing** - Always read relevant code before making changes
-2. **Type-safe by default** - Leverage Rust's type system, avoid runtime errors
-3. **Test-driven** - Write tests for new features, ensure existing tests pass
-4. **Incremental changes** - Small, focused changes over large rewrites
-5. **Document decisions** - Update docs when making architectural changes
+1. **Trait-first design** - Define traits before implementations for all major components
+2. **Low coupling** - Components depend on trait abstractions, not concrete types
+3. **Read before writing** - Always read relevant code before making changes
+4. **Type-safe by default** - Leverage Rust's type system, avoid runtime errors
+5. **Test-driven** - Write tests for new features, ensure existing tests pass
+6. **Incremental changes** - Small, focused changes over large rewrites
+7. **Document decisions** - Update docs when making architectural changes
 
 ## Your Workflow
 
 ### Before coding
-1. Read `CLAUDE.md` for architecture overview
-2. Check `src/types/` for existing type definitions
-3. Review related module code and tests
-4. Understand the error handling patterns
+1. Read `CLAUDE.md` for architecture overview and trait-first design principles
+2. Check if a trait already exists for the component you're working on
+3. Check `src/types/` for existing type definitions
+4. Review related module code and tests
+5. Understand the error handling patterns
 
 ### While coding
+- **Design traits first** for new components before writing implementations
 - Follow existing code patterns and style
+- Use trait abstractions (`Arc<dyn Trait>`) instead of concrete types for dependencies
 - Use `Result<T>` for fallible operations
 - Add `tracing::info/warn/error` for important events
 - Handle all error cases explicitly
 - Write clear, self-documenting code
+- Keep components loosely coupled through dependency injection
 
 ### After coding
 ```bash
@@ -33,6 +39,77 @@ cargo fmt               # Format code
 ```
 
 ## Common Patterns
+
+### Trait-First Component Design
+
+When adding a new component, always start with the trait:
+
+```rust
+// 1. Define the trait in src/my_module/traits.rs or src/my_module/mod.rs
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait MyComponent: Send + Sync {
+    /// Document what this method does
+    async fn do_something(&self, input: &str) -> Result<String>;
+
+    /// Document the contract
+    fn get_name(&self) -> &str;
+}
+
+// 2. Implement for concrete types
+pub struct FileBasedComponent {
+    path: PathBuf,
+}
+
+#[async_trait]
+impl MyComponent for FileBasedComponent {
+    async fn do_something(&self, input: &str) -> Result<String> {
+        // Implementation
+    }
+
+    fn get_name(&self) -> &str {
+        "file-based"
+    }
+}
+
+// 3. Use trait in dependent code
+pub struct Consumer {
+    component: Arc<dyn MyComponent>,  // ✅ Depend on trait
+}
+
+impl Consumer {
+    pub fn new(component: Arc<dyn MyComponent>) -> Self {
+        Self { component }
+    }
+}
+
+// 4. Test with mocks
+#[cfg(test)]
+mod tests {
+    use mockall::mock;
+
+    mock! {
+        Component {}
+
+        #[async_trait]
+        impl MyComponent for Component {
+            async fn do_something(&self, input: &str) -> Result<String>;
+            fn get_name(&self) -> &str;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_consumer() {
+        let mut mock = MockComponent::new();
+        mock.expect_do_something()
+            .returning(|_| Ok("mocked".to_string()));
+
+        let consumer = Consumer::new(Arc::new(mock));
+        // Test consumer behavior
+    }
+}
+```
 
 ### Adding a Tool
 ```rust
@@ -288,9 +365,64 @@ See `docs/PERFORMANCE_OPTIMIZATION.md` for detailed guidelines.
 
 ## Anti-patterns to Avoid
 
+### Architecture Anti-patterns
+❌ **Concrete type dependencies** - Don't depend on concrete types when a trait exists
+```rust
+// ❌ Bad: Tight coupling to concrete type
+pub struct Agent {
+    provider: AnthropicProvider,  // Hard to test, hard to swap
+}
+
+// ✅ Good: Depend on trait abstraction
+pub struct Agent {
+    provider: Arc<dyn LLMProvider>,  // Testable, swappable
+}
+```
+
+❌ **Implementation before trait** - Don't write implementations before defining the trait
+```rust
+// ❌ Bad: Implementation first, trait later (or never)
+pub struct MyStorage { /* ... */ }
+impl MyStorage {
+    pub fn save(&self, data: &str) -> Result<()> { /* ... */ }
+}
+
+// ✅ Good: Trait first, then implementation
+#[async_trait]
+pub trait Storage: Send + Sync {
+    async fn save(&self, data: &str) -> Result<()>;
+}
+
+pub struct MyStorage { /* ... */ }
+#[async_trait]
+impl Storage for MyStorage {
+    async fn save(&self, data: &str) -> Result<()> { /* ... */ }
+}
+```
+
+❌ **Circular dependencies** - Don't create circular module dependencies
+```rust
+// ❌ Bad: A depends on B, B depends on A
+// src/module_a.rs
+use crate::module_b::B;
+
+// src/module_b.rs
+use crate::module_a::A;
+
+// ✅ Good: Introduce a trait or use an event bus
+// src/traits.rs
+pub trait ComponentB { /* ... */ }
+
+// src/module_a.rs
+use crate::traits::ComponentB;
+```
+
+### Code Anti-patterns
 ❌ Using `unwrap()` or `expect()` in library code
 ❌ Ignoring errors with `let _ = ...`
 ❌ Long-running synchronous operations in async context
 ❌ Modifying code without reading it first
 ❌ Adding features not requested
 ❌ Breaking existing tests without fixing them
+❌ Using concrete types when traits are available
+❌ Skipping trait definition for new components

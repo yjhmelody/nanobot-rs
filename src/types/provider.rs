@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::tool_name::ToolName;
 
+/// Role of a chat message in the provider request/response.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageRole {
@@ -22,6 +23,7 @@ impl MessageRole {
     }
 }
 
+/// Typed content parts for multi-part messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -29,6 +31,7 @@ pub enum ContentPart {
     Text { text: String },
 }
 
+/// Message content as plain text or structured parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
@@ -45,12 +48,14 @@ impl MessageContent {
     }
 }
 
+/// Function call requested by the assistant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantFunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
+/// Tool call wrapper for function invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantToolCall {
     pub id: String,
@@ -59,6 +64,7 @@ pub struct AssistantToolCall {
     pub function: AssistantFunctionCall,
 }
 
+/// Chat message payload used by providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: MessageRole,
@@ -151,6 +157,7 @@ impl ChatMessage {
     }
 }
 
+/// Tool call returned by providers in unified response format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
     pub id: String,
@@ -158,6 +165,7 @@ pub struct ToolCallRequest {
     pub arguments_json: String,
 }
 
+/// Token usage statistics from provider responses.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageStats {
     pub prompt_tokens: Option<u64>,
@@ -165,6 +173,7 @@ pub struct UsageStats {
     pub total_tokens: Option<u64>,
 }
 
+/// Unified LLM response with optional tool calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMResponse {
     pub content: Option<String>,

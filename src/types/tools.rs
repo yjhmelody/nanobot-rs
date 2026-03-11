@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::SessionKey;
 
+/// Context information passed into tool execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolContext {
     /// Current channel name (e.g. `cli`, `telegram`).
@@ -17,6 +18,7 @@ pub struct ToolContext {
     pub message_id: Option<String>,
 }
 
+/// OpenAI-compatible tool definition wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     /// Always `function` for OpenAI-compatible tool schema.
@@ -25,6 +27,7 @@ pub struct ToolDefinition {
     pub function: ToolFunction,
 }
 
+/// Function schema contained in a tool definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolFunction {
     pub name: String,
@@ -32,6 +35,7 @@ pub struct ToolFunction {
     pub parameters: JsonSchema,
 }
 
+/// JSON schema types supported by tool parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JsonSchemaType {
@@ -44,6 +48,7 @@ pub enum JsonSchemaType {
     Null,
 }
 
+/// JSON schema definition for tool parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonSchema {
     #[serde(rename = "type")]
@@ -146,17 +151,20 @@ impl JsonSchema {
     }
 }
 
+/// Arguments for read_file tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReadFileArgs {
     pub(crate) path: String,
 }
 
+/// Arguments for write_file tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct WriteFileArgs {
     pub(crate) path: String,
     pub(crate) content: String,
 }
 
+/// Arguments for edit_file tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct EditFileArgs {
     pub(crate) path: String,
@@ -164,11 +172,13 @@ pub(crate) struct EditFileArgs {
     pub(crate) new_text: String,
 }
 
+/// Arguments for list_dir tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListDirArgs {
     pub(crate) path: String,
 }
 
+/// Arguments for message tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct MessageArgs {
     pub(crate) content: String,
@@ -178,6 +188,7 @@ pub(crate) struct MessageArgs {
     pub(crate) media: Option<Vec<String>>,
 }
 
+/// Actions supported by cron tool.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum CronAction {
@@ -187,6 +198,7 @@ pub(crate) enum CronAction {
     Remove,
 }
 
+/// Arguments for cron tool operations.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CronArgs {
     pub(crate) action: CronAction,
@@ -198,18 +210,21 @@ pub(crate) struct CronArgs {
     pub(crate) job_id: Option<String>,
 }
 
+/// Arguments for spawn tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct SpawnArgs {
     pub(crate) task: String,
     pub(crate) label: Option<String>,
 }
 
+/// Arguments for exec tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExecArgs {
     pub(crate) command: String,
     pub(crate) working_dir: Option<String>,
 }
 
+/// Arguments for ACP execute tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ACPExecuteArgs {
     pub(crate) agent_id: String,
@@ -217,29 +232,34 @@ pub(crate) struct ACPExecuteArgs {
     pub(crate) cwd: Option<PathBuf>,
 }
 
+/// Arguments for web_search tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct WebSearchArgs {
     pub(crate) query: String,
     pub(crate) count: Option<i64>,
 }
 
+/// Arguments for web_fetch tool.
 #[derive(Debug, Deserialize)]
 pub(crate) struct WebFetchArgs {
     pub(crate) url: String,
     pub(crate) max_chars: Option<i64>,
 }
 
+/// Partial Brave search API response payload.
 #[derive(Debug, Deserialize)]
 pub(crate) struct BraveSearchResponse {
     pub(crate) web: Option<BraveWebData>,
 }
 
+/// Brave web search results container.
 #[derive(Debug, Deserialize)]
 pub(crate) struct BraveWebData {
     #[serde(default)]
     pub(crate) results: Vec<BraveResult>,
 }
 
+/// Single Brave search result item.
 #[derive(Debug, Deserialize)]
 pub(crate) struct BraveResult {
     #[serde(default)]
@@ -250,6 +270,7 @@ pub(crate) struct BraveResult {
     pub(crate) description: Option<String>,
 }
 
+/// Normalized response for web_fetch tool output.
 #[derive(Debug, Serialize)]
 pub(crate) struct WebFetchResponse {
     pub(crate) url: String,

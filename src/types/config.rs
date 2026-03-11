@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::utils::helpers::expand_tilde;
 
+/// Top-level configuration loaded from config files and defaults.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -255,6 +256,7 @@ impl ProviderSpec {
     }
 }
 
+/// Agent-related configuration (defaults and model settings).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AgentsConfig {
@@ -269,6 +271,7 @@ impl Default for AgentsConfig {
     }
 }
 
+/// Default settings applied to all agents unless overridden.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AgentDefaults {
@@ -331,6 +334,7 @@ impl AgentDefaults {
     }
 }
 
+/// Configuration for outbound channel adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ChannelsConfig {
@@ -353,6 +357,7 @@ impl Default for ChannelsConfig {
     }
 }
 
+/// Per-channel settings shared across adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GenericChannelConfig {
@@ -372,6 +377,7 @@ impl Default for GenericChannelConfig {
     }
 }
 
+/// Provider settings for a single LLM backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProviderConfig {
@@ -398,6 +404,7 @@ impl Default for ProviderConfig {
     }
 }
 
+/// Collection of all configured providers.
 #[derive(Debug, Clone, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProvidersConfig {
@@ -500,6 +507,7 @@ fn provider_spec(name: &str) -> Option<&'static ProviderSpec> {
         .find(|spec| spec.matches_collapsed(&collapsed))
 }
 
+/// Gateway server configuration (host/port/heartbeat).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GatewayConfig {
@@ -535,6 +543,7 @@ impl GatewayConfig {
     }
 }
 
+/// Heartbeat polling configuration for periodic tasks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HeartbeatConfig {
@@ -562,6 +571,7 @@ impl HeartbeatConfig {
     }
 }
 
+/// Configuration for tool subsystems (web, exec, MCP).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ToolsConfig {
@@ -600,6 +610,7 @@ impl ToolsConfig {
     }
 }
 
+/// Web tool configuration including proxy and search settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WebToolsConfig {
@@ -624,6 +635,7 @@ impl WebToolsConfig {
     }
 }
 
+/// Web search configuration (API key and result limits).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WebSearchConfig {
@@ -650,6 +662,7 @@ impl WebSearchConfig {
     }
 }
 
+/// Exec tool configuration (timeouts and PATH adjustments).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ExecToolConfig {
@@ -676,6 +689,7 @@ impl ExecToolConfig {
     }
 }
 
+/// MCP server configuration for dynamic tool hosting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct MCPServerConfig {

@@ -203,10 +203,7 @@ mod tests {
         let store = MemoryStore::new(&workspace).expect("new memory store");
         let input = "Important memory content";
 
-        store
-            .write_long_term(input)
-            .await
-            .expect("write memory");
+        store.write_long_term(input).await.expect("write memory");
         let output = store.read_long_term().await;
 
         assert_eq!(output, input);

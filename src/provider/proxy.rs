@@ -126,17 +126,13 @@ mod tests {
 
     #[test]
     fn retry_without_proxy_status_covers_gateway_failures() {
-        assert!(should_retry_without_proxy_status(
-            StatusCode::BAD_GATEWAY
-        ));
+        assert!(should_retry_without_proxy_status(StatusCode::BAD_GATEWAY));
         assert!(should_retry_without_proxy_status(
             StatusCode::SERVICE_UNAVAILABLE
         ));
         assert!(should_retry_without_proxy_status(
             StatusCode::GATEWAY_TIMEOUT
         ));
-        assert!(!should_retry_without_proxy_status(
-            StatusCode::BAD_REQUEST
-        ));
+        assert!(!should_retry_without_proxy_status(StatusCode::BAD_REQUEST));
     }
 }

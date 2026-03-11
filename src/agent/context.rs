@@ -4,8 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
 
-use super::traits::ContextProvider;
-use crate::agent::skills::SkillsLoader;
+use super::skills::SkillsLoader;
+use super::traits::{ContextProvider, SkillsProvider};
 use crate::session::SessionManager;
 use crate::types::provider::{
     AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole,
@@ -14,11 +14,15 @@ use crate::types::provider::{
 const IDENTITY_PROMPT_TEMPLATE: &str = "# nanobot :cat:\n\nYou are nanobot, a helpful AI assistant.\n\n## Runtime\nRust runtime\n\n## Workspace\nYour workspace is at: {workspace}\n- Long-term memory: {workspace}/memory/MEMORY.md\n- History log: {workspace}/memory/HISTORY.md\n- Custom skills: {workspace}/skills/{skill-name}/SKILL.md\n\n## nanobot Guidelines\n- State intent before tool calls, but NEVER predict or claim results before receiving them.\n- Before modifying a file, read it first. Do not assume files or directories exist.\n- After writing or editing a file, re-read it if accuracy matters.\n- If a tool call fails, analyze the error before retrying with a different approach.\n- Ask for clarification when the request is ambiguous.\n\nReply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.";
 const SKILLS_SUMMARY_PREAMBLE: &str = "# Skills\n\nThe following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.\nSkills with available=\"false\" need dependencies installed first - you can try installing them with apt/brew.\n\n";
 
+/// Context builder for constructing agent prompts and message history.
+///
+/// Uses the SkillsProvider trait for flexible skills management, allowing
+/// different implementations (file-based, cached, remote, etc.).
 // TODO: design a cache for context
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ContextBuilder {
     workspace: PathBuf,
-    skills: SkillsLoader,
+    skills: Box<dyn SkillsProvider>,
 }
 
 impl ContextBuilder {
@@ -47,8 +51,21 @@ impl ContextBuilder {
     ///
     /// Returns an error if initialization fails.
     pub fn new(workspace: PathBuf) -> Result<Self> {
-        let skills = SkillsLoader::new(&workspace);
+        let skills = Box::new(SkillsLoader::new(&workspace));
         Ok(Self { workspace, skills })
+    }
+
+    /// Creates a new context builder with a custom skills provider.
+    ///
+    /// This allows injecting different SkillsProvider implementations
+    /// (e.g., cached, remote, or test mocks).
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace` - Workspace directory path
+    /// * `skills` - Custom skills provider implementation
+    pub fn with_skills_provider(workspace: PathBuf, skills: Box<dyn SkillsProvider>) -> Self {
+        Self { workspace, skills }
     }
 
     /// Builds the system prompt for the agent.
@@ -104,64 +121,6 @@ impl ContextBuilder {
         }
 
         parts.join("\n\n---\n\n")
-    }
-
-    /// Builds the message history for the LLM request.
-    ///
-    /// This method constructs the complete message array including:
-    /// - System prompt
-    /// - Historical messages
-    /// - Current user message with runtime context
-    ///
-    /// # Arguments
-    ///
-    /// * `session_manager` - Session manager for retrieving memory context
-    /// * `session_key` - Current session key for memory lookup
-    /// * `history` - Previous conversation messages
-    /// * `current_message` - The new user message text
-    /// * `media` - Optional media attachments (URLs or paths)
-    /// * `channel` - Optional channel name for runtime context
-    /// * `chat_id` - Optional chat ID for runtime context
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector of chat messages ready for the LLM API.
-    pub async fn build_messages(
-        &self,
-        session_manager: &SessionManager,
-        session_key: &str,
-        history: Vec<ChatMessage>,
-        current_message: &str,
-        media: Option<&[String]>,
-        channel: Option<&str>,
-        chat_id: Option<&str>,
-    ) -> Vec<ChatMessage> {
-        let runtime = self.build_runtime_context(channel, chat_id);
-        let user_content = self.build_user_content(current_message, media);
-
-        let merged = match user_content {
-            MessageContent::Text(text) => MessageContent::Text(format!("{}\n\n{}", runtime, text)),
-            MessageContent::Parts(mut parts) => {
-                parts.insert(0, ContentPart::Text { text: runtime });
-                MessageContent::Parts(parts)
-            }
-        };
-
-        let mut messages = Vec::new();
-        messages.push(ChatMessage::system_text(
-            self.build_system_prompt(session_manager, session_key).await,
-        ));
-        messages.extend(history);
-        messages.push(ChatMessage {
-            role: MessageRole::User,
-            content: Some(merged),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            reasoning_content: None,
-            thinking_blocks: None,
-        });
-        messages
     }
 
     /// Adds a tool execution result to the message history.
@@ -294,16 +253,32 @@ impl ContextProvider for ContextBuilder {
         channel: Option<&str>,
         chat_id: Option<&str>,
     ) -> Vec<ChatMessage> {
-        self.build_messages(
-            session_manager,
-            session_key,
-            history,
-            current_message,
-            media,
-            channel,
-            chat_id,
-        )
-        .await
+        let runtime = self.build_runtime_context(channel, chat_id);
+        let user_content = self.build_user_content(current_message, media);
+
+        let merged = match user_content {
+            MessageContent::Text(text) => MessageContent::Text(format!("{}\n\n{}", runtime, text)),
+            MessageContent::Parts(mut parts) => {
+                parts.insert(0, ContentPart::Text { text: runtime });
+                MessageContent::Parts(parts)
+            }
+        };
+
+        let mut messages = Vec::new();
+        messages.push(ChatMessage::system_text(
+            self.build_system_prompt(session_manager, session_key).await,
+        ));
+        messages.extend(history);
+        messages.push(ChatMessage {
+            role: MessageRole::User,
+            content: Some(merged),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+            thinking_blocks: None,
+        });
+        messages
     }
 }
 
@@ -429,7 +404,8 @@ mod tests {
             .expect("create store");
         let session_manager = SessionManager::new(Box::new(store));
 
-        let messages = builder
+        let provider: &dyn ContextProvider = &builder;
+        let messages = provider
             .build_messages(
                 &session_manager,
                 "test-session",
@@ -469,7 +445,8 @@ mod tests {
             ChatMessage::assistant(Some("Previous answer".to_string()), None, None, None),
         ];
 
-        let messages = builder
+        let provider: &dyn ContextProvider = &builder;
+        let messages = provider
             .build_messages(
                 &session_manager,
                 "test-session",

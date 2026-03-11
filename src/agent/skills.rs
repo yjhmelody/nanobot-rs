@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
+
+use super::traits::SkillsProvider;
 use crate::types::agent::{SkillMeta, SkillMetaNode};
 
+/// Information about a skill without loading its full content.
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
     pub name: String,
@@ -10,6 +14,10 @@ pub struct SkillInfo {
     pub source: String,
 }
 
+/// File-based skills loader that implements progressive disclosure.
+///
+/// Skills are loaded from the workspace/skills directory. Each skill is a
+/// subdirectory containing a SKILL.md file with optional frontmatter metadata.
 #[derive(Debug, Clone)]
 pub struct SkillsLoader {
     workspace_skills: PathBuf,
@@ -223,6 +231,29 @@ impl SkillsLoader {
     async fn get_skill_metadata(&self, name: &str) -> Option<HashMap<String, String>> {
         let content = self.load_skill(name).await?;
         parse_frontmatter(&content)
+    }
+}
+
+#[async_trait]
+impl SkillsProvider for SkillsLoader {
+    async fn list_skills(&self, filter_unavailable: bool) -> Vec<SkillInfo> {
+        self.list_skills(filter_unavailable).await
+    }
+
+    async fn load_skill(&self, name: &str) -> Option<String> {
+        self.load_skill(name).await
+    }
+
+    async fn get_always_skills(&self) -> Vec<String> {
+        self.get_always_skills().await
+    }
+
+    async fn load_skills_for_context(&self, skill_names: &[String]) -> String {
+        self.load_skills_for_context(skill_names).await
+    }
+
+    async fn build_skills_summary(&self) -> String {
+        self.build_skills_summary().await
     }
 }
 

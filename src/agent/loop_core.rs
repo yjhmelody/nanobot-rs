@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::task::AbortHandle;
@@ -11,6 +12,7 @@ use tracing::{Instrument, debug, debug_span, error, info, trace};
 
 use crate::agent::ContextProvider;
 use crate::agent::react::{ExecutionContext, LoopOutcome, ModelConfig, ReActExecutor};
+use crate::agent::traits::Agent;
 use crate::bus::{InboundCommand, InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
@@ -437,7 +439,10 @@ impl AgentLoop {
             "tool registry turn state reset"
         );
 
-        let history = self.sessions.get_history(&session, self.memory_window).await?;
+        let history = self
+            .sessions
+            .get_history(&session, self.memory_window)
+            .await?;
         let history_len = history.len();
         debug!(
             target: TARGET_AGENT,
@@ -690,6 +695,39 @@ impl AgentLoop {
             total_messages = session.messages.len(),
             "persisted turn into session history"
         );
+    }
+}
+
+#[async_trait]
+impl Agent for AgentLoop {
+    async fn run(self: Arc<Self>) {
+        AgentLoop::run(self).await
+    }
+
+    async fn stop(&self) {
+        AgentLoop::stop(self).await
+    }
+
+    async fn process_direct(
+        &self,
+        content: &str,
+        session_key: &str,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<String> {
+        AgentLoop::process_direct(self, content, session_key, channel, chat_id).await
+    }
+
+    fn has_active_tasks(&self, session_key: &SessionKey) -> bool {
+        AgentLoop::has_active_tasks(self, session_key)
+    }
+
+    async fn close_mcp(&self) {
+        AgentLoop::close_mcp(self).await
+    }
+
+    async fn close_provider(&self) {
+        AgentLoop::close_provider(self).await
     }
 }
 

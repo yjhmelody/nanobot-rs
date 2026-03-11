@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info};
 
 use crate::agent::skills::SkillsLoader;
-use crate::agent::spawn_service::SpawnService;
+use crate::agent::traits::SpawnService;
 use crate::bus::{InboundMessage, MessageBus, MessageMetadata};
 use crate::error::Result;
 use crate::observability::TARGET_SUBAGENT;
@@ -18,9 +18,9 @@ use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
 use crate::types::task::TaskId;
 
-const SUBAGENT_PROMPT_TEMPLATE: &str =
-    "# Subagent\n\nCurrent Time: {runtime}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{workspace}";
-const SUBAGENT_SKILLS_PREAMBLE: &str = "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n";
+const SUBAGENT_PROMPT_TEMPLATE: &str = "# Subagent\n\nCurrent Time: {runtime}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{workspace}";
+const SUBAGENT_SKILLS_PREAMBLE: &str =
+    "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n";
 
 struct SubagentManagerInner {
     provider: Arc<dyn LLMProvider>,
@@ -315,9 +315,11 @@ async fn run_subagent_loop_impl(
     let runtime = chrono::Local::now()
         .format("%Y-%m-%d %H:%M (%A)")
         .to_string();
-    let mut parts = vec![SUBAGENT_PROMPT_TEMPLATE
-        .replace("{runtime}", &runtime)
-        .replace("{workspace}", &workspace.display().to_string())];
+    let mut parts = vec![
+        SUBAGENT_PROMPT_TEMPLATE
+            .replace("{runtime}", &runtime)
+            .replace("{workspace}", &workspace.display().to_string()),
+    ];
 
     let skills = SkillsLoader::new(workspace).build_skills_summary().await;
     if !skills.trim().is_empty() {

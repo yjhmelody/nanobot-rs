@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+/// Runtime requirements parsed from skill frontmatter.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct SkillRequirements {
@@ -7,6 +8,7 @@ pub(crate) struct SkillRequirements {
     pub(crate) env: Vec<String>,
 }
 
+/// Raw skill metadata node that may contain nested overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct SkillMetaNode {
@@ -16,6 +18,7 @@ pub(crate) struct SkillMetaNode {
     pub(crate) openclaw: Option<Box<SkillMetaNode>>,
 }
 
+/// Normalized skill metadata after resolving overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct SkillMeta {
     pub(crate) always: bool,

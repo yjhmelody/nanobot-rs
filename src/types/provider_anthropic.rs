@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::tools::{JsonSchema, ToolDefinition};
 
+/// Anthropic messages API request payload.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AnthropicMessagesPayload {
     pub(crate) model: String,
@@ -15,6 +16,7 @@ pub(crate) struct AnthropicMessagesPayload {
     pub(crate) tools: Option<Vec<AnthropicToolDefinition>>,
 }
 
+/// Input message structure for Anthropic requests.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AnthropicInputMessage {
     pub(crate) role: &'static str,
@@ -27,6 +29,7 @@ impl AnthropicInputMessage {
     }
 }
 
+/// Content blocks accepted by Anthropic input messages.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicInputContentBlock {
@@ -46,6 +49,7 @@ pub(crate) enum AnthropicInputContentBlock {
     },
 }
 
+/// Tool definition mapping for Anthropic.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AnthropicToolDefinition {
     pub(crate) name: String,
@@ -63,7 +67,7 @@ impl From<ToolDefinition> for AnthropicToolDefinition {
     }
 }
 
-/// Response content block from Anthropic API
+/// Response content block from Anthropic API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicContentBlock {
@@ -83,6 +87,7 @@ pub(crate) enum AnthropicContentBlock {
     },
 }
 
+/// Anthropic messages API response payload.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct AnthropicMessagesResponse {
     #[serde(default)]
@@ -93,6 +98,7 @@ pub(crate) struct AnthropicMessagesResponse {
     pub(crate) usage: Option<AnthropicUsage>,
 }
 
+/// Token usage metadata from Anthropic responses.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct AnthropicUsage {
     #[serde(default)]
@@ -105,12 +111,14 @@ pub(crate) struct AnthropicUsage {
     pub(crate) cache_read_input_tokens: Option<u64>,
 }
 
+/// Error wrapper returned by Anthropic on failure.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct AnthropicErrorResponse {
     #[serde(default)]
     pub(crate) error: Option<AnthropicErrorDetail>,
 }
 
+/// Detailed error information from Anthropic.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct AnthropicErrorDetail {
     #[serde(default)]

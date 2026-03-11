@@ -50,6 +50,35 @@ Types are being consolidated into `src/types/`:
 
 ## Development Conventions
 
+### Architecture Principles
+
+**Trait-First Design**:
+- **Always define traits before implementations** for major components
+- Traits enable loose coupling, testability, and future extensibility
+- Each component should depend on trait abstractions, not concrete types
+
+**Examples of trait-first design in this codebase**:
+- `LLMProvider` trait → Multiple provider implementations (Anthropic, OpenAI, etc.)
+- `Tool` trait → Built-in and dynamic tools (filesystem, web, MCP, etc.)
+- `SessionStore` trait → Different persistence backends (JSONL, future: SQLite, Redis)
+- `MemoryProvider` trait → Pluggable memory sources (file-based, composite, future: vector DB)
+- `SkillsProvider` trait → Skills management (file-based, future: cached, remote)
+- `ContextProvider` trait → Context building strategies
+
+**Low Coupling Guidelines**:
+1. **Depend on abstractions**: Use `Arc<dyn Trait>` or `Box<dyn Trait>` for dependencies
+2. **Avoid circular dependencies**: If A needs B and B needs A, introduce a trait or event bus
+3. **Use dependency injection**: Pass dependencies through constructors, not global state
+4. **Separate concerns**: Each module should have a single, well-defined responsibility
+5. **Interface segregation**: Keep traits focused and minimal
+
+**When adding a new component**:
+1. ✅ Define the trait first (e.g., `pub trait MyComponent: Send + Sync`)
+2. ✅ Document the trait's contract and use cases
+3. ✅ Implement the trait for concrete types
+4. ✅ Use the trait in dependent code, not the concrete type
+5. ✅ Add tests using mock implementations (via `mockall`)
+
 ### Code Style
 - Prefer strong typing and trait abstractions
 - Use `Result<T>` for fallible operations, never panic in library code
@@ -104,10 +133,18 @@ RUST_LOG=debug cargo test     # With logs
 ### Common Tasks
 
 **Add a new tool**:
-1. Create `src/tools/my_tool.rs`
-2. Implement `Tool` trait
-3. Register in `ToolRegistry::new()` or via `register_dynamic_tool()`
-4. Add tests
+1. Define the tool's interface (usually implements `Tool` trait)
+2. Create `src/tools/my_tool.rs`
+3. Implement `Tool` trait with proper error handling
+4. Register in `ToolRegistry::new()` or via `register_dynamic_tool()`
+5. Add unit tests with mock dependencies
+
+**Add a new component**:
+1. **Design the trait first**: Define the interface in a separate file (e.g., `traits.rs`)
+2. Document the trait's purpose, methods, and contracts
+3. Implement the trait for concrete types
+4. Use dependency injection to pass the trait to consumers
+5. Write tests using mock implementations
 
 **Modify agent loop**:
 1. Read `src/agent/loop_core.rs` first
@@ -119,6 +156,7 @@ RUST_LOG=debug cargo test     # With logs
 1. Implement `LLMProvider` trait in `src/provider/`
 2. Register in `ProviderRegistry`
 3. Update `src/config/schema.rs`
+4. Add integration tests
 
 ## Built-in Tools
 
@@ -132,11 +170,23 @@ RUST_LOG=debug cargo test     # With logs
 
 ## Key Design Decisions
 
-1. **Single-process**: Not distributed, local scheduling only
-2. **Session isolation**: Concurrent sessions with per-session locks
-3. **Error recovery**: Tool errors → text prompts (don't abort turn)
-4. **Config compatibility**: Support both camelCase and snake_case for Python migration
-5. **No tool transactions**: Tools are independent, no atomicity guarantees
+1. **Trait-first architecture**: All major components are defined as traits before implementation
+   - Enables loose coupling between modules
+   - Facilitates testing with mock implementations
+   - Allows multiple implementations (e.g., different providers, storage backends)
+   - Makes the system extensible without modifying existing code
+
+2. **Single-process**: Not distributed, local scheduling only
+
+3. **Session isolation**: Concurrent sessions with per-session locks
+
+4. **Error recovery**: Tool errors → text prompts (don't abort turn)
+
+5. **Config compatibility**: Support both camelCase and snake_case for Python migration
+
+6. **No tool transactions**: Tools are independent, no atomicity guarantees
+
+7. **Progressive disclosure**: Skills and context loaded on-demand to minimize token usage
 
 ## Commands
 

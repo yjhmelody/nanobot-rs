@@ -183,9 +183,7 @@ impl HeartbeatService {
             .chat(ChatRequest {
                 session_key: Some(SessionKey::from("system:heartbeat")),
                 messages: vec![
-                    ChatMessage::system_text(
-                        HEARTBEAT_SYSTEM_PROMPT,
-                    ),
+                    ChatMessage::system_text(HEARTBEAT_SYSTEM_PROMPT),
                     ChatMessage::user_text(format!("{HEARTBEAT_USER_PROMPT_PREFIX}{content}")),
                 ],
                 tools: None,

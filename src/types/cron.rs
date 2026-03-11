@@ -5,6 +5,7 @@ use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+/// Supported schedule kinds for cron jobs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CronScheduleKind {
@@ -13,6 +14,7 @@ pub enum CronScheduleKind {
     Cron,
 }
 
+/// Schedule definition for cron jobs (at/every/cron).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CronSchedule {
@@ -103,6 +105,7 @@ impl CronSchedule {
     }
 }
 
+/// Payload for cron job execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CronPayload {
@@ -125,6 +128,7 @@ impl Default for CronPayload {
     }
 }
 
+/// Runtime state for a cron job's execution history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CronJobState {
@@ -145,6 +149,7 @@ impl Default for CronJobState {
     }
 }
 
+/// Stored cron job configuration and state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CronJob {
@@ -175,6 +180,7 @@ impl Default for CronJob {
     }
 }
 
+/// On-disk cron store format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct CronStore {
@@ -191,6 +197,7 @@ impl Default for CronStore {
     }
 }
 
+/// Snapshot of cron service status.
 #[derive(Debug, Clone, Serialize)]
 pub struct CronStatus {
     pub enabled: bool,

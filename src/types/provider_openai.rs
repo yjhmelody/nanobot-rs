@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::tools::{JsonSchema, ToolDefinition};
 
+/// OpenAI-compatible responses API request payload.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponsesPayload {
     pub(crate) model: String,
@@ -16,11 +17,13 @@ pub(crate) struct ResponsesPayload {
     pub(crate) tool_choice: Option<String>,
 }
 
+/// Reasoning configuration for responses API.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseReasoningConfig {
     pub(crate) effort: String,
 }
 
+/// Input item for responses API (message, tool call, or output).
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ResponseInputItem {
@@ -29,12 +32,14 @@ pub(crate) enum ResponseInputItem {
     FunctionCallOutput(ResponseFunctionCallOutputItem),
 }
 
+/// Input message content for responses API.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseInputMessage {
     pub(crate) role: String,
     pub(crate) content: Vec<ResponseInputContent>,
 }
 
+/// Input content part for responses API.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseInputContent {
     #[serde(rename = "type")]
@@ -51,6 +56,7 @@ impl ResponseInputContent {
     }
 }
 
+/// Function call request item in responses API.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseFunctionCallItem {
     #[serde(rename = "type")]
@@ -60,6 +66,7 @@ pub(crate) struct ResponseFunctionCallItem {
     pub(crate) arguments: String,
 }
 
+/// Function call output item for responses API.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseFunctionCallOutputItem {
     #[serde(rename = "type")]
@@ -68,6 +75,7 @@ pub(crate) struct ResponseFunctionCallOutputItem {
     pub(crate) output: String,
 }
 
+/// Tool definition mapping for responses API.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponseToolDefinition {
     #[serde(rename = "type")]
@@ -88,7 +96,7 @@ impl From<ToolDefinition> for ResponseToolDefinition {
     }
 }
 
-/// Response output block from OpenAI-compatible API
+/// Response output block from OpenAI-compatible API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ResponseOutputBlock {
@@ -106,6 +114,7 @@ pub(crate) enum ResponseOutputBlock {
     },
 }
 
+/// Output content parts returned by responses API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ResponseOutputContent {
@@ -113,12 +122,14 @@ pub(crate) enum ResponseOutputContent {
     InputText { text: String },
 }
 
+/// Reasoning summaries returned by responses API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ResponseReasoningSummary {
     SummaryText { text: String },
 }
 
+/// OpenAI-compatible responses API response payload.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct OpenAIResponsesResponse {
     #[serde(default)]
@@ -129,6 +140,7 @@ pub(crate) struct OpenAIResponsesResponse {
     pub(crate) error: Option<ResponsesError>,
 }
 
+/// Token usage metadata from responses API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ResponsesUsage {
     #[serde(default)]
@@ -139,6 +151,7 @@ pub(crate) struct ResponsesUsage {
     pub(crate) total_tokens: Option<u64>,
 }
 
+/// Error payload returned by responses API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ResponsesError {
     #[serde(default)]
