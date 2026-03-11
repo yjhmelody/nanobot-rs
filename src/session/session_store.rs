@@ -4,19 +4,18 @@
 //! - JsonlSessionStore: File-based storage using JSONL format
 //! - InMemorySessionStore: In-memory storage for testing
 
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
-
-use crate::types::session::{Session, SessionEntry, SessionMetadata, SessionMetadataLine, SessionSummary};
-use crate::utils::helpers::{ensure_dir, safe_filename};
+use tokio::fs;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::traits::SessionStore;
+use super::types::{Session, SessionEntry, SessionMetadata, SessionMetadataLine, SessionSummary};
+use crate::utils::helpers::{ensure_dir_async, safe_filename};
 
 /// JSONL-based session storage with file system persistence and in-memory caching.
 ///
@@ -41,26 +40,126 @@ impl JsonlSessionStore {
     /// # Errors
     ///
     /// Returns an error if the sessions directory cannot be created.
-    pub fn new(workspace: &Path) -> Result<Self> {
-        let sessions_dir = ensure_dir(&workspace.join("sessions"))?;
+    pub async fn new(workspace: &Path) -> Result<Self> {
+        let sessions_dir = ensure_dir_async(&workspace.join("sessions")).await?;
         Ok(Self {
             sessions_dir,
             cache: DashMap::new(),
         })
     }
 
-    fn session_path(&self, key: &str) -> PathBuf {
+    /// Gets or creates a session by key.
+    pub async fn get_or_create(&self, key: &str) -> Result<Session> {
+        if let Some(hit) = self.cache.get(key) {
+            return Ok(hit.value().clone());
+        }
+
+        let loaded = self.load_session(key).await?;
+        let session = loaded.unwrap_or_else(|| Session::new(key));
+        self.cache.insert(key.to_string(), session.clone());
+        Ok(session)
+    }
+
+    /// Saves a session to disk.
+    pub async fn save(&self, session: &Session) -> Result<()> {
+        let path = self.session_path(&session.key);
+        let mut file = fs::File::create(&path)
+            .await
+            .with_context(|| format!("failed to create {}", path.display()))?;
+
+        let metadata_line = SessionMetadataLine {
+            line_type: "metadata".to_string(),
+            key: session.key.clone(),
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            metadata: session.metadata.clone(),
+            last_consolidated: session.last_consolidated,
+        };
+
+        let metadata_json = serde_json::to_string(&metadata_line)?;
+        file.write_all(metadata_json.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+
+        for msg in &session.messages {
+            let msg_json = serde_json::to_string(msg)?;
+            file.write_all(msg_json.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+        }
+
+        self.cache.insert(session.key.clone(), session.clone());
+        Ok(())
+    }
+
+    /// Invalidates a session from cache.
+    pub async fn invalidate(&self, key: &str) {
+        self.cache.remove(key);
+    }
+
+    /// Lists all sessions.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let mut items = Vec::new();
+        let mut entries = fs::read_dir(&self.sessions_dir)
+            .await
+            .with_context(|| format!("failed to read {}", self.sessions_dir.display()))?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let file = fs::File::open(&path).await?;
+            let mut reader = BufReader::new(file);
+            let mut first_line = String::new();
+            if reader.read_line(&mut first_line).await? == 0 {
+                continue;
+            }
+
+            let data = match serde_json::from_str::<SessionMetadataLine>(first_line.trim()) {
+                Ok(v) if v.line_type == "metadata" => v,
+                _ => continue,
+            };
+
+            items.push(SessionSummary {
+                key: data.key,
+                updated_at: Some(data.updated_at.to_rfc3339()),
+                path: path.display().to_string(),
+            });
+        }
+
+        items.sort_by(|a, b| {
+            b.updated_at
+                .as_deref()
+                .unwrap_or("")
+                .cmp(a.updated_at.as_deref().unwrap_or(""))
+        });
+
+        Ok(items)
+    }
+
+    /// Deletes a session.
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        let path = self.session_path(key);
+        if path.exists() {
+            tokio::fs::remove_file(path).await?;
+        }
+        self.invalidate(key).await;
+        Ok(())
+    }
+
+    pub(crate) fn session_path(&self, key: &str) -> PathBuf {
         let safe = safe_filename(&key.replace(':', "_"));
         self.sessions_dir.join(format!("{}.jsonl", safe))
     }
 
-    fn load_session(&self, key: &str) -> Result<Option<Session>> {
+    async fn load_session(&self, key: &str) -> Result<Option<Session>> {
         let path = self.session_path(key);
-        if !path.exists() {
+        if !fs::try_exists(&path).await? {
             return Ok(None);
         }
 
-        let file = File::open(&path)
+        let file = fs::File::open(&path)
+            .await
             .with_context(|| format!("failed to open {}", path.display()))?;
         let reader = BufReader::new(file);
 
@@ -70,8 +169,8 @@ impl JsonlSessionStore {
         let mut metadata = SessionMetadata::default();
         let mut last_consolidated = 0usize;
 
-        for line in reader.lines() {
-            let line = line?;
+        let mut lines = reader.lines();
+        while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
@@ -105,97 +204,29 @@ impl JsonlSessionStore {
 #[async_trait]
 impl SessionStore for JsonlSessionStore {
     async fn get_or_create(&self, key: &str) -> Result<Session> {
-        if let Some(hit) = self.cache.get(key) {
-            return Ok(hit.value().clone());
-        }
-
-        let loaded = self.load_session(key)?;
-        let session = loaded.unwrap_or_else(|| Session::new(key));
-        self.cache.insert(key.to_string(), session.clone());
-        Ok(session)
+        JsonlSessionStore::get_or_create(self, key).await
     }
 
     async fn save(&self, session: &Session) -> Result<()> {
-        let path = self.session_path(&session.key);
-        let mut file = File::create(&path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
-
-        let metadata_line = SessionMetadataLine {
-            line_type: "metadata".to_string(),
-            key: session.key.clone(),
-            created_at: session.created_at,
-            updated_at: session.updated_at,
-            metadata: session.metadata.clone(),
-            last_consolidated: session.last_consolidated,
-        };
-
-        writeln!(file, "{}", serde_json::to_string(&metadata_line)?)?;
-        for msg in &session.messages {
-            writeln!(file, "{}", serde_json::to_string(msg)?)?;
-        }
-
-        self.cache.insert(session.key.clone(), session.clone());
-        Ok(())
+        JsonlSessionStore::save(self, session).await
     }
 
     async fn invalidate(&self, key: &str) {
-        self.cache.remove(key);
+        JsonlSessionStore::invalidate(self, key).await
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let mut items = Vec::new();
-        for entry in fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("failed to read {}", self.sessions_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-
-            let file = File::open(&path)?;
-            let mut reader = BufReader::new(file);
-            let mut first_line = String::new();
-            if reader.read_line(&mut first_line)? == 0 {
-                continue;
-            }
-
-            let data = match serde_json::from_str::<SessionMetadataLine>(first_line.trim()) {
-                Ok(v) if v.line_type == "metadata" => v,
-                _ => continue,
-            };
-
-            items.push(SessionSummary {
-                key: data.key,
-                updated_at: Some(data.updated_at.to_rfc3339()),
-                path: path.display().to_string(),
-            });
-        }
-
-        items.sort_by(|a, b| {
-            b.updated_at
-                .as_deref()
-                .unwrap_or("")
-                .cmp(a.updated_at.as_deref().unwrap_or(""))
-        });
-
-        Ok(items)
+        JsonlSessionStore::list_sessions(self).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let path = self.session_path(key);
-        if path.exists() {
-            tokio::fs::remove_file(path).await?;
-        }
-        self.invalidate(key).await;
-        Ok(())
+        JsonlSessionStore::delete(self, key).await
     }
 }
 
 /// In-memory session store for testing and ephemeral sessions.
 ///
 /// All sessions are stored in memory and will be lost when the process exits.
-/// Uses DashMap for thread-safe concurrent access.
 pub struct InMemorySessionStore {
     sessions: DashMap<String, Session>,
 }
@@ -254,8 +285,8 @@ impl SessionStore for InMemorySessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
     use crate::provider::{MessageContent, MessageRole};
+    use chrono::Duration;
 
     fn temp_workspace(case: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -282,36 +313,48 @@ mod tests {
     #[tokio::test]
     async fn jsonl_save_then_load_roundtrip_works() {
         let workspace = temp_workspace("roundtrip");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let mut session = Session::new("telegram:123");
         session.metadata.tags = vec!["prod".to_string()];
         session.last_consolidated = 1;
         session.messages.push(entry(MessageRole::User, "hello"));
-        session.messages.push(entry(MessageRole::Assistant, "world"));
+        session
+            .messages
+            .push(entry(MessageRole::Assistant, "world"));
 
         store.save(&session).await.expect("save session");
         store.invalidate("telegram:123").await;
 
-        let loaded = store.get_or_create("telegram:123").await.expect("load session");
+        let loaded = store
+            .get_or_create("telegram:123")
+            .await
+            .expect("load session");
         assert_eq!(loaded.key, "telegram:123");
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.metadata.tags, vec!["prod".to_string()]);
         assert_eq!(loaded.last_consolidated, 1);
         assert_eq!(
-            loaded.messages[0].content.as_ref().and_then(|c| c.as_text()),
+            loaded.messages[0]
+                .content
+                .as_ref()
+                .and_then(|c| c.as_text()),
             Some("hello")
         );
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
     async fn jsonl_list_sessions_is_sorted_by_updated_at_desc() {
         let workspace = temp_workspace("list");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let mut old = Session::new("cli:old");
         old.updated_at = Utc::now() - Duration::minutes(10);
@@ -326,14 +369,16 @@ mod tests {
         assert_eq!(list[0].key, "cli:new");
         assert_eq!(list[1].key, "cli:old");
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
     async fn jsonl_get_or_create_returns_cached_session() {
         let workspace = temp_workspace("cache");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let session1 = store.get_or_create("test:1").await.expect("first get");
         let session2 = store.get_or_create("test:1").await.expect("second get");
@@ -341,35 +386,44 @@ mod tests {
         assert_eq!(session1.key, session2.key);
         assert_eq!(session1.created_at, session2.created_at);
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
     async fn jsonl_invalidate_removes_from_cache() {
         let workspace = temp_workspace("invalidate");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let mut session = Session::new("test:invalidate");
         session.messages.push(entry(MessageRole::User, "original"));
         store.save(&session).await.expect("save");
 
-        session.messages.push(entry(MessageRole::Assistant, "reply"));
+        session
+            .messages
+            .push(entry(MessageRole::Assistant, "reply"));
         store.save(&session).await.expect("save again");
 
         store.invalidate("test:invalidate").await;
 
-        let loaded = store.get_or_create("test:invalidate").await.expect("reload");
+        let loaded = store
+            .get_or_create("test:invalidate")
+            .await
+            .expect("reload");
         assert_eq!(loaded.messages.len(), 2);
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
     async fn jsonl_session_path_sanitizes_key() {
         let workspace = temp_workspace("sanitize");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let path = store.session_path("telegram:123/456");
         let filename = path.file_name().unwrap().to_str().unwrap();
@@ -377,44 +431,50 @@ mod tests {
         assert!(!filename.contains('/'));
         assert!(filename.ends_with(".jsonl"));
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
     async fn jsonl_list_sessions_ignores_non_jsonl_files() {
         let workspace = temp_workspace("list-filter");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let session = Session::new("test:valid");
         store.save(&session).await.expect("save");
 
         let sessions_dir = workspace.join("sessions");
-        fs::write(sessions_dir.join("invalid.txt"), "not a session").expect("write txt");
+        fs::write(sessions_dir.join("invalid.txt"), "not a session")
+            .await
+            .expect("write txt");
 
         let list = store.list_sessions().await.expect("list");
         assert_eq!(list.iter().filter(|s| s.key == "test:valid").count(), 1);
         assert_eq!(list.iter().filter(|s| s.key.contains("invalid")).count(), 0);
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
     async fn jsonl_delete_removes_file_and_cache() {
         let workspace = temp_workspace("delete");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        let store = JsonlSessionStore::new(&workspace).expect("new store");
+        fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let store = JsonlSessionStore::new(&workspace).await.expect("new store");
 
         let session = Session::new("test:delete");
         store.save(&session).await.expect("save");
 
         let path = store.session_path("test:delete");
-        assert!(path.exists());
+        assert!(fs::try_exists(&path).await.unwrap());
 
         store.delete("test:delete").await.expect("delete");
-        assert!(!path.exists());
+        assert!(!fs::try_exists(&path).await.unwrap());
 
-        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(workspace).await;
     }
 
     // InMemorySessionStore tests

@@ -7,7 +7,6 @@ pub mod heartbeat;
 pub mod provider;
 pub mod provider_anthropic;
 pub mod provider_openai;
-pub mod session;
 pub mod task;
 pub mod tools;
 

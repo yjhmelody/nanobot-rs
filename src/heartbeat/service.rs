@@ -175,20 +175,22 @@ impl HeartbeatService {
             .filter(|s| !s.is_empty())
     }
 
-    async fn decide(&self, content: &str) -> Result<(String, String)> {
-        // Ask model for a structured decision via a tool-call schema.
+    fn definition(&self) -> ToolDefinition {
         let mut props = BTreeMap::new();
         props.insert(
             "action".to_string(),
             JsonSchema::string(None).with_enum(vec!["skip", "run"]),
         );
         props.insert("tasks".to_string(), JsonSchema::string(None));
-        let tool = ToolDefinition::function(
+        ToolDefinition::function(
             "heartbeat",
             "Report heartbeat decision after reviewing tasks.",
             JsonSchema::object(props, vec!["action"]),
-        );
+        )
+    }
 
+    async fn decide(&self, content: &str) -> Result<(String, String)> {
+        let tool = self.definition();
         let response = self
             .provider
             .chat(ChatRequest {

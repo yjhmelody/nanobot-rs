@@ -1,3 +1,12 @@
+//! Session-related types for persistence and management.
+//!
+//! This module contains types that are specific to session storage and management:
+//! - Session: The main session aggregate containing messages and metadata
+//! - SessionEntry: Individual message entries stored in sessions
+//! - SessionMetadata: Metadata associated with sessions
+//! - SessionSummary: Summary information for listing sessions
+//! - SessionMetadataLine: Internal type for JSONL metadata serialization
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +37,13 @@ pub struct SessionEntry {
     pub reasoning_content: Option<String>,
     #[serde(default)]
     pub thinking_blocks: Option<Vec<String>>,
+}
+
+impl SessionEntry {
+    /// Helper to extract text content from a session entry.
+    pub fn content_as_text(&self) -> Option<&str> {
+        self.content.as_ref().and_then(|c| c.as_text())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

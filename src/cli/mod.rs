@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -505,12 +506,14 @@ fn resolve_copilot_config_dir(explicit: Option<PathBuf>) -> PathBuf {
 
 struct SessionTargetPicker {
     agent: Arc<AgentLoop>,
-    enabled_channels: Arc<std::collections::HashSet<String>>,
+    enabled_channels: Arc<HashSet<String>>,
 }
 
 impl SessionTargetPicker {
     fn pick_target(&self) -> (String, String) {
-        if let Ok(sessions) = self.agent.sessions.list_sessions() {
+        if let Ok(sessions) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.sessions.list_sessions())
+        }) {
             for item in sessions {
                 let key = item.key;
                 if let Some((channel, chat_id)) = key.split_once(':') {

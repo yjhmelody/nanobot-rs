@@ -13,8 +13,7 @@ use tracing::{error, info, warn};
 
 use super::add_job_params::AddJobParams;
 use crate::observability::TARGET_CRON;
-#[cfg(test)]
-use crate::types::cron::CronSchedule;
+
 use crate::types::cron::{
     CronJob, CronJobState, CronPayload, CronScheduleKind, CronStatus, CronStore, now_ms,
 };
@@ -372,6 +371,7 @@ async fn read_store_file_async(path: &Path) -> Result<CronStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::cron::CronSchedule;
     use std::sync::atomic::AtomicUsize;
 
     fn temp_store_path(case: &str) -> PathBuf {

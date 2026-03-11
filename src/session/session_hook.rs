@@ -1,10 +1,13 @@
-use super::traits::SessionHook;
-use crate::types::session::Session;
 use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{debug, info};
 
-/// Example: Logging hook that tracks session lifecycle events.
+use super::traits::SessionHook;
+use super::types::Session;
+
+const LOG_TARGET: &str = "session_hook";
+
+/// Logging hook that tracks session lifecycle events.
 pub struct LoggingHook {
     prefix: String,
 }
@@ -21,7 +24,7 @@ impl LoggingHook {
 impl SessionHook for LoggingHook {
     async fn on_create(&self, session: &Session) -> Result<()> {
         info!(
-            target: "session_hook",
+            target: LOG_TARGET,
             prefix = %self.prefix,
             session_key = %session.key,
             "session created"
@@ -31,7 +34,7 @@ impl SessionHook for LoggingHook {
 
     async fn on_before_save(&self, session: &mut Session) -> Result<()> {
         debug!(
-            target: "session_hook",
+            target: LOG_TARGET,
             prefix = %self.prefix,
             session_key = %session.key,
             message_count = session.messages.len(),
@@ -42,7 +45,7 @@ impl SessionHook for LoggingHook {
 
     async fn on_after_save(&self, session: &Session) -> Result<()> {
         debug!(
-            target: "session_hook",
+            target: LOG_TARGET,
             prefix = %self.prefix,
             session_key = %session.key,
             "after save"
@@ -52,7 +55,7 @@ impl SessionHook for LoggingHook {
 
     async fn on_consolidate(&self, session: &Session, messages_consolidated: usize) -> Result<()> {
         info!(
-            target: "session_hook",
+            target: LOG_TARGET,
             prefix = %self.prefix,
             session_key = %session.key,
             messages_consolidated,
@@ -63,7 +66,7 @@ impl SessionHook for LoggingHook {
 
     async fn on_delete(&self, key: &str) -> Result<()> {
         info!(
-            target: "session_hook",
+            target: LOG_TARGET,
             prefix = %self.prefix,
             session_key = %key,
             "session deleted"

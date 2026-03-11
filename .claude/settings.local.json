@@ -28,7 +28,9 @@
       "Bash(find src/session -name \"*.rs\" -exec wc -l {} + | tail -1)",
       "Bash(find docs:*)",
       "Bash(ls -1 docs/SESSION*.md CHANGELOG_SESSION.md SESSION_IMPLEMENTATION_COMPLETE.md 2>/dev/null | wc -l)",
-      "Bash(ls -1 src/session/*.rs | wc -l)"
+      "Bash(ls -1 src/session/*.rs | wc -l)",
+      "Bash(ls -la src/session/*.rs)",
+      "Bash(grep -v \"^$\")"
     ]
   }
 }

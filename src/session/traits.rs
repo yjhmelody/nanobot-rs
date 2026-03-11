@@ -1,18 +1,9 @@
 //! Trait definitions for session and memory management.
-//!
-//! This module provides a flexible, plugin-based architecture for managing
-//! conversation sessions and memory. The trait system allows for:
-//!
-//! - Multiple storage backends (JSONL, database, cloud, etc.)
-//! - Custom consolidation strategies
-//! - Memory plugins (vector search, semantic retrieval, etc.)
-//! - Context enrichment pipelines
-
 use anyhow::Result;
 use async_trait::async_trait;
 
+use super::types::{Session, SessionEntry, SessionSummary};
 use crate::provider::ChatMessage;
-use crate::types::session::{Session, SessionEntry, SessionSummary};
 
 /// Core trait for session storage and retrieval.
 ///

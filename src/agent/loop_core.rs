@@ -15,7 +15,7 @@ use crate::bus::{InboundCommand, InboundMessage, MessageBus, MessageMetadata, Ou
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
 use crate::provider::LLMProvider;
-use crate::session::{LegacySessionManager, Session, SessionEntry};
+use crate::session::{JsonlSessionStore, Session, SessionEntry};
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
@@ -36,7 +36,7 @@ pub struct AgentLoop {
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) mcp: Option<Arc<MCPManager>>,
     pub(crate) context: ContextBuilder,
-    pub(crate) sessions: Arc<LegacySessionManager>,
+    pub(crate) sessions: Arc<JsonlSessionStore>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_tasks: Arc<DashMap<SessionKey, DashMap<TaskId, AbortHandle>>>,

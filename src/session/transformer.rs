@@ -1,10 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::provider::ChatMessage;
-use crate::types::session::Session;
-
 use super::traits::HistoryTransformer;
+use super::types::Session;
+use crate::provider::ChatMessage;
 /// Example: Transformer that filters out sensitive information.
 pub struct SensitiveDataFilter {
     patterns: Vec<regex::Regex>,

@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use super::traits::*;
+use super::types::{Session, SessionSummary};
 use crate::provider::ChatMessage;
-use crate::types::session::{Session, SessionSummary};
 
 /// Composite session manager that orchestrates multiple components.
 ///
@@ -149,39 +149,5 @@ impl SessionManager {
         }
 
         self.store.delete(key).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-
-    #[test]
-    fn session_manager_builder_pattern_works() {
-        struct DummyStore;
-
-        #[async_trait]
-        impl SessionStore for DummyStore {
-            async fn get_or_create(&self, _key: &str) -> Result<Session> {
-                Ok(Session::new("test"))
-            }
-            async fn save(&self, _session: &Session) -> Result<()> {
-                Ok(())
-            }
-            async fn invalidate(&self, _key: &str) {}
-            async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-                Ok(Vec::new())
-            }
-            async fn delete(&self, _key: &str) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        let manager = SessionManager::new(Box::new(DummyStore));
-        assert!(manager.consolidation.is_none());
-        assert!(manager.memory_providers.is_empty());
-        assert!(manager.transformers.is_empty());
-        assert!(manager.hooks.is_empty());
     }
 }

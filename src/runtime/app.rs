@@ -54,7 +54,8 @@ pub async fn build_runtime(config: Config) -> Result<RuntimeBundle> {
             .with_acp_config(config.acp.clone())
             .with_restrict_to_workspace(config.tools.restrict_to_workspace)
             .with_cron_service(cron.clone())
-            .build()?,
+            .build()
+            .await?,
     );
 
     Ok(RuntimeBundle {

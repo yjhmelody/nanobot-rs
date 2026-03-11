@@ -9,7 +9,7 @@ use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, MCPServerConfig, WebToolsConfig};
 use crate::cron::CronService;
 use crate::provider::LLMProvider;
-use crate::session::{ConsolidationConfig, LegacySessionManager};
+use crate::session::{ConsolidationConfig, JsonlSessionStore};
 use crate::tools::acp::ACPTool;
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolRegistry, ToolRegistryBuilder};
@@ -165,9 +165,9 @@ impl AgentLoopBuilder {
     /// Returns an error if:
     /// - Context builder initialization fails
     /// - Session manager initialization fails
-    pub fn build(self) -> Result<AgentLoop> {
+    pub async fn build(self) -> Result<AgentLoop> {
         let context = ContextBuilder::new(self.workspace.clone())?;
-        let sessions = Arc::new(LegacySessionManager::new(&self.workspace)?);
+        let sessions = Arc::new(JsonlSessionStore::new(&self.workspace).await?);
         let tools = self.build_tool_registry()?;
 
         // Create SubagentManager with ToolRegistry
@@ -269,6 +269,7 @@ mod tests {
 
         let agent = AgentLoopBuilder::new(bus, provider, workspace)
             .build()
+            .await
             .expect("build agent loop");
 
         assert_eq!(agent.max_iterations, 40);
@@ -294,6 +295,7 @@ mod tests {
             .with_config(custom_config)
             .with_restrict_to_workspace(true)
             .build()
+            .await
             .expect("build agent loop");
 
         assert_eq!(agent.model, "custom/model");
@@ -312,6 +314,7 @@ mod tests {
 
         let agent = AgentLoopBuilder::new(bus, provider, workspace)
             .build()
+            .await
             .expect("build agent loop");
 
         let names: Vec<_> = agent
