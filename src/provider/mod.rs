@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod base;
 pub mod openai_compat;
+pub mod proxy;
 pub mod registry;
 pub mod tool_name;
 

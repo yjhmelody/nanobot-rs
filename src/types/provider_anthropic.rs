@@ -63,10 +63,30 @@ impl From<ToolDefinition> for AnthropicToolDefinition {
     }
 }
 
+/// Response content block from Anthropic API
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum AnthropicContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    Thinking {
+        #[serde(alias = "text")]
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct AnthropicMessagesResponse {
     #[serde(default)]
-    pub(crate) content: Vec<serde_json::Value>,
+    pub(crate) content: Vec<AnthropicContentBlock>,
     #[serde(default)]
     pub(crate) stop_reason: Option<String>,
     #[serde(default)]

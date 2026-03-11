@@ -88,10 +88,41 @@ impl From<ToolDefinition> for ResponseToolDefinition {
     }
 }
 
+/// Response output block from OpenAI-compatible API
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ResponseOutputBlock {
+    Message {
+        content: Vec<ResponseOutputContent>,
+    },
+    FunctionCall {
+        #[serde(alias = "id")]
+        call_id: Option<String>,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    Reasoning {
+        summary: Vec<ResponseReasoningSummary>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ResponseOutputContent {
+    OutputText { text: String },
+    InputText { text: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ResponseReasoningSummary {
+    SummaryText { text: String },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct OpenAIResponsesResponse {
     #[serde(default)]
-    pub(crate) output: Vec<serde_json::Value>,
+    pub(crate) output: Vec<ResponseOutputBlock>,
     #[serde(default)]
     pub(crate) usage: Option<ResponsesUsage>,
     #[serde(default)]

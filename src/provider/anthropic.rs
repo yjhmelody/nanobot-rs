@@ -1,18 +1,19 @@
 use std::collections::HashMap;
-use std::env;
 
 use async_trait::async_trait;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use tracing::{trace, warn};
+use tracing::trace;
 
 use crate::observability::TARGET_PROVIDER;
+use crate::provider::proxy::ProxyFallbackHelper;
 use crate::provider::{
     AssistantToolCall, ChatMessage, ChatRequest, LLMProvider, LLMResponse, MessageContent,
     MessageRole, ToolCallRequest, UsageStats,
 };
 use crate::types::provider_anthropic::{
-    AnthropicErrorResponse, AnthropicInputContentBlock, AnthropicInputMessage,
-    AnthropicMessagesPayload, AnthropicMessagesResponse, AnthropicToolDefinition, AnthropicUsage,
+    AnthropicContentBlock, AnthropicErrorResponse, AnthropicInputContentBlock,
+    AnthropicInputMessage, AnthropicMessagesPayload, AnthropicMessagesResponse,
+    AnthropicToolDefinition, AnthropicUsage,
 };
 
 const DEFAULT_API_BASE: &str = "https://api.anthropic.com/v1";
@@ -24,9 +25,7 @@ pub struct AnthropicProvider {
     api_base: Option<String>,
     default_model: String,
     extra_headers: HashMap<String, String>,
-    client: reqwest::Client,
-    direct_client: reqwest::Client,
-    proxy_fallback_enabled: bool,
+    proxy_helper: ProxyFallbackHelper,
 }
 
 impl AnthropicProvider {
@@ -36,24 +35,12 @@ impl AnthropicProvider {
         default_model: String,
         extra_headers: HashMap<String, String>,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        let direct_client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .no_proxy()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
         Self {
             api_key,
             api_base,
             default_model,
             extra_headers,
-            client,
-            direct_client,
-            proxy_fallback_enabled: has_proxy_env_configured(),
+            proxy_helper: ProxyFallbackHelper::new(),
         }
     }
 
@@ -177,48 +164,31 @@ impl AnthropicProvider {
         payload: &serde_json::Value,
     ) -> Result<reqwest::Response, String> {
         let primary = self
-            .send_request(&self.client, "primary", endpoint, payload)
+            .send_request(self.proxy_helper.client(), "primary", endpoint, payload)
             .await;
 
         match primary {
             Ok(response)
-                if self.proxy_fallback_enabled
-                    && should_retry_without_proxy_status(response.status()) =>
+                if self.proxy_helper.is_enabled()
+                    && self.proxy_helper.should_retry_response(response.status(), endpoint) =>
             {
-                warn!(
-                    target: TARGET_PROVIDER,
-                    status = response.status().as_u16(),
-                    endpoint,
-                    "primary anthropic request returned gateway error, retrying without proxy"
-                );
-
                 match self
-                    .send_request(&self.direct_client, "direct_retry", endpoint, payload)
+                    .send_request(self.proxy_helper.direct_client(), "direct_retry", endpoint, payload)
                     .await
                 {
                     Ok(retry_response) => Ok(retry_response),
                     Err(err) => {
-                        warn!(
-                            target: TARGET_PROVIDER,
-                            endpoint,
-                            error = %err,
-                            "direct anthropic retry failed after gateway error"
-                        );
+                        self.proxy_helper.log_retry_failed(endpoint, &err);
                         Ok(response)
                     }
                 }
             }
             Ok(response) => Ok(response),
-            Err(err) if self.proxy_fallback_enabled => {
-                warn!(
-                    target: TARGET_PROVIDER,
-                    endpoint,
-                    error = %err,
-                    "primary anthropic request failed, retrying without proxy"
-                );
+            Err(err) if self.proxy_helper.is_enabled() => {
+                self.proxy_helper.log_retry_after_error(endpoint, &err);
 
                 match self
-                    .send_request(&self.direct_client, "direct_retry", endpoint, payload)
+                    .send_request(self.proxy_helper.direct_client(), "direct_retry", endpoint, payload)
                     .await
                 {
                     Ok(response) => Ok(response),
@@ -369,31 +339,26 @@ fn parse_messages_response(resp: AnthropicMessagesResponse) -> LLMResponse {
     let mut tool_calls = Vec::new();
     let mut thinking_blocks = Vec::new();
 
-    for item in resp.content {
-        match item.get("type").and_then(|value| value.as_str()) {
-            Some("text") => {
-                if let Some(text) = item.get("text").and_then(|value| value.as_str())
-                    && !text.trim().is_empty()
-                {
-                    content_blocks.push(text.to_string());
+    for block in resp.content {
+        match block {
+            AnthropicContentBlock::Text { text } => {
+                if !text.trim().is_empty() {
+                    content_blocks.push(text);
                 }
             }
-            Some("tool_use") => {
-                if let Some(tool_call) = extract_tool_call(&item) {
-                    tool_calls.push(tool_call);
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                let arguments_json = serde_json::to_string(&input).unwrap_or_default();
+                tool_calls.push(ToolCallRequest {
+                    id,
+                    name: name.into(),
+                    arguments_json,
+                });
+            }
+            AnthropicContentBlock::Thinking { thinking, .. } => {
+                if !thinking.trim().is_empty() {
+                    thinking_blocks.push(thinking);
                 }
             }
-            Some("thinking") => {
-                if let Some(text) = item
-                    .get("thinking")
-                    .or_else(|| item.get("text"))
-                    .and_then(|value| value.as_str())
-                    && !text.trim().is_empty()
-                {
-                    thinking_blocks.push(text.to_string());
-                }
-            }
-            _ => {}
         }
     }
 
@@ -408,22 +373,6 @@ fn parse_messages_response(resp: AnthropicMessagesResponse) -> LLMResponse {
         reasoning_content: None,
         thinking_blocks,
     }
-}
-
-fn extract_tool_call(item: &serde_json::Value) -> Option<ToolCallRequest> {
-    let id = item.get("id")?.as_str()?.to_string();
-    let name = item.get("name")?.as_str()?.to_string();
-    let input = item
-        .get("input")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let arguments_json = serde_json::to_string(&input).ok()?;
-
-    Some(ToolCallRequest {
-        id,
-        name: name.into(),
-        arguments_json,
-    })
 }
 
 fn map_stop_reason(stop_reason: Option<&str>) -> String {
@@ -500,23 +449,6 @@ fn redact_api_key(value: &HeaderValue) -> String {
 
 fn format_request_body(payload: &serde_json::Value) -> String {
     serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
-}
-
-fn has_proxy_env_configured() -> bool {
-    [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ]
-    .into_iter()
-    .any(|key| env::var_os(key).is_some())
-}
-
-fn should_retry_without_proxy_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 502 | 503 | 504)
 }
 
 fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
@@ -611,21 +543,18 @@ mod tests {
     fn parse_messages_response_maps_text_tool_calls_and_usage() {
         let response = AnthropicMessagesResponse {
             content: vec![
-                serde_json::json!({
-                    "type": "thinking",
-                    "thinking": "inspect request",
-                    "signature": "sig"
-                }),
-                serde_json::json!({
-                    "type": "tool_use",
-                    "id": "toolu_123",
-                    "name": "read_file",
-                    "input": {"path": "Cargo.toml"}
-                }),
-                serde_json::json!({
-                    "type": "text",
-                    "text": "ok"
-                }),
+                AnthropicContentBlock::Thinking {
+                    thinking: "inspect request".to_string(),
+                    signature: Some("sig".to_string()),
+                },
+                AnthropicContentBlock::ToolUse {
+                    id: "toolu_123".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "Cargo.toml"}),
+                },
+                AnthropicContentBlock::Text {
+                    text: "ok".to_string(),
+                },
             ],
             stop_reason: Some("tool_use".to_string()),
             usage: Some(AnthropicUsage {

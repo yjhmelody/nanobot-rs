@@ -63,7 +63,7 @@ impl Default for AgentConfig {
 ///         ..Default::default()
 ///     })
 ///     .with_restrict_to_workspace(true)
-///     .build()?;
+///     .build().await?;
 /// # Ok(())
 /// # }
 /// ```

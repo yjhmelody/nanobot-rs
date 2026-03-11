@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::env;
 
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use tracing::{debug, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::observability::TARGET_PROVIDER;
+use crate::provider::proxy::ProxyFallbackHelper;
 use crate::provider::registry::find_spec;
 use crate::provider::{
     ChatMessage, ChatRequest, LLMProvider, LLMResponse, MessageContent, MessageRole,
@@ -14,7 +14,8 @@ use crate::provider::{
 };
 use crate::types::provider_openai::{
     OpenAIResponsesResponse, ResponseFunctionCallItem, ResponseFunctionCallOutputItem,
-    ResponseInputContent, ResponseInputItem, ResponseInputMessage, ResponseReasoningConfig,
+    ResponseInputContent, ResponseInputItem, ResponseInputMessage, ResponseOutputBlock,
+    ResponseOutputContent, ResponseReasoningConfig, ResponseReasoningSummary,
     ResponseToolDefinition, ResponsesPayload, ResponsesUsage,
 };
 
@@ -25,9 +26,7 @@ pub struct OpenAICompatProvider {
     default_model: String,
     provider_name: String,
     extra_headers: HashMap<String, String>,
-    client: reqwest::Client,
-    direct_client: reqwest::Client,
-    proxy_fallback_enabled: bool,
+    proxy_helper: ProxyFallbackHelper,
 }
 
 impl OpenAICompatProvider {
@@ -38,28 +37,13 @@ impl OpenAICompatProvider {
         provider_name: String,
         extra_headers: HashMap<String, String>,
     ) -> Self {
-        // Build client with TLS support
-        // Note: By default, reqwest uses system proxy settings from environment variables
-        // If you need to disable proxy, set NO_PROXY=* environment variable
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        let direct_client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .no_proxy()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
         Self {
             api_key,
             api_base,
             default_model,
             provider_name,
             extra_headers,
-            client,
-            direct_client,
-            proxy_fallback_enabled: has_proxy_env_configured(),
+            proxy_helper: ProxyFallbackHelper::new(),
         }
     }
 
@@ -192,48 +176,31 @@ impl OpenAICompatProvider {
         payload: &serde_json::Value,
     ) -> Result<reqwest::Response, String> {
         let primary = self
-            .send_request(&self.client, "primary", endpoint, payload)
+            .send_request(self.proxy_helper.client(), "primary", endpoint, payload)
             .await;
 
         match primary {
             Ok(response)
-                if self.proxy_fallback_enabled
-                    && should_retry_without_proxy_status(response.status()) =>
+                if self.proxy_helper.is_enabled()
+                    && self.proxy_helper.should_retry_response(response.status(), endpoint) =>
             {
-                warn!(
-                    target: TARGET_PROVIDER,
-                    status = response.status().as_u16(),
-                    endpoint,
-                    "primary provider request returned gateway error, retrying without proxy"
-                );
-
                 match self
-                    .send_request(&self.direct_client, "direct_retry", endpoint, payload)
+                    .send_request(self.proxy_helper.direct_client(), "direct_retry", endpoint, payload)
                     .await
                 {
                     Ok(retry_response) => Ok(retry_response),
                     Err(err) => {
-                        warn!(
-                            target: TARGET_PROVIDER,
-                            endpoint,
-                            error = %err,
-                            "direct provider retry failed after gateway error"
-                        );
+                        self.proxy_helper.log_retry_failed(endpoint, &err);
                         Ok(response)
                     }
                 }
             }
             Ok(response) => Ok(response),
-            Err(err) if self.proxy_fallback_enabled => {
-                warn!(
-                    target: TARGET_PROVIDER,
-                    endpoint,
-                    error = %err,
-                    "primary provider request failed, retrying without proxy"
-                );
+            Err(err) if self.proxy_helper.is_enabled() => {
+                self.proxy_helper.log_retry_after_error(endpoint, &err);
 
                 match self
-                    .send_request(&self.direct_client, "direct_retry", endpoint, payload)
+                    .send_request(self.proxy_helper.direct_client(), "direct_retry", endpoint, payload)
                     .await
                 {
                     Ok(response) => Ok(response),
@@ -350,24 +317,50 @@ fn parse_responses_response(resp: OpenAIResponsesResponse) -> LLMResponse {
     let mut tool_calls = Vec::new();
     let mut thinking_blocks = Vec::new();
 
-    for item in resp.output {
-        match item.get("type").and_then(|value| value.as_str()) {
-            Some("message") => {
-                if let Some(text) = extract_response_message_text(&item)
-                    && !text.trim().is_empty()
-                {
-                    content_blocks.push(text);
+    for block in resp.output {
+        match block {
+            ResponseOutputBlock::Message { content } => {
+                let texts: Vec<String> = content
+                    .into_iter()
+                    .filter_map(|c| match c {
+                        ResponseOutputContent::OutputText { text }
+                        | ResponseOutputContent::InputText { text } => {
+                            (!text.trim().is_empty()).then_some(text)
+                        }
+                    })
+                    .collect();
+                if !texts.is_empty() {
+                    content_blocks.push(texts.join("\n\n"));
                 }
             }
-            Some("function_call") => {
-                if let Some(tool_call) = extract_response_tool_call(&item) {
-                    tool_calls.push(tool_call);
+            ResponseOutputBlock::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => {
+                let id = call_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+                let arguments_json = if let Some(text) = arguments.as_str() {
+                    text.to_string()
+                } else {
+                    serde_json::to_string(&arguments).unwrap_or_default()
+                };
+                tool_calls.push(ToolCallRequest {
+                    id,
+                    name: name.into(),
+                    arguments_json,
+                });
+            }
+            ResponseOutputBlock::Reasoning { summary } => {
+                for item in summary {
+                    match item {
+                        ResponseReasoningSummary::SummaryText { text } => {
+                            if !text.trim().is_empty() {
+                                thinking_blocks.push(text);
+                            }
+                        }
+                    }
                 }
             }
-            Some("reasoning") => {
-                thinking_blocks.extend(extract_reasoning_blocks(&item));
-            }
-            _ => {}
         }
     }
 
@@ -489,23 +482,6 @@ fn format_request_body(payload: &serde_json::Value) -> String {
     serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
 }
 
-fn has_proxy_env_configured() -> bool {
-    [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ]
-    .into_iter()
-    .any(|key| env::var_os(key).is_some())
-}
-
-fn should_retry_without_proxy_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 502 | 503 | 504)
-}
-
 fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
     match content {
         Some(MessageContent::Text(text)) => Some(text.clone()),
@@ -521,70 +497,6 @@ fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
         }
         None => None,
     }
-}
-
-fn extract_response_message_text(item: &serde_json::Value) -> Option<String> {
-    let content = item.get("content")?.as_array()?;
-    let blocks = content
-        .iter()
-        .filter_map(|entry| {
-            let kind = entry.get("type").and_then(|value| value.as_str());
-            let text = entry.get("text").and_then(|value| value.as_str());
-            match (kind, text) {
-                (Some("output_text"), Some(text)) | (Some("input_text"), Some(text)) => {
-                    (!text.trim().is_empty()).then(|| text.to_string())
-                }
-                _ => None,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    (!blocks.is_empty()).then(|| blocks.join("\n\n"))
-}
-
-fn extract_response_tool_call(item: &serde_json::Value) -> Option<ToolCallRequest> {
-    let name = item.get("name")?.as_str()?.to_string();
-    let id = item
-        .get("call_id")
-        .and_then(|value| value.as_str())
-        .or_else(|| item.get("id").and_then(|value| value.as_str()))
-        .map(str::to_string)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-
-    let arguments = item.get("arguments")?;
-    let arguments_json = if let Some(text) = arguments.as_str() {
-        text.to_string()
-    } else {
-        serde_json::to_string(arguments).ok()?
-    };
-
-    Some(ToolCallRequest {
-        id,
-        name: name.into(),
-        arguments_json,
-    })
-}
-
-fn extract_reasoning_blocks(item: &serde_json::Value) -> Vec<String> {
-    let mut blocks = Vec::new();
-
-    if let Some(summary) = item.get("summary").and_then(|value| value.as_array()) {
-        for entry in summary {
-            if let Some(text) = entry.get("text").and_then(|value| value.as_str())
-                && !text.trim().is_empty()
-            {
-                blocks.push(text.to_string());
-            }
-        }
-    }
-
-    if let Some(text) = item.get("text").and_then(|value| value.as_str())
-        && !text.trim().is_empty()
-    {
-        blocks.push(text.to_string());
-    }
-
-    blocks
 }
 
 #[cfg(test)]
@@ -745,25 +657,21 @@ mod tests {
     fn parse_responses_response_maps_text_tool_calls_and_usage() {
         let resp = OpenAIResponsesResponse {
             output: vec![
-                serde_json::json!({
-                    "type": "reasoning",
-                    "summary": [
-                        {"type": "summary_text", "text": "inspect request"}
-                    ]
-                }),
-                serde_json::json!({
-                    "type": "function_call",
-                    "call_id": "call_123",
-                    "name": "read_file",
-                    "arguments": "{\"path\":\"Cargo.toml\"}"
-                }),
-                serde_json::json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {"type": "output_text", "text": "ok"}
-                    ]
-                }),
+                ResponseOutputBlock::Reasoning {
+                    summary: vec![ResponseReasoningSummary::SummaryText {
+                        text: "inspect request".to_string(),
+                    }],
+                },
+                ResponseOutputBlock::FunctionCall {
+                    call_id: Some("call_123".to_string()),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                },
+                ResponseOutputBlock::Message {
+                    content: vec![ResponseOutputContent::OutputText {
+                        text: "ok".to_string(),
+                    }],
+                },
             ],
             usage: Some(crate::types::provider_openai::ResponsesUsage {
                 input_tokens: Some(10),
@@ -874,21 +782,5 @@ mod tests {
             HashMap::new(),
         );
         assert_eq!(provider.endpoint(), "https://api.openai.com/v1/responses");
-    }
-
-    #[test]
-    fn retry_without_proxy_status_covers_gateway_failures() {
-        assert!(should_retry_without_proxy_status(
-            reqwest::StatusCode::BAD_GATEWAY
-        ));
-        assert!(should_retry_without_proxy_status(
-            reqwest::StatusCode::SERVICE_UNAVAILABLE
-        ));
-        assert!(should_retry_without_proxy_status(
-            reqwest::StatusCode::GATEWAY_TIMEOUT
-        ));
-        assert!(!should_retry_without_proxy_status(
-            reqwest::StatusCode::BAD_REQUEST
-        ));
     }
 }
