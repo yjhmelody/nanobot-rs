@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -75,6 +76,19 @@ impl MockChatServer {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MockProtocol {
+    Responses,
+    Anthropic,
+}
+
+#[derive(Debug, Default)]
+struct MockToolState {
+    wrote: bool,
+    read: bool,
+    read_content: String,
+}
+
 async fn handle_connection(
     stream: &mut tokio::net::TcpStream,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -134,7 +148,11 @@ async fn handle_connection(
 
     let (status, payload) = match (method, path) {
         ("GET", "/health") => (200u16, json!({"ok": true})),
-        ("POST", "/chat/completions") => {
+        ("POST", _) => {
+            let Some(protocol) = mock_protocol(path) else {
+                return Ok((404u16, json!({"error": "not found"})));
+            };
+
             let req: Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
                 Err(err) => {
@@ -143,11 +161,12 @@ async fn handle_connection(
                 }
             };
 
-            if req.get("messages").is_none() {
-                (400u16, json!({"error": "missing messages"}))
-            } else {
-                requests.lock().await.push(req.clone());
-                (200u16, build_response(&req))
+            match protocol_request_valid(protocol, &req) {
+                Ok(()) => {
+                    requests.lock().await.push(req.clone());
+                    (200u16, build_response(protocol, &req))
+                }
+                Err(message) => (400u16, json!({"error": message.to_string()})),
             }
         }
         _ => (404u16, json!({"error": "not found"})),
@@ -185,116 +204,248 @@ fn find_header_end(input: &[u8]) -> Option<usize> {
     input.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn build_response(req: &Value) -> Value {
-    let messages = req
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+fn mock_protocol(path: &str) -> Option<MockProtocol> {
+    if path.ends_with("/responses") {
+        Some(MockProtocol::Responses)
+    } else if path.ends_with("/messages") {
+        Some(MockProtocol::Anthropic)
+    } else {
+        None
+    }
+}
 
-    let tool_messages = messages
-        .iter()
-        .filter(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
-        .collect::<Vec<_>>();
+fn protocol_request_valid(protocol: MockProtocol, req: &Value) -> Result<()> {
+    match protocol {
+        MockProtocol::Anthropic => {
+            if req.get("messages").is_none() {
+                bail!("missing messages");
+            }
+        }
+        MockProtocol::Responses => {
+            if req.get("input").is_none() {
+                bail!("missing input");
+            }
+        }
+    }
 
-    let wrote = tool_messages
-        .iter()
-        .any(|m| m.get("name").and_then(Value::as_str) == Some("write_file"));
-    let read = tool_messages
-        .iter()
-        .any(|m| m.get("name").and_then(Value::as_str) == Some("read_file"));
+    Ok(())
+}
 
-    if !wrote {
+fn build_response(protocol: MockProtocol, req: &Value) -> Value {
+    let state = match protocol {
+        MockProtocol::Responses => tool_state_from_responses(req),
+        MockProtocol::Anthropic => tool_state_from_anthropic(req),
+    };
+
+    if !state.wrote {
         return response_tool_call(
+            protocol,
             "call_write_1",
             "write_file",
             json!({"path": "e2e/result.txt", "content": "NANOBOT_E2E_OK"}),
         );
     }
 
-    if !read {
+    if !state.read {
         return response_tool_call(
+            protocol,
             "call_read_1",
             "read_file",
             json!({"path": "e2e/result.txt"}),
         );
     }
 
-    let mut read_content = String::new();
-    for msg in tool_messages.iter().rev() {
-        if msg.get("name").and_then(Value::as_str) == Some("read_file") {
-            read_content = extract_text(msg.get("content")).to_string();
-            break;
-        }
-    }
-
-    if read_content.contains("NANOBOT_E2E_OK") {
-        response_final("E2E_SUCCESS")
+    if state.read_content.contains("NANOBOT_E2E_OK") {
+        response_final(protocol, "E2E_SUCCESS")
     } else {
-        response_final(&format!(
-            "E2E_FAILURE: unexpected read content: {:?}",
-            read_content
-        ))
+        response_final(
+            protocol,
+            &format!(
+                "E2E_FAILURE: unexpected read content: {:?}",
+                state.read_content
+            ),
+        )
     }
 }
 
-fn extract_text(content: Option<&Value>) -> &str {
+fn tool_state_from_responses(req: &Value) -> MockToolState {
+    let input = req
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut call_names = HashMap::<String, String>::new();
+    let mut state = MockToolState::default();
+
+    for item in input {
+        match item.get("type").and_then(Value::as_str) {
+            Some("function_call") => {
+                if let (Some(call_id), Some(name)) = (
+                    item.get("call_id").and_then(Value::as_str),
+                    item.get("name").and_then(Value::as_str),
+                ) {
+                    call_names.insert(call_id.to_string(), name.to_string());
+                }
+            }
+            Some("function_call_output") => {
+                let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(name) = call_names.get(call_id).map(String::as_str) else {
+                    continue;
+                };
+
+                match name {
+                    "write_file" => state.wrote = true,
+                    "read_file" => {
+                        state.read = true;
+                        state.read_content = item
+                            .get("output")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    state
+}
+
+fn tool_state_from_anthropic(req: &Value) -> MockToolState {
+    let messages = req
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut tool_names = HashMap::<String, String>::new();
+    let mut state = MockToolState::default();
+
+    for message in messages {
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for block in content {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    if let (Some(id), Some(name)) = (
+                        block.get("id").and_then(Value::as_str),
+                        block.get("name").and_then(Value::as_str),
+                    ) {
+                        tool_names.insert(id.to_string(), name.to_string());
+                    }
+                }
+                Some("tool_result") => {
+                    let Some(tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(name) = tool_names.get(tool_use_id).map(String::as_str) else {
+                        continue;
+                    };
+
+                    match name {
+                        "write_file" => state.wrote = true,
+                        "read_file" => {
+                            state.read = true;
+                            state.read_content =
+                                anthropic_tool_result_text(block.get("content")).to_string();
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    state
+}
+
+fn anthropic_tool_result_text(content: Option<&Value>) -> &str {
     match content {
         Some(Value::String(s)) => s,
+        Some(Value::Array(items)) => items
+            .iter()
+            .find_map(|item| item.get("text").and_then(Value::as_str))
+            .unwrap_or_default(),
         _ => "",
     }
 }
 
-fn response_tool_call(id: &str, name: &str, arguments: Value) -> Value {
-    json!({
-        "id": format!("mock-{}", id),
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "content": Value::Null,
-                    "tool_calls": [
-                        {
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": arguments.to_string(),
-                            }
-                        }
-                    ]
-                },
-                "finish_reason": "tool_calls"
+fn response_tool_call(protocol: MockProtocol, id: &str, name: &str, arguments: Value) -> Value {
+    match protocol {
+        MockProtocol::Responses => json!({
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": arguments.to_string()
+                }
+            ],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
             }
-        ],
-        "usage": {
-            "prompt_tokens": 1,
-            "completion_tokens": 1,
-            "total_tokens": 2
-        }
-    })
+        }),
+        MockProtocol::Anthropic => json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": arguments
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        }),
+    }
 }
 
-fn response_final(content: &str) -> Value {
-    json!({
-        "id": "mock-final",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "content": content,
-                },
-                "finish_reason": "stop"
+fn response_final(protocol: MockProtocol, content: &str) -> Value {
+    match protocol {
+        MockProtocol::Responses => json!({
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": content
+                        }
+                    ]
+                }
+            ],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2
             }
-        ],
-        "usage": {
-            "prompt_tokens": 1,
-            "completion_tokens": 1,
-            "total_tokens": 2
-        }
-    })
+        }),
+        MockProtocol::Anthropic => json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": content
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        }),
+    }
 }
 
 fn binary_path() -> PathBuf {
@@ -405,6 +556,8 @@ fn write_config(
     config_path: &Path,
     workspace: &Path,
     api_base: &str,
+    provider: &str,
+    model: &str,
     mcp_codex_path: Option<&Path>,
 ) -> Result<()> {
     let mcp_servers = if let Some(path) = mcp_codex_path {
@@ -424,14 +577,14 @@ fn write_config(
         "agents": {
             "defaults": {
                 "workspace": workspace,
-                "provider": "custom",
-                "model": "custom/mock-model",
+                "provider": provider,
+                "model": model,
                 "maxToolIterations": 8,
                 "temperature": 0.0
             }
         },
         "providers": {
-            "custom": {
+            provider: {
                 "apiBase": api_base,
                 "apiKey": "e2e-local"
             }
@@ -487,6 +640,8 @@ async fn e2e_cli_runtime_tools_session_offline() -> Result<()> {
         &nanobot_home.join("config.json"),
         &workspace,
         &server.api_base(),
+        "custom",
+        "custom/mock-model",
         None,
     )?;
 
@@ -562,6 +717,70 @@ async fn e2e_cli_runtime_tools_session_offline() -> Result<()> {
 }
 
 #[tokio::test]
+async fn e2e_cli_runtime_tools_session_offline_anthropic() -> Result<()> {
+    let server = MockChatServer::start().await?;
+
+    let home = TempDir::new().context("create temp home")?;
+    let home_path = home.path();
+    let nanobot_home = home_path.join(".nanobot");
+    std::fs::create_dir_all(&nanobot_home).context("create ~/.nanobot")?;
+
+    let bin = binary_path();
+    let onboard = run_nanobot(&bin, home_path, &["onboard", "--overwrite"], &[]).await?;
+    assert_success(&onboard, "onboard anthropic");
+
+    let workspace = home_path.join("runtime-workspace");
+    std::fs::create_dir_all(&workspace).context("create runtime workspace")?;
+    let workspace = std::fs::canonicalize(&workspace).context("canonicalize runtime workspace")?;
+
+    write_config(
+        &nanobot_home.join("config.json"),
+        &workspace,
+        &server.api_base(),
+        "anthropic",
+        "anthropic/claude-opus-4-5",
+        None,
+    )?;
+
+    let agent = run_nanobot(
+        &bin,
+        home_path,
+        &[
+            "agent",
+            "-m",
+            "执行 Claude 本地E2E场景",
+            "-s",
+            "cli:anthropic-e2e",
+        ],
+        &[],
+    )
+    .await?;
+    assert_success(&agent, "agent anthropic");
+
+    let agent_text = output_text(&agent);
+    assert!(
+        agent_text.contains("E2E_SUCCESS"),
+        "anthropic agent output missing E2E_SUCCESS:\n{}",
+        agent_text
+    );
+
+    let generated = workspace.join("e2e/result.txt");
+    assert!(
+        generated.exists(),
+        "missing anthropic generated file {}",
+        generated.display()
+    );
+
+    assert!(
+        server.request_count().await >= 3,
+        "anthropic mock server request count too low"
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires local `codex` binaries installed"]
 async fn codex_mcp_connect_smoke() -> Result<()> {
     let codex = which::which("codex").context("codex not found in PATH")?;
@@ -580,6 +799,8 @@ async fn codex_mcp_connect_smoke() -> Result<()> {
         &nanobot_home.join("config.json"),
         &workspace,
         &server.api_base(),
+        "custom",
+        "custom/mock-model",
         Some(&codex),
     )?;
 

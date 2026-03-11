@@ -13,6 +13,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 pub const COMPONENT_RUNTIME: &str = "runtime";
 pub const COMPONENT_AGENT: &str = "agent";
+pub const COMPONENT_REACT: &str = "react";
 pub const COMPONENT_SUBAGENT: &str = "subagent";
 pub const COMPONENT_BUS: &str = "bus";
 pub const COMPONENT_CHANNELS: &str = "channels";
@@ -24,6 +25,7 @@ pub const COMPONENT_SESSION: &str = "session";
 
 pub const TARGET_RUNTIME: &str = "nanobot.runtime";
 pub const TARGET_AGENT: &str = "nanobot.agent";
+pub const TARGET_REACT: &str = "nanobot.agent.react";
 pub const TARGET_SUBAGENT: &str = "nanobot.subagent";
 pub const TARGET_BUS: &str = "nanobot.bus";
 pub const TARGET_CHANNELS: &str = "nanobot.channels";

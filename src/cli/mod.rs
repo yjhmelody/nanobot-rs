@@ -14,7 +14,7 @@ use crate::agent::AgentLoop;
 use crate::bus::MessageBus;
 use crate::bus::{InboundMessage, MessageMetadata, OutboundMessage};
 use crate::channels::ChannelManager;
-use crate::config::{Config, get_config_path, load_config, save_config};
+use crate::config::{Config, get_config_path, load_config, normalize_provider_name, save_config};
 use crate::cron::{CronJob, CronJobHandler};
 use crate::heartbeat::{HeartbeatExecuteHandler, HeartbeatNotifyHandler};
 use crate::runtime::build_runtime;
@@ -133,7 +133,7 @@ async fn onboard(args: OnboardArgs) -> Result<()> {
 
 async fn agent(args: AgentArgs) -> Result<()> {
     let config = load_config(None)?;
-    tracing::debug!("load config: {:#?}", config);
+    tracing::trace!("load config: {:#?}", config);
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
     sync_workspace_templates(&workspace, true).await?;
 
@@ -146,47 +146,92 @@ async fn agent(args: AgentArgs) -> Result<()> {
             .process_direct(&message, &args.session, &channel, &chat_id)
             .await;
         runtime.agent.close_mcp().await;
+        runtime.agent.close_provider().await;
         let response = response?;
-        println!("\n🐈 nanobot\n\n{}\n", response);
+        println!("\n🐈 nanobot response:\n\n{}\n", response);
         return Ok(());
     }
 
     println!("🐈 Interactive mode (type exit/quit to quit)\n");
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
+    let session_key = args.session.clone();
+    let (channel, chat_id) = split_session(&args.session);
+    let agent_task = tokio::spawn(runtime.agent.clone().run());
 
-    loop {
-        print!("You: ");
-        std::io::stdout().flush().ok();
+    let mut outbound_rx = runtime.bus.subscribe_outbound();
+    let output_channel = channel.clone();
+    let output_chat_id = chat_id.clone();
+    let output_task = tokio::spawn(async move {
+        loop {
+            match outbound_rx.recv().await {
+                Ok(msg) => {
+                    if matches_outbound_session(&msg, &output_channel, &output_chat_id)
+                        && !msg.content.trim().is_empty()
+                    {
+                        println!("\n🐈 nanobot\n\n{}\n", msg.content);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            }
+        }
+    });
 
-        let line = match reader.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(err) => {
-                eprintln!("stdin read error: {}", err);
+    let bus = runtime.bus.clone();
+    let input_channel = channel.clone();
+    let input_chat_id = chat_id.clone();
+    let input_task = tokio::spawn(async move {
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin).lines();
+
+        loop {
+            print!("You: ");
+            std::io::stdout().flush().ok();
+
+            let line = match reader.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(err) => {
+                    eprintln!("stdin read error: {}", err);
+                    break;
+                }
+            };
+            let input = line.trim().to_string();
+            if input.is_empty() {
+                continue;
+            }
+            if is_exit_cmd(&input) {
                 break;
             }
-        };
-        let input = line.trim();
-        if input.is_empty() {
-            continue;
+
+            let msg = InboundMessage {
+                channel: input_channel.clone(),
+                sender_id: "user".to_string(),
+                chat_id: input_chat_id.clone(),
+                content: input.into(),
+                timestamp: chrono::Utc::now(),
+                media: Vec::new(),
+                metadata: MessageMetadata::default(),
+                session_key_override: Some(SessionKey::from(session_key.clone())),
+            };
+            let _ = bus.publish_inbound(msg);
         }
-        if is_exit_cmd(input) {
+    });
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nShutting down...");
+        }
+        _ = input_task => {
             println!("Goodbye!");
-            break;
         }
-
-        let (channel, chat_id) = split_session(&args.session);
-        let response = runtime
-            .agent
-            .process_direct(input, &args.session, &channel, &chat_id)
-            .await
-            .unwrap_or_else(|e| format!("Error: {}", e));
-
-        println!("\n🐈 nanobot\n\n{}\n", response);
     }
 
+    runtime.agent.stop().await;
+    let _ = agent_task.await;
+    output_task.abort();
+    let _ = output_task.await;
     runtime.agent.close_mcp().await;
+    runtime.agent.close_provider().await;
     Ok(())
 }
 
@@ -291,6 +336,7 @@ async fn gateway(args: GatewayArgs) -> Result<()> {
 
     let _ = agent_task.await;
     runtime.agent.close_mcp().await;
+    runtime.agent.close_provider().await;
 
     Ok(())
 }
@@ -328,7 +374,10 @@ async fn provider(args: ProviderArgs) -> Result<()> {
 }
 
 async fn provider_login(args: ProviderLoginArgs) -> Result<()> {
-    let provider = normalize_provider_name(&args.provider)?;
+    let provider = normalize_provider_name(&args.provider);
+    if provider.is_empty() {
+        bail!("provider name cannot be empty");
+    }
     if provider != "github_copilot" {
         bail!("provider '{}' is not supported by this command", provider);
     }
@@ -364,7 +413,10 @@ async fn provider_login(args: ProviderLoginArgs) -> Result<()> {
 }
 
 async fn provider_status(args: ProviderStatusArgs) -> Result<()> {
-    let provider = normalize_provider_name(&args.provider)?;
+    let provider = normalize_provider_name(&args.provider);
+    if provider.is_empty() {
+        bail!("provider name cannot be empty");
+    }
     if provider != "github_copilot" {
         bail!("provider '{}' is not supported by this command", provider);
     }
@@ -419,14 +471,6 @@ async fn provider_status(args: ProviderStatusArgs) -> Result<()> {
     );
 
     Ok(())
-}
-
-fn normalize_provider_name(raw: &str) -> Result<String> {
-    let name = raw.trim().replace('-', "_");
-    if name.is_empty() {
-        bail!("provider name cannot be empty");
-    }
-    Ok(name)
 }
 
 fn copilot_command_name(config: &Config) -> String {
@@ -574,6 +618,10 @@ fn split_session(session: &str) -> (String, String) {
     } else {
         ("cli".to_string(), session.to_string())
     }
+}
+
+fn matches_outbound_session(msg: &OutboundMessage, channel: &str, chat_id: &str) -> bool {
+    msg.channel == channel && msg.chat_id == chat_id
 }
 
 fn is_exit_cmd(input: &str) -> bool {

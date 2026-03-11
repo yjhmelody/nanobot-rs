@@ -5,6 +5,7 @@ pub mod config;
 pub mod cron;
 pub mod heartbeat;
 pub mod provider;
+pub mod provider_anthropic;
 pub mod provider_openai;
 pub mod session;
 pub mod task;

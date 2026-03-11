@@ -23,9 +23,9 @@ pub enum BuiltinTool {
     WebFetch,
     /// Send message to user
     Message,
-    /// Spawn subagent (optional)
+    /// Spawn subagent
     Spawn,
-    /// Schedule cron job (optional)
+    /// Schedule cron job
     Cron,
 }
 
@@ -57,45 +57,9 @@ impl BuiltinTool {
             Self::WebSearch,
             Self::WebFetch,
             Self::Message,
+            Self::Spawn,
+            Self::Cron,
         ]
-    }
-
-    /// Returns all optional tools.
-    pub const fn optional_tools() -> &'static [BuiltinTool] {
-        &[Self::Spawn, Self::Cron]
-    }
-
-    /// Returns all filesystem tools.
-    pub const fn filesystem_tools() -> &'static [BuiltinTool] {
-        &[
-            Self::ReadFile,
-            Self::WriteFile,
-            Self::EditFile,
-            Self::ListDir,
-        ]
-    }
-
-    /// Returns all web tools.
-    pub const fn web_tools() -> &'static [BuiltinTool] {
-        &[Self::WebSearch, Self::WebFetch]
-    }
-
-    /// Checks if this is a filesystem tool.
-    pub const fn is_filesystem_tool(&self) -> bool {
-        matches!(
-            self,
-            Self::ReadFile | Self::WriteFile | Self::EditFile | Self::ListDir
-        )
-    }
-
-    /// Checks if this is a web tool.
-    pub const fn is_web_tool(&self) -> bool {
-        matches!(self, Self::WebSearch | Self::WebFetch)
-    }
-
-    /// Checks if this is an optional tool.
-    pub const fn is_optional(&self) -> bool {
-        matches!(self, Self::Spawn | Self::Cron)
     }
 }
 
@@ -142,13 +106,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_name_returns_correct_string() {
-        assert_eq!(BuiltinTool::ReadFile.name(), "read_file");
-        assert_eq!(BuiltinTool::Exec.name(), "exec");
-        assert_eq!(BuiltinTool::WebSearch.name(), "web_search");
-    }
-
-    #[test]
     fn from_str_parses_valid_tool_names() {
         assert_eq!(
             "read_file".parse::<BuiltinTool>().unwrap(),
@@ -175,62 +132,11 @@ mod tests {
     }
 
     #[test]
-    fn core_tools_excludes_optional() {
-        let core = BuiltinTool::core_tools();
-        assert!(!core.contains(&BuiltinTool::Spawn));
-        assert!(!core.contains(&BuiltinTool::Cron));
-        assert!(core.contains(&BuiltinTool::ReadFile));
-        assert!(core.contains(&BuiltinTool::Message));
-    }
-
-    #[test]
-    fn optional_tools_only_includes_spawn_and_cron() {
-        let optional = BuiltinTool::optional_tools();
-        assert_eq!(optional.len(), 2);
-        assert!(optional.contains(&BuiltinTool::Spawn));
-        assert!(optional.contains(&BuiltinTool::Cron));
-    }
-
-    #[test]
-    fn filesystem_tools_classification() {
-        assert!(BuiltinTool::ReadFile.is_filesystem_tool());
-        assert!(BuiltinTool::WriteFile.is_filesystem_tool());
-        assert!(BuiltinTool::EditFile.is_filesystem_tool());
-        assert!(BuiltinTool::ListDir.is_filesystem_tool());
-        assert!(!BuiltinTool::Exec.is_filesystem_tool());
-        assert!(!BuiltinTool::WebSearch.is_filesystem_tool());
-    }
-
-    #[test]
-    fn web_tools_classification() {
-        assert!(BuiltinTool::WebSearch.is_web_tool());
-        assert!(BuiltinTool::WebFetch.is_web_tool());
-        assert!(!BuiltinTool::ReadFile.is_web_tool());
-        assert!(!BuiltinTool::Exec.is_web_tool());
-    }
-
-    #[test]
-    fn optional_tools_classification() {
-        assert!(BuiltinTool::Spawn.is_optional());
-        assert!(BuiltinTool::Cron.is_optional());
-        assert!(!BuiltinTool::ReadFile.is_optional());
-        assert!(!BuiltinTool::Message.is_optional());
-    }
-
-    #[test]
     fn all_tools_have_unique_names() {
         use std::collections::HashSet;
         let mut names = HashSet::new();
 
         for tool in BuiltinTool::core_tools() {
-            assert!(
-                names.insert(tool.name()),
-                "duplicate tool name: {}",
-                tool.name()
-            );
-        }
-
-        for tool in BuiltinTool::optional_tools() {
             assert!(
                 names.insert(tool.name()),
                 "duplicate tool name: {}",

@@ -32,17 +32,7 @@ impl ChannelManager {
             channels.insert("telegram".to_string(), Arc::new(tg));
         }
 
-        for (name, cfg) in [
-            ("whatsapp", &config.whatsapp),
-            ("discord", &config.discord),
-            ("feishu", &config.feishu),
-            ("mochat", &config.mochat),
-            ("dingtalk", &config.dingtalk),
-            ("email", &config.email),
-            ("slack", &config.slack),
-            ("qq", &config.qq),
-            ("matrix", &config.matrix),
-        ] {
+        for (name, cfg) in [("discord", &config.discord), ("feishu", &config.feishu)] {
             if cfg.enabled {
                 validate_allow_from(name, cfg)?;
                 channels.insert(name.to_string(), Arc::new(PlaceholderChannel::new(name)));

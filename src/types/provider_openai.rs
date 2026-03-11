@@ -1,112 +1,115 @@
-use serde::de::Error as DeError;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
-use crate::types::provider::ChatMessage;
-use crate::types::tools::ToolDefinition;
+use crate::types::tools::{JsonSchema, ToolDefinition};
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ChatCompletionPayload {
+pub(crate) struct ResponsesPayload {
     pub(crate) model: String,
-    pub(crate) messages: Vec<ChatMessage>,
-    pub(crate) max_tokens: i32,
+    pub(crate) input: Vec<ResponseInputItem>,
+    pub(crate) max_output_tokens: i32,
     pub(crate) temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) reasoning: Option<ResponseReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) tools: Option<Vec<ToolDefinition>>,
+    pub(crate) tools: Option<Vec<ResponseToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tool_choice: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct OpenAIChatResponse {
-    pub(crate) choices: Vec<Choice>,
-    #[serde(default)]
-    pub(crate) usage: Option<Usage>,
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseReasoningConfig {
+    pub(crate) effort: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Choice {
-    pub(crate) message: AssistantMessage,
-    #[serde(default)]
-    pub(crate) finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct AssistantMessage {
-    #[serde(default)]
-    pub(crate) content: Option<String>,
-    #[serde(default)]
-    pub(crate) tool_calls: Option<Vec<OpenAIToolCall>>,
-    #[serde(default)]
-    pub(crate) reasoning_content: Option<String>,
-    #[serde(default)]
-    pub(crate) thinking_blocks: Option<Vec<ThinkingBlock>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct OpenAIToolCall {
-    #[serde(default)]
-    pub(crate) id: Option<String>,
-    pub(crate) function: OpenAIFunctionCall,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct OpenAIFunctionCall {
-    pub(crate) name: String,
-    #[serde(rename = "arguments", deserialize_with = "deserialize_arguments_json")]
-    pub(crate) arguments_json: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
-pub(crate) enum ThinkingBlock {
-    Text(String),
-    Structured(StructuredThinkingBlock),
+pub(crate) enum ResponseInputItem {
+    Message(ResponseInputMessage),
+    FunctionCall(ResponseFunctionCallItem),
+    FunctionCallOutput(ResponseFunctionCallOutputItem),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct StructuredThinkingBlock {
-    #[serde(default)]
-    pub(crate) text: Option<String>,
-    #[serde(default)]
-    pub(crate) content: Option<String>,
-    #[serde(default)]
-    pub(crate) summary: Option<String>,
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseInputMessage {
+    pub(crate) role: String,
+    pub(crate) content: Vec<ResponseInputContent>,
 }
 
-impl ThinkingBlock {
-    pub(crate) fn into_text(self) -> Option<String> {
-        match self {
-            Self::Text(s) => (!s.trim().is_empty()).then_some(s),
-            Self::Structured(v) => v
-                .text
-                .or(v.content)
-                .or(v.summary)
-                .and_then(|s| (!s.trim().is_empty()).then_some(s)),
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseInputContent {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) text: String,
+}
+
+impl ResponseInputContent {
+    pub(crate) fn input_text(text: String) -> Self {
+        Self {
+            kind: "input_text",
+            text,
         }
     }
 }
 
-pub(crate) fn deserialize_arguments_json<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
-    let payload = raw.get();
-    if payload.starts_with('"') {
-        serde_json::from_str::<String>(payload).map_err(D::Error::custom)
-    } else {
-        Ok(payload.to_string())
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseFunctionCallItem {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseFunctionCallOutputItem {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) call_id: String,
+    pub(crate) output: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResponseToolDefinition {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) parameters: JsonSchema,
+}
+
+impl From<ToolDefinition> for ResponseToolDefinition {
+    fn from(value: ToolDefinition) -> Self {
+        Self {
+            kind: "function",
+            name: value.function.name,
+            description: value.function.description,
+            parameters: value.function.parameters,
+        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Usage {
+pub(crate) struct OpenAIResponsesResponse {
     #[serde(default)]
-    pub(crate) prompt_tokens: Option<u64>,
+    pub(crate) output: Vec<serde_json::Value>,
     #[serde(default)]
-    pub(crate) completion_tokens: Option<u64>,
+    pub(crate) usage: Option<ResponsesUsage>,
+    #[serde(default)]
+    pub(crate) error: Option<ResponsesError>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ResponsesUsage {
+    #[serde(default)]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) output_tokens: Option<u64>,
     #[serde(default)]
     pub(crate) total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ResponsesError {
+    #[serde(default)]
+    pub(crate) message: Option<String>,
 }

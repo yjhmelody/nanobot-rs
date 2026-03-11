@@ -337,6 +337,7 @@ async fn run_subagent_loop_impl(
     for _ in 0..MAX_ITERATOR {
         let response = provider
             .chat(ChatRequest {
+                session_key: Some(tool_context.session_key.clone()),
                 messages: messages.clone(),
                 tools: Some(tool_defs.clone()),
                 model: Some(model.to_string()),
@@ -510,7 +511,6 @@ mod tests {
             crate::config::schema::WebToolsConfig::default(),
             Some(bus.clone()),
             None,
-            None,
         ));
 
         let manager = Arc::new(SubagentManager::new(
@@ -576,7 +576,6 @@ mod tests {
             crate::config::schema::ExecToolConfig::default(),
             crate::config::schema::WebToolsConfig::default(),
             Some(bus.clone()),
-            None,
             None,
         ));
 

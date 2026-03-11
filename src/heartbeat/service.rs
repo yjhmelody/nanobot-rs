@@ -12,6 +12,7 @@ use tracing::{error, info};
 use crate::observability::TARGET_HEARTBEAT;
 use crate::provider::{ChatMessage, ChatRequest, LLMProvider};
 use crate::tools::base::{JsonSchema, ToolDefinition, parse_args};
+use crate::types::SessionKey;
 use crate::types::heartbeat::HeartbeatDecisionArgs;
 
 #[async_trait]
@@ -191,6 +192,7 @@ impl HeartbeatService {
         let response = self
             .provider
             .chat(ChatRequest {
+                session_key: Some(SessionKey::from("system:heartbeat")),
                 messages: vec![
                     ChatMessage::system_text(
                         "You are a heartbeat agent. Call the heartbeat tool to report your decision.",

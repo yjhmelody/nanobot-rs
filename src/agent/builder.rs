@@ -6,13 +6,13 @@ use anyhow::{Context, Result};
 
 use crate::agent::{AgentLoop, ContextBuilder, SubagentManager};
 use crate::bus::MessageBus;
-use crate::config::schema::{ChannelsConfig, ExecToolConfig, MCPServerConfig, WebToolsConfig};
+use crate::config::schema::{ExecToolConfig, MCPServerConfig, WebToolsConfig};
 use crate::cron::CronService;
 use crate::provider::LLMProvider;
-use crate::session::SessionManager;
-use crate::tools::ToolRegistry;
+use crate::session::{ConsolidationConfig, LegacySessionManager};
 use crate::tools::acp::ACPTool;
 use crate::tools::mcp::MCPManager;
+use crate::tools::{ToolRegistry, ToolRegistryBuilder};
 
 /// Configuration for AgentLoop that groups related parameters.
 #[derive(Debug, Clone)]
@@ -75,9 +75,9 @@ pub struct AgentLoopBuilder {
 
     // Configuration
     config: AgentConfig,
+    consolidation_config: ConsolidationConfig,
     web_config: WebToolsConfig,
     exec_config: ExecToolConfig,
-    channels_config: ChannelsConfig,
     mcp_servers: HashMap<String, MCPServerConfig>,
     acp_config: Option<crate::acp::config::ACPConfig>,
     restrict_to_workspace: bool,
@@ -100,9 +100,9 @@ impl AgentLoopBuilder {
             provider,
             workspace,
             config: AgentConfig::default(),
+            consolidation_config: ConsolidationConfig::default(),
             web_config: WebToolsConfig::default(),
             exec_config: ExecToolConfig::default(),
-            channels_config: ChannelsConfig::default(),
             mcp_servers: HashMap::new(),
             acp_config: None,
             restrict_to_workspace: false,
@@ -116,6 +116,12 @@ impl AgentLoopBuilder {
         self
     }
 
+    /// Sets the session consolidation configuration.
+    pub fn with_consolidation_config(mut self, config: ConsolidationConfig) -> Self {
+        self.consolidation_config = config;
+        self
+    }
+
     /// Sets the web tools configuration (proxy, search API key).
     pub fn with_web_config(mut self, config: WebToolsConfig) -> Self {
         self.web_config = config;
@@ -125,12 +131,6 @@ impl AgentLoopBuilder {
     /// Sets the exec tool configuration (timeout, PATH append).
     pub fn with_exec_config(mut self, config: ExecToolConfig) -> Self {
         self.exec_config = config;
-        self
-    }
-
-    /// Sets the channels configuration.
-    pub fn with_channels_config(mut self, config: ChannelsConfig) -> Self {
-        self.channels_config = config;
         self
     }
 
@@ -167,18 +167,8 @@ impl AgentLoopBuilder {
     /// - Session manager initialization fails
     pub fn build(self) -> Result<AgentLoop> {
         let context = ContextBuilder::new(self.workspace.clone())?;
-        let sessions = Arc::new(SessionManager::new(&self.workspace)?);
-
-        // Create ToolRegistry first without SpawnService
-        let tools = Arc::new(ToolRegistry::new(
-            self.workspace.clone(),
-            self.restrict_to_workspace,
-            self.exec_config.clone(),
-            self.web_config.clone(),
-            Some(self.bus.clone()),
-            None, // SpawnService will be set after SubagentManager is created
-            self.cron_service.clone(),
-        ));
+        let sessions = Arc::new(LegacySessionManager::new(&self.workspace)?);
+        let tools = self.build_tool_registry()?;
 
         // Create SubagentManager with ToolRegistry
         let subagent_manager = Arc::new(SubagentManager::new(
@@ -192,16 +182,6 @@ impl AgentLoopBuilder {
             self.config.reasoning_effort.clone(),
         ));
 
-        // Register ACP tool if configured
-        if let Some(acp_config) = &self.acp_config {
-            if acp_config.enabled {
-                let acp_tool = Arc::new(ACPTool::new(acp_config.clone()));
-                tools
-                    .register_dynamic_tool(acp_tool)
-                    .context("Failed to register ACP tool")?;
-            }
-        }
-
         // Set the spawn service in ToolRegistry (SubagentManager implements SpawnService)
         tools.set_spawn_service(subagent_manager);
 
@@ -213,15 +193,15 @@ impl AgentLoopBuilder {
 
         Ok(AgentLoop {
             bus: self.bus,
-            channels_config: self.channels_config,
             provider: self.provider,
-            workspace: self.workspace,
+
             model: self.config.model,
             max_iterations: self.config.max_iterations,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             memory_window: self.config.memory_window,
             reasoning_effort: self.config.reasoning_effort,
+            consolidation_config: self.consolidation_config,
             tools,
             mcp,
             context,
@@ -231,6 +211,26 @@ impl AgentLoopBuilder {
             active_tasks: Arc::new(dashmap::DashMap::new()),
             last_cleanup: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
         })
+    }
+
+    fn build_tool_registry(&self) -> Result<Arc<ToolRegistry>> {
+        let mut builder = ToolRegistryBuilder::new(self.workspace.clone())
+            .with_restrict_to_workspace(self.restrict_to_workspace)
+            .with_exec_config(self.exec_config.clone())
+            .with_web_config(self.web_config.clone())
+            .with_bus(self.bus.clone());
+
+        if let Some(cron_service) = self.cron_service.clone() {
+            builder = builder.with_cron_service(cron_service);
+        }
+
+        if let Some(acp_config) = self.acp_config.clone().filter(|cfg| cfg.enabled) {
+            builder = builder.with_custom_tool(Arc::new(ACPTool::new(acp_config)));
+        }
+
+        Ok(Arc::new(
+            builder.build().context("Failed to build tool registry")?,
+        ))
     }
 }
 
@@ -302,5 +302,24 @@ mod tests {
         assert_eq!(agent.max_tokens, 4096);
         assert_eq!(agent.memory_window, 50);
         assert_eq!(agent.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn builder_registers_spawn_tool_via_unified_tool_builder() {
+        let bus = MessageBus::new();
+        let provider: Arc<dyn LLMProvider> = Arc::new(DummyProvider);
+        let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
+
+        let agent = AgentLoopBuilder::new(bus, provider, workspace)
+            .build()
+            .expect("build agent loop");
+
+        let names: Vec<_> = agent
+            .tools
+            .definitions()
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        assert!(names.contains(&"spawn".to_string()));
     }
 }

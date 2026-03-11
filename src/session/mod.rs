@@ -1,4 +1,19 @@
+pub mod consolidation;
+pub mod consolidation_strategy;
+pub mod hook;
 pub mod manager;
+pub mod memory_provider;
+pub mod session_manager;
+pub mod session_store;
+pub mod traits;
+pub mod transformer;
 
-pub use crate::types::session::{Session, SessionEntry, SessionSummary};
-pub use manager::SessionManager;
+pub use self::consolidation::*;
+pub use self::consolidation_strategy::*;
+pub use self::hook::*;
+pub use self::manager::*;
+pub use self::memory_provider::*;
+pub use self::session_manager::*;
+pub use self::session_store::*;
+pub use self::traits::*;
+pub use self::transformer::*;

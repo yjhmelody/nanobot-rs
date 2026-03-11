@@ -50,7 +50,6 @@ pub async fn build_runtime(config: Config) -> Result<RuntimeBundle> {
             .with_config(agent_config)
             .with_web_config(config.tools.web.clone())
             .with_exec_config(config.tools.exec.clone())
-            .with_channels_config(config.channels.clone())
             .with_mcp_servers(config.tools.mcp_servers.clone())
             .with_acp_config(config.acp.clone())
             .with_restrict_to_workspace(config.tools.restrict_to_workspace)

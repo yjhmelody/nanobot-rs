@@ -2,13 +2,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::tool_name::ToolName;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageRole {
     System,
     User,
     Assistant,
     Tool,
+}
+
+impl MessageRole {
+    pub fn role_name(&self) -> &'static str {
+        match self {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

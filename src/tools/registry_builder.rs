@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::agent::{SpawnService, SubagentManager};
+use crate::agent::SpawnService;
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, WebToolsConfig};
 use crate::cron::CronService;
@@ -72,14 +72,6 @@ impl ToolRegistryBuilder {
         self
     }
 
-    /// Sets the spawn manager for the spawn tool.
-    ///
-    /// This is a convenience method that accepts SubagentManager directly.
-    pub fn with_spawn_manager(mut self, manager: Arc<SubagentManager>) -> Self {
-        self.spawn_service = Some(manager);
-        self
-    }
-
     /// Sets the cron service for the cron tool.
     pub fn with_cron_service(mut self, service: Arc<CronService>) -> Self {
         self.cron_service = Some(service);
@@ -100,9 +92,12 @@ impl ToolRegistryBuilder {
             self.exec_config,
             self.web_config,
             self.bus,
-            self.spawn_service,
             self.cron_service,
         );
+
+        if let Some(service) = self.spawn_service {
+            registry.set_spawn_service(service);
+        }
 
         for tool in self.custom_tools {
             registry.register_dynamic_tool(tool)?;
@@ -119,6 +114,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+    use crate::agent::SpawnService;
     use crate::tools::base::{JsonSchema, Tool, ToolContext, ToolDefinition};
     use crate::types::SessionKey;
 
@@ -153,6 +149,60 @@ mod tests {
 
         let defs = registry.definitions();
         assert!(!defs.is_empty());
+    }
+
+    struct BuilderSpawnService;
+
+    #[async_trait]
+    impl SpawnService for BuilderSpawnService {
+        async fn spawn(
+            &self,
+            task: String,
+            label: Option<String>,
+            _origin_channel: String,
+            _origin_chat_id: String,
+            _session_key: Option<SessionKey>,
+        ) -> String {
+            format!("spawned {} {:?}", task, label)
+        }
+
+        async fn cancel_by_session(
+            &self,
+            _session_key: &SessionKey,
+        ) -> crate::error::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_registers_spawn_tool_when_service_is_provided() {
+        let workspace = std::env::temp_dir().join("test-registry-builder-spawn");
+        let registry = ToolRegistryBuilder::new(workspace)
+            .with_spawn_service(Arc::new(BuilderSpawnService))
+            .build()
+            .expect("build registry");
+
+        let names: Vec<_> = registry
+            .definitions()
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        assert!(names.contains(&"spawn".to_string()));
+
+        let out = registry
+            .execute(
+                "spawn",
+                r#"{"task":"test task","label":"demo"}"#,
+                &ToolContext {
+                    channel: "test".to_string(),
+                    chat_id: "test".to_string(),
+                    session_key: SessionKey::from("test:test"),
+                    message_id: None,
+                },
+            )
+            .await
+            .expect("execute spawn tool");
+        assert!(out.contains("spawned test task"));
     }
 
     struct BuilderEchoTool;

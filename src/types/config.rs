@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::utils::helpers::expand_tilde;
 
@@ -115,55 +115,37 @@ impl Config {
 
         let target_model = model.unwrap_or(&self.agents.defaults.model).to_lowercase();
         let normalized = target_model.replace('-', "_");
-        if target_model.starts_with("openai-codex/") || target_model.starts_with("openai_codex/") {
-            return Some("openai_codex".to_string());
-        }
-        if target_model.starts_with("github-copilot/")
-            || target_model.starts_with("github_copilot/")
+        if let Some((prefix, _)) = target_model.split_once('/')
+            && let Some(spec) = provider_spec(prefix)
         {
-            return Some("github_copilot".to_string());
+            return Some(spec.name.to_string());
         }
 
-        let specs = provider_specs();
-        if let Some((prefix, _)) = target_model.split_once('/') {
-            let prefix = normalize_provider_name(prefix);
-            if let Some(spec) = specs.iter().find(|s| s.name == prefix) {
-                if self
-                    .provider_config(&spec.name)
-                    .map(|p| p.has_auth())
-                    .unwrap_or(false)
-                    || spec.oauth
-                {
-                    return Some(spec.name.clone());
-                }
-            }
-        }
-
-        for spec in &specs {
+        for spec in PROVIDER_SPECS {
             let hit = spec
                 .keywords
                 .iter()
                 .any(|kw| target_model.contains(kw) || normalized.contains(&kw.replace('-', "_")));
             if hit
                 && (self
-                    .provider_config(&spec.name)
+                    .provider_config(spec.name)
                     .map(|p| p.has_auth())
                     .unwrap_or(false)
                     || spec.oauth)
             {
-                return Some(spec.name.clone());
+                return Some(spec.name.to_string());
             }
         }
 
-        specs
+        PROVIDER_SPECS
             .iter()
             .filter(|s| !s.oauth)
             .find(|s| {
-                self.provider_config(&s.name)
+                self.provider_config(s.name)
                     .map(|p| p.has_auth())
                     .unwrap_or(false)
             })
-            .map(|s| s.name.clone())
+            .map(|s| s.name.to_string())
     }
 
     /// Returns the provider configuration for the specified model.
@@ -185,13 +167,7 @@ impl Config {
     /// Returns the API base URL for the specified model's provider.
     ///
     /// If the provider has a custom `api_base` configured, returns that.
-    /// Otherwise, returns the built-in default URL for known providers:
-    /// - openrouter: <https://openrouter.ai/api/v1>
-    /// - aihubmix: <https://aihubmix.com/v1>
-    /// - siliconflow: <https://api.siliconflow.cn/v1>
-    /// - volcengine: <https://ark.cn-beijing.volces.com/api/v3>
-    /// - moonshot: <https://api.moonshot.ai/v1>
-    /// - minimax: <https://api.minimax.io/v1>
+    /// Otherwise, returns the provider's default API base when one is defined.
     ///
     /// # Arguments
     ///
@@ -209,15 +185,9 @@ impl Config {
             }
         }
 
-        match name.as_str() {
-            "openrouter" => Some("https://openrouter.ai/api/v1".to_string()),
-            "aihubmix" => Some("https://aihubmix.com/v1".to_string()),
-            "siliconflow" => Some("https://api.siliconflow.cn/v1".to_string()),
-            "volcengine" => Some("https://ark.cn-beijing.volces.com/api/v3".to_string()),
-            "moonshot" => Some("https://api.moonshot.ai/v1".to_string()),
-            "minimax" => Some("https://api.minimax.io/v1".to_string()),
-            _ => None,
-        }
+        provider_spec(&name)
+            .and_then(|spec| spec.default_api_base)
+            .map(str::to_string)
     }
 
     /// Returns the provider configuration for the specified provider name.
@@ -232,64 +202,28 @@ impl Config {
     ///
     /// # Supported Providers
     ///
-    /// - custom, anthropic, openai, openrouter, deepseek, groq
-    /// - zhipu, dashscope, vllm, gemini, moonshot, minimax
-    /// - aihubmix, siliconflow, volcengine
-    /// - openai_codex, github_copilot
+    /// - custom, anthropic, openai, github_copilot
     pub fn provider_config(&self, name: &str) -> Option<&ProviderConfig> {
-        match normalize_provider_name(name).as_str() {
-            "custom" => Some(&self.providers.custom),
-            "anthropic" => Some(&self.providers.anthropic),
-            "openai" => Some(&self.providers.openai),
-            "openrouter" => Some(&self.providers.openrouter),
-            "deepseek" => Some(&self.providers.deepseek),
-            "groq" => Some(&self.providers.groq),
-            "zhipu" => Some(&self.providers.zhipu),
-            "dashscope" => Some(&self.providers.dashscope),
-            "vllm" => Some(&self.providers.vllm),
-            "gemini" => Some(&self.providers.gemini),
-            "moonshot" => Some(&self.providers.moonshot),
-            "minimax" => Some(&self.providers.minimax),
-            "aihubmix" => Some(&self.providers.aihubmix),
-            "siliconflow" => Some(&self.providers.siliconflow),
-            "volcengine" => Some(&self.providers.volcengine),
-            "openai_codex" => Some(&self.providers.openai_codex),
-            "github_copilot" => Some(&self.providers.github_copilot),
-            _ => None,
-        }
+        self.providers.get(name)
     }
 }
 
-fn normalize_provider_name(raw: &str) -> String {
+pub fn normalize_provider_name(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
+    if trimmed.eq_ignore_ascii_case("auto") {
+        return "auto".to_string();
+    }
+
     let collapsed = collapse_provider_name(trimmed);
-    for canonical in [
-        "custom",
-        "anthropic",
-        "openai",
-        "openrouter",
-        "deepseek",
-        "groq",
-        "zhipu",
-        "dashscope",
-        "vllm",
-        "gemini",
-        "moonshot",
-        "minimax",
-        "aihubmix",
-        "siliconflow",
-        "volcengine",
-        "openai_codex",
-        "github_copilot",
-        "auto",
-    ] {
-        if collapse_provider_name(canonical) == collapsed {
-            return canonical.to_string();
-        }
+    if let Some(spec) = PROVIDER_SPECS
+        .iter()
+        .find(|spec| spec.matches_collapsed(&collapsed))
+    {
+        return spec.name.to_string();
     }
 
     trimmed.to_lowercase().replace('-', "_")
@@ -302,48 +236,22 @@ fn collapse_provider_name(raw: &str) -> String {
         .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct ProviderSpec {
-    name: String,
-    keywords: Vec<String>,
+    name: &'static str,
+    aliases: &'static [&'static str],
+    keywords: &'static [&'static str],
     oauth: bool,
+    default_api_base: Option<&'static str>,
 }
 
-fn provider_specs() -> Vec<ProviderSpec> {
-    vec![
-        spec("custom", &[]),
-        spec("openrouter", &["openrouter"]),
-        spec("aihubmix", &["aihubmix"]),
-        spec("siliconflow", &["siliconflow"]),
-        spec("volcengine", &["volcengine", "volces", "ark"]),
-        spec("anthropic", &["anthropic", "claude"]),
-        spec("openai", &["openai", "gpt"]),
-        spec_oauth("openai_codex", &["openai-codex"]),
-        spec_oauth("github_copilot", &["github_copilot", "copilot"]),
-        spec("deepseek", &["deepseek"]),
-        spec("gemini", &["gemini"]),
-        spec("zhipu", &["zhipu", "glm", "zai"]),
-        spec("dashscope", &["qwen", "dashscope"]),
-        spec("moonshot", &["moonshot", "kimi"]),
-        spec("minimax", &["minimax"]),
-        spec("vllm", &["vllm"]),
-        spec("groq", &["groq"]),
-    ]
-}
-
-fn spec(name: &str, keywords: &[&str]) -> ProviderSpec {
-    ProviderSpec {
-        name: name.to_string(),
-        keywords: keywords.iter().map(|s| s.to_string()).collect(),
-        oauth: false,
-    }
-}
-
-fn spec_oauth(name: &str, keywords: &[&str]) -> ProviderSpec {
-    ProviderSpec {
-        name: name.to_string(),
-        keywords: keywords.iter().map(|s| s.to_string()).collect(),
-        oauth: true,
+impl ProviderSpec {
+    fn matches_collapsed(&self, candidate: &str) -> bool {
+        collapse_provider_name(self.name) == candidate
+            || self
+                .aliases
+                .iter()
+                .any(|alias| collapse_provider_name(alias) == candidate)
     }
 }
 
@@ -378,7 +286,7 @@ impl Default for AgentDefaults {
     fn default() -> Self {
         Self {
             workspace: "~/.nanobot/workspace".to_string(),
-            model: "anthropic/claude-opus-4-5".to_string(),
+            model: "anthropic/claude-sonnet-4-5".to_string(),
             provider: "auto".to_string(),
             max_tokens: 8192,
             temperature: 0.1,
@@ -429,15 +337,8 @@ pub struct ChannelsConfig {
     pub send_progress: bool,
     pub send_tool_hints: bool,
     pub telegram: GenericChannelConfig,
-    pub whatsapp: GenericChannelConfig,
     pub discord: GenericChannelConfig,
     pub feishu: GenericChannelConfig,
-    pub mochat: GenericChannelConfig,
-    pub dingtalk: GenericChannelConfig,
-    pub email: GenericChannelConfig,
-    pub slack: GenericChannelConfig,
-    pub qq: GenericChannelConfig,
-    pub matrix: GenericChannelConfig,
 }
 
 impl Default for ChannelsConfig {
@@ -446,15 +347,8 @@ impl Default for ChannelsConfig {
             send_progress: true,
             send_tool_hints: false,
             telegram: GenericChannelConfig::default(),
-            whatsapp: GenericChannelConfig::default(),
             discord: GenericChannelConfig::default(),
             feishu: GenericChannelConfig::default(),
-            mochat: GenericChannelConfig::default(),
-            dingtalk: GenericChannelConfig::default(),
-            email: GenericChannelConfig::default(),
-            slack: GenericChannelConfig::default(),
-            qq: GenericChannelConfig::default(),
-            matrix: GenericChannelConfig::default(),
         }
     }
 }
@@ -504,25 +398,12 @@ impl Default for ProviderConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProvidersConfig {
     pub custom: ProviderConfig,
     pub anthropic: ProviderConfig,
     pub openai: ProviderConfig,
-    pub openrouter: ProviderConfig,
-    pub deepseek: ProviderConfig,
-    pub groq: ProviderConfig,
-    pub zhipu: ProviderConfig,
-    pub dashscope: ProviderConfig,
-    pub vllm: ProviderConfig,
-    pub gemini: ProviderConfig,
-    pub moonshot: ProviderConfig,
-    pub minimax: ProviderConfig,
-    pub aihubmix: ProviderConfig,
-    pub siliconflow: ProviderConfig,
-    pub volcengine: ProviderConfig,
-    pub openai_codex: ProviderConfig,
     pub github_copilot: ProviderConfig,
 }
 
@@ -532,22 +413,91 @@ impl Default for ProvidersConfig {
             custom: ProviderConfig::default(),
             anthropic: ProviderConfig::default(),
             openai: ProviderConfig::default(),
-            openrouter: ProviderConfig::default(),
-            deepseek: ProviderConfig::default(),
-            groq: ProviderConfig::default(),
-            zhipu: ProviderConfig::default(),
-            dashscope: ProviderConfig::default(),
-            vllm: ProviderConfig::default(),
-            gemini: ProviderConfig::default(),
-            moonshot: ProviderConfig::default(),
-            minimax: ProviderConfig::default(),
-            aihubmix: ProviderConfig::default(),
-            siliconflow: ProviderConfig::default(),
-            volcengine: ProviderConfig::default(),
-            openai_codex: ProviderConfig::default(),
             github_copilot: ProviderConfig::default(),
         }
     }
+}
+
+impl ProvidersConfig {
+    fn get(&self, name: &str) -> Option<&ProviderConfig> {
+        match normalize_provider_name(name).as_str() {
+            "custom" => Some(&self.custom),
+            "anthropic" => Some(&self.anthropic),
+            "openai" => Some(&self.openai),
+            "github_copilot" => Some(&self.github_copilot),
+            _ => None,
+        }
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut ProviderConfig> {
+        match normalize_provider_name(name).as_str() {
+            "custom" => Some(&mut self.custom),
+            "anthropic" => Some(&mut self.anthropic),
+            "openai" => Some(&mut self.openai),
+            "github_copilot" => Some(&mut self.github_copilot),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProvidersConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = HashMap::<String, ProviderConfig>::deserialize(deserializer)?;
+        let mut providers = Self::default();
+
+        for (key, value) in raw {
+            if let Some(slot) = providers.get_mut(&key) {
+                *slot = value;
+            }
+        }
+
+        Ok(providers)
+    }
+}
+
+const PROVIDER_SPECS: &[ProviderSpec] = &[
+    ProviderSpec {
+        name: "custom",
+        aliases: &[],
+        keywords: &[],
+        oauth: false,
+        default_api_base: None,
+    },
+    ProviderSpec {
+        name: "anthropic",
+        aliases: &[],
+        keywords: &["anthropic", "claude"],
+        oauth: false,
+        default_api_base: Some("https://api.anthropic.com/v1"),
+    },
+    ProviderSpec {
+        name: "openai",
+        aliases: &[],
+        keywords: &["openai", "gpt"],
+        oauth: false,
+        default_api_base: None,
+    },
+    ProviderSpec {
+        name: "github_copilot",
+        aliases: &["github-copilot", "githubCopilot", "copilot"],
+        keywords: &["github_copilot", "copilot"],
+        oauth: true,
+        default_api_base: None,
+    },
+];
+
+fn provider_spec(name: &str) -> Option<&'static ProviderSpec> {
+    let collapsed = collapse_provider_name(name);
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    PROVIDER_SPECS
+        .iter()
+        .find(|spec| spec.matches_collapsed(&collapsed))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -782,13 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn openai_codex_model_prefix_maps_to_oauth_provider() {
-        let cfg = Config::default();
-        let name = cfg.get_provider_name(Some("openai-codex/codex-mini-latest"));
-        assert_eq!(name.as_deref(), Some("openai_codex"));
-    }
-
-    #[test]
     fn forced_provider_accepts_camel_case_alias() {
         let mut cfg = Config::default();
         cfg.agents.defaults.provider = "githubCopilot".to_string();
@@ -801,26 +744,74 @@ mod tests {
     fn provider_config_accepts_camel_case_alias() {
         let cfg = Config::default();
         assert!(cfg.provider_config("githubCopilot").is_some());
-        assert!(cfg.provider_config("openaiCodex").is_some());
+    }
+
+    #[test]
+    fn providers_config_deserializes_kebab_case_aliases() {
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "providers": {
+                    "github-copilot": {
+                        "apiKey": "token-1"
+                    }
+                }
+            }"#,
+        )
+        .expect("deserialize config");
+
+        assert_eq!(cfg.providers.github_copilot.api_key, "token-1");
+    }
+
+    #[test]
+    fn providers_config_deserializes_camel_case_aliases() {
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "providers": {
+                    "githubCopilot": {
+                        "apiKey": "token-1"
+                    }
+                }
+            }"#,
+        )
+        .expect("deserialize config");
+
+        assert_eq!(cfg.providers.github_copilot.api_key, "token-1");
     }
 
     #[test]
     fn auto_provider_selects_configured_key_provider() {
         let mut cfg = Config::default();
         cfg.agents.defaults.provider = "auto".to_string();
-        cfg.providers.openrouter.api_key = "key_xxx".to_string();
+        cfg.providers.openai.api_key = "key_xxx".to_string();
 
-        let name = cfg.get_provider_name(Some("openrouter/anthropic/claude-3.7-sonnet"));
-        assert_eq!(name.as_deref(), Some("openrouter"));
+        let name = cfg.get_provider_name(Some("gpt-4"));
+        assert_eq!(name.as_deref(), Some("openai"));
     }
 
     #[test]
-    fn get_api_base_falls_back_to_builtin_defaults() {
-        let mut cfg = Config::default();
-        cfg.providers.openrouter.api_key = "key_xxx".to_string();
+    fn explicit_provider_prefix_wins_without_auth() {
+        let cfg = Config::default();
 
-        let base = cfg.get_api_base(Some("openrouter/anthropic/claude-3.7-sonnet"));
-        assert_eq!(base.as_deref(), Some("https://openrouter.ai/api/v1"));
+        let name = cfg.get_provider_name(Some("anthropic/claude-opus-4-5"));
+        assert_eq!(name.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn get_api_base_returns_none_for_builtin_providers() {
+        let mut cfg = Config::default();
+        cfg.providers.openai.api_key = "key_xxx".to_string();
+
+        let base = cfg.get_api_base(Some("gpt-4"));
+        assert_eq!(base, None);
+    }
+
+    #[test]
+    fn get_api_base_returns_default_for_anthropic() {
+        let mut cfg = Config::default();
+        cfg.providers.anthropic.api_key = "sk-ant-xxx".to_string();
+
+        let base = cfg.get_api_base(Some("anthropic/claude-opus-4-5"));
+        assert_eq!(base.as_deref(), Some("https://api.anthropic.com/v1"));
     }
 
     #[test]

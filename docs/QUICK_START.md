@@ -1,252 +1,56 @@
-# Quick Start Guide
+# 快速开始
 
-Get started with nanobot-rs in minutes.
+本文面向“想把 `nanobot-rs` 跑起来并开始使用”的用户。
 
-## Prerequisites
+## 前置条件
 
-- Rust 1.75+ (2024 edition)
-- An LLM API key (Anthropic, OpenAI, or compatible provider)
+- Rust 工具链
+- 一个可用的 LLM 凭证：
+  - Anthropic API Key
+  - OpenAI API Key
+  - 或兼容 `OpenAI Responses API` 的自定义服务
 
-## Installation
-
-### From Source
+## 安装与构建
 
 ```bash
-git clone https://github.com/yourusername/nanobot-rs.git
+git clone <your-repo-url>
 cd nanobot-rs
 cargo build --release
 ```
 
-The binary will be at `target/release/nanobot-rs`.
+二进制位于 `target/release/nanobot-rs`。
 
-## Initial Setup
+开发阶段也可以直接使用：
 
-### 1. Onboard
+```bash
+cargo run -- <subcommand>
+```
 
-Initialize configuration and workspace:
+## 初始化
+
+首次运行建议先执行：
 
 ```bash
 nanobot-rs onboard
 ```
 
-This creates:
-- `~/.nanobot/config.json` - Configuration file
-- `~/.nanobot/workspace/` - Working directory for sessions, skills, and memory
+它会完成两件事：
 
-### 2. Configure API Key
+- 创建或刷新 `~/.nanobot/config.json`
+- 初始化工作区 `~/.nanobot/workspace` 及模板文件
 
-Edit `~/.nanobot/config.json` and add your API key:
+## 最小配置
 
-```json
-{
-  "agents": {
-    "defaults": {
-      "workspace": "~/.nanobot/workspace",
-      "model": "anthropic/claude-opus-4-5",
-      "provider": "auto",
-      "maxTokens": 8192,
-      "temperature": 0.1,
-      "maxToolIterations": 40,
-      "memoryWindow": 100
-    }
-  },
-  "providers": {
-    "anthropic": {
-      "apiKey": "sk-ant-xxx"
-    },
-    "openai": {
-      "apiKey": "sk-xxx"
-    },
-    "githubCopilot": {
-      "apiKey": ""
-    }
-  }
-}
-```
+默认配置已经包含推荐参数，你通常只需要补上 provider 凭证。
 
-**Note:** GitHub Copilot uses OAuth authentication and doesn't require an API key. Authenticate first with `copilot login` or `nanobot-rs provider login github_copilot`, then use models with the `github-copilot/` or `github_copilot/` prefix.
-
-**Supported Providers:**
-- `anthropic` - Claude models
-- `openai` - GPT models
-- `github_copilot` - GitHub Copilot (OAuth, no API key needed)
-- `openai_codex` - OpenAI Codex (OAuth, not yet implemented)
-- `openrouter` - Multiple providers
-- `deepseek`, `groq`, `gemini`, `moonshot`, `minimax`
-- `zhipu`, `dashscope`, `siliconflow`, `volcengine`
-- Custom providers via `custom` config
-
-## Usage
-
-### Agent Mode (CLI Chat)
-
-#### Single Message
-
-```bash
-nanobot-rs agent -m "Hello! What can you do?"
-```
-
-#### Using GitHub Copilot
-
-```bash
-# Authenticate once
-nanobot-rs provider login github_copilot
-
-# Set model with github-copilot prefix
-nanobot-rs agent -m "Explain this code" -s "copilot:session1"
-```
-
-Or configure in `config.json`:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "github-copilot/gpt-4o",
-      "provider": "github_copilot"
-    }
-  }
-}
-```
-
-#### Interactive Session
-
-```bash
-nanobot-rs agent
-```
-
-Then type messages interactively. The agent will:
-- Execute tools (read/write files, run commands, search web)
-- Maintain conversation history
-- Use skills from `workspace/skills/`
-
-#### Custom Session
-
-```bash
-nanobot-rs agent -s "my-project:task-1" -m "Analyze the codebase"
-```
-
-Sessions are stored in `workspace/sessions/<session-key>.jsonl`.
-
-### Gateway Mode (Multi-Channel)
-
-Start the HTTP gateway for channel integrations:
-
-```bash
-nanobot-rs gateway
-```
-
-Default: `http://0.0.0.0:18790`
-
-Configure channels in `config.json`:
-
-```json
-{
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "allowFrom": ["user123"],
-      "botToken": "xxx"
-    }
-  }
-}
-```
-
-### Status Check
-
-```bash
-nanobot-rs status
-```
-
-Shows configuration and workspace status.
-
-## Core Features
-
-### Built-in Tools
-
-The agent has access to these tools:
-
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read file contents |
-| `write_file` | Write/create files |
-| `edit_file` | Edit existing files |
-| `list_dir` | List directory contents |
-| `exec` | Execute shell commands |
-| `web_search` | Search the web (requires API key) |
-| `web_fetch` | Fetch web content |
-| `message` | Send messages to other sessions |
-| `spawn` | Spawn parallel subagent tasks |
-| `cron` | Schedule recurring jobs |
-
-### Skills System
-
-Add custom skills to extend agent capabilities:
-
-```bash
-mkdir -p ~/.nanobot/workspace/skills/my-skill
-cat > ~/.nanobot/workspace/skills/my-skill/SKILL.md << 'EOF'
----
-description: My custom skill
-always: false
----
-
-# My Skill
-
-This skill does X, Y, Z.
-
-## Usage
-
-When the user asks for X, do Y.
-EOF
-```
-
-Skills are automatically loaded and available to the agent.
-
-### Memory System
-
-#### Session Memory
-- Stored in `workspace/sessions/*.jsonl`
-- First line: metadata, subsequent lines: messages
-- Controlled by `memoryWindow` config (default: 100 messages)
-
-#### Long-term Memory
-- `workspace/memory/MEMORY.md` - Cross-session knowledge
-- `workspace/memory/YYYY-MM-DD.md` - Daily logs
-- Agent can read/write to persist learnings
-
-### Scheduling (Cron)
-
-The agent can schedule tasks:
-
-```bash
-# In agent chat:
-"Schedule a daily backup at 2am"
-```
-
-The agent will use the `cron` tool to create recurring jobs.
-
-### Subagents
-
-Spawn parallel agent tasks:
-
-```bash
-# In agent chat:
-"Spawn a subagent to analyze the logs while you work on the code"
-```
-
-The agent will use the `spawn` tool to create independent tasks.
-
-## Configuration Reference
-
-### Agent Defaults
+### Anthropic
 
 ```json
 {
   "agents": {
     "defaults": {
       "workspace": "~/.nanobot/workspace",
-      "model": "anthropic/claude-opus-4-5",
+      "model": "anthropic/claude-sonnet-4-5",
       "provider": "auto",
       "maxTokens": 8192,
       "temperature": 0.1,
@@ -254,181 +58,174 @@ The agent will use the `spawn` tool to create independent tasks.
       "memoryWindow": 100,
       "reasoningEffort": null
     }
-  }
-}
-```
-
-- `workspace` - Base directory for all operations
-- `model` - Model name (with optional provider prefix)
-- `provider` - Force specific provider or "auto"
-- `maxTokens` - Max tokens per response
-- `temperature` - Sampling temperature (0.0-2.0)
-- `maxToolIterations` - Max tool calls per turn
-- `memoryWindow` - Number of messages to keep in context
-- `reasoningEffort` - Extended thinking mode (provider-specific)
-
-### Tools Configuration
-
-```json
-{
-  "tools": {
-    "restrictToWorkspace": false,
-    "web": {
-      "proxy": null,
-      "search": {
-        "apiKey": "",
-        "maxResults": 5
-      }
-    },
-    "exec": {
-      "timeout": 60,
-      "pathAppend": ""
-    },
-    "mcpServers": {}
-  }
-}
-```
-
-- `restrictToWorkspace` - Limit file operations to workspace
-- `web.search.apiKey` - API key for web search
-- `exec.timeout` - Command timeout in seconds
-- `mcpServers` - Model Context Protocol server configs
-
-### MCP Servers
-
-Integrate external tools via MCP:
-
-```json
-{
-  "tools": {
-    "mcpServers": {
-      "filesystem": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-        "env": {},
-        "toolTimeout": 30
-      }
+  },
+  "providers": {
+    "anthropic": {
+      "apiKey": "sk-ant-..."
     }
   }
 }
 ```
 
-### Gateway Configuration
+### OpenAI
 
 ```json
 {
-  "gateway": {
-    "host": "0.0.0.0",
-    "port": 18790,
-    "heartbeat": {
+  "agents": {
+    "defaults": {
+      "model": "openai/gpt-4.1"
+    }
+  },
+  "providers": {
+    "openai": {
+      "apiKey": "sk-..."
+    }
+  }
+}
+```
+
+### Custom（Responses-compatible）
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "provider": "custom",
+      "model": "your-model"
+    }
+  },
+  "providers": {
+    "custom": {
+      "apiBase": "https://your-endpoint.example.com/v1",
+      "apiKey": "token"
+    }
+  }
+}
+```
+
+`custom` provider 现在要求目标服务兼容 **OpenAI Responses API**，不再兼容旧的 `chat/completions` 接口。
+
+## Provider 支持说明
+
+| Provider | 用途 | 说明 |
+|---|---|---|
+| `anthropic` | 主 LLM provider | 使用原生 `Messages API` |
+| `openai` | 主 LLM provider | 使用原生 `Responses API` |
+| `custom` | 主 LLM provider | 要求兼容 `Responses API` |
+| `github_copilot` | 辅助命令 / ACP | 不作为主 LLM provider 注入 AgentLoop |
+
+GitHub Copilot 当前支持：
+
+```bash
+nanobot-rs provider login github_copilot
+nanobot-rs provider status github_copilot
+```
+
+如果要把 Copilot / Claude / Codex 当作外部 coding agent 使用，请通过 ACP 配置接入，而不是把它们设置成主 provider。
+
+## 常用命令
+
+### 单轮执行
+
+```bash
+nanobot-rs agent -m "总结一下当前目录结构"
+```
+
+### 交互模式
+
+```bash
+nanobot-rs agent
+```
+
+### 指定会话
+
+```bash
+nanobot-rs agent -s cli:project-a -m "继续上次任务"
+```
+
+### 查看状态
+
+```bash
+nanobot-rs status
+```
+
+### 启动 Gateway
+
+```bash
+nanobot-rs gateway
+```
+
+## 内建工具
+
+当前内建工具包括：
+
+- 文件系统：`read_file` `write_file` `edit_file` `list_dir`
+- Shell：`exec`
+- Web：`web_search` `web_fetch`
+- 消息：`message`
+- 可选：`spawn` `cron`
+
+此外还支持：
+
+- `MCP`：通过 `tools.mcpServers` 接入
+- `ACP`：通过外部 coding agent 执行复杂任务
+
+## 渠道支持
+
+当前渠道状态：
+
+- `cli`：可用
+- `telegram`：可用
+- `discord`：占位实现
+- `feishu`：占位实现
+
+启用 Telegram 时至少需要：
+
+```json
+{
+  "channels": {
+    "telegram": {
       "enabled": true,
-      "intervalS": 1800
+      "allowFrom": ["*"],
+      "token": "<telegram-bot-token>"
     }
   }
 }
 ```
 
-- `heartbeat.enabled` - Enable periodic agent check-ins
-- `heartbeat.intervalS` - Heartbeat interval in seconds
+## 工作区与数据
 
-## Examples
+默认工作区：
 
-### Example 1: Code Analysis
-
-```bash
-nanobot-rs agent -m "Analyze the Rust code in src/ and suggest improvements"
+```text
+~/.nanobot/workspace
 ```
 
-The agent will:
-1. List files in `src/`
-2. Read relevant files
-3. Analyze code patterns
-4. Provide suggestions
+常见内容：
 
-### Example 2: Automated Task
+- `sessions/`：会话历史
+- `memory/`：长期记忆
+- `AGENTS.md` `TOOLS.md` `USER.md` 等模板文件
 
-```bash
-nanobot-rs agent -m "Create a daily report script that summarizes git commits"
-```
+## 常见问题
 
-The agent will:
-1. Write a shell script
-2. Test it
-3. Optionally schedule it with cron
+### 1. 为什么自定义 provider 返回 404？
 
-### Example 3: Research Task
+请确认你的服务支持 **`/responses`**，而不是只支持旧的 `chat/completions`。
 
-```bash
-nanobot-rs agent -m "Research the latest Rust async patterns and summarize"
-```
+### 2. 为什么设置了 `github_copilot` 作为主 provider 后无法启动？
 
-The agent will:
-1. Search the web
-2. Fetch relevant articles
-3. Synthesize findings
-4. Save to memory
+`github_copilot` 当前不作为主 LLM provider 使用，只支持登录/状态检查与 ACP 场景。
 
-## Troubleshooting
+### 3. 为什么启用渠道后没有消息？
 
-### Enable Debug Logs
+请检查：
 
-```bash
-RUST_LOG=debug nanobot-rs agent -m "test"
-```
+- 渠道是否 `enabled`
+- `allowFrom` 是否已配置
+- Telegram token / 相关额外字段是否正确
 
-For specific modules:
+## 下一步
 
-```bash
-RUST_LOG=nanobot_rs::agent=trace nanobot-rs agent
-```
-
-### Check Configuration
-
-```bash
-cat ~/.nanobot/config.json | jq
-```
-
-### Inspect Sessions
-
-```bash
-cat ~/.nanobot/workspace/sessions/cli_direct.jsonl | jq
-```
-
-### Reset Configuration
-
-```bash
-nanobot-rs onboard --overwrite
-```
-
-### Common Issues
-
-**"No provider configured"**
-- Add API key to `~/.nanobot/config.json`
-- For GitHub Copilot, no API key needed - just use `github-copilot/` model prefix
-
-**"openai_codex OAuth provider is not implemented yet"**
-- OpenAI Codex OAuth is not yet supported in the current version
-- Use GitHub Copilot instead for OAuth-based access
-
-**"Workspace not found"**
-- Run `nanobot-rs onboard` first
-
-**"Tool execution timeout"**
-- Increase `tools.exec.timeout` in config
-
-**"Memory window too small"**
-- Increase `agents.defaults.memoryWindow` in config
-
-## Next Steps
-
-- Read [CLAUDE.md](../CLAUDE.md) for architecture overview
-- Read [AGENT.md](../AGENT.md) for development guide
-- Explore `workspace/skills/` for custom skills
-- Check `templates/` for agent context templates
-- Review `RUST_MVP_DESIGN.md` for detailed design
-
-## Resources
-
-- GitHub: https://github.com/yourusername/nanobot-rs
-- Issues: https://github.com/yourusername/nanobot-rs/issues
-- Docs: `docs/` directory
+- 了解系统结构：`docs/ARCHITECTURE.md`
+- 查看开发与测试流程：`docs/DEVELOPMENT.md`

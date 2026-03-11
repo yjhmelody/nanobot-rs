@@ -2,8 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-
 use crate::agent::SpawnService;
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, WebToolsConfig};
@@ -16,6 +14,7 @@ use crate::tools::message::MessageTool;
 use crate::tools::spawn::SpawnTool;
 use crate::tools::{filesystem, search, shell, web};
 use crate::types::SessionKey;
+use parking_lot::RwLock;
 
 /// Central dispatcher for built-in tools.
 ///
@@ -34,7 +33,6 @@ impl ToolRegistry {
         exec_config: ExecToolConfig,
         web_config: WebToolsConfig,
         bus: Option<MessageBus>,
-        spawn_service: Option<Arc<dyn SpawnService>>,
         cron_service: Option<Arc<CronService>>,
     ) -> Self {
         let config =
@@ -59,11 +57,6 @@ impl ToolRegistry {
         let message_tool: Arc<dyn Tool> = Arc::new(MessageTool::new(bus));
         tools.insert(message_tool.name().to_string(), message_tool);
 
-        if let Some(service) = spawn_service {
-            let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(service));
-            tools.insert(spawn_tool.name().to_string(), spawn_tool);
-        }
-
         if let Some(service) = cron_service {
             let cron_tool: Arc<dyn Tool> = Arc::new(CronTool::new(service));
             tools.insert(cron_tool.name().to_string(), cron_tool);
@@ -85,7 +78,7 @@ impl ToolRegistry {
             .values()
             .map(|t| t.definition())
             .collect::<Vec<_>>();
-        defs.sort_unstable_by(|a, b| a.function.name.cmp(&b.function.name));
+        defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
         defs
     }
 
@@ -126,11 +119,12 @@ impl ToolRegistry {
             .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
-    pub async fn start_turn(&self) {
+    pub async fn start_turn(&self) -> Result<()> {
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
-            let _ = tool.start_turn().await;
+            tool.start_turn().await?;
         }
+        Ok(())
     }
 
     pub async fn message_sent_in_turn(&self) -> bool {
@@ -289,7 +283,6 @@ mod tests {
             WebToolsConfig::default(),
             None,
             None,
-            None,
         );
         let names = definition_names(reg.definitions());
         assert!(!names.contains("spawn"));
@@ -316,7 +309,6 @@ mod tests {
             ExecToolConfig::default(),
             WebToolsConfig::default(),
             Some(bus.clone()),
-            None,
             Some(cron),
         );
 
@@ -345,9 +337,9 @@ mod tests {
             ExecToolConfig::default(),
             WebToolsConfig::default(),
             None,
-            Some(subagent_manager),
             None,
         );
+        reg2.set_spawn_service(subagent_manager);
 
         // Verify spawn is now registered
         let names = definition_names(reg2.definitions());
@@ -392,7 +384,6 @@ mod tests {
             false,
             ExecToolConfig::default(),
             WebToolsConfig::default(),
-            None,
             None,
             None,
         );
@@ -450,7 +441,6 @@ mod tests {
             false,
             ExecToolConfig::default(),
             WebToolsConfig::default(),
-            None,
             None,
             None,
         );

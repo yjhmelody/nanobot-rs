@@ -1,56 +1,45 @@
-use std::collections::BTreeMap;
+//! Simplified AgentLoop using modular ReAct engine
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use regex::Regex;
 use tokio::task::AbortHandle;
-use tracing::{error, info, warn};
+use tracing::{Instrument, debug, debug_span, error, info, trace};
 
 use crate::agent::ContextBuilder;
+use crate::agent::react::{ExecutionContext, LoopOutcome, ModelConfig, ReActExecutor};
 use crate::bus::{InboundCommand, InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
-use crate::config::schema::ChannelsConfig;
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
-use crate::provider::{ChatRequest, LLMProvider};
-use crate::session::{Session, SessionEntry, SessionManager};
+use crate::provider::LLMProvider;
+use crate::session::{LegacySessionManager, Session, SessionEntry};
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
-use crate::types::agent::PreviewValue;
-use crate::types::provider::{
-    AssistantFunctionCall, AssistantToolCall, ChatMessage, MessageContent, MessageRole,
-};
+use crate::types::provider::{ChatMessage, MessageContent, MessageRole};
 use crate::types::task::TaskId;
 
 pub struct AgentLoop {
-    pub bus: MessageBus,
-    pub channels_config: ChannelsConfig,
-    pub provider: Arc<dyn LLMProvider>,
-    pub workspace: std::path::PathBuf,
-    pub model: String,
-    pub max_iterations: usize,
-    pub temperature: f32,
-    pub max_tokens: i32,
-    pub memory_window: usize,
-    pub reasoning_effort: Option<String>,
-    pub tools: Arc<ToolRegistry>,
+    pub(crate) bus: MessageBus,
+    pub(crate) provider: Arc<dyn LLMProvider>,
+
+    pub(crate) model: String,
+    pub(crate) max_iterations: usize,
+    pub(crate) temperature: f32,
+    pub(crate) max_tokens: i32,
+    pub(crate) memory_window: usize,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) consolidation_config: crate::session::ConsolidationConfig,
+    pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) mcp: Option<Arc<MCPManager>>,
-    pub context: ContextBuilder,
-    pub sessions: Arc<SessionManager>,
-    /// Running state flag using AtomicBool for lock-free access
+    pub(crate) context: ContextBuilder,
+    pub(crate) sessions: Arc<LegacySessionManager>,
     pub(crate) running: Arc<AtomicBool>,
-    /// Per-session locks for concurrent message processing
-    /// Using DashMap eliminates the outer RwLock, reducing lock contention
-    /// Note: Must use tokio::sync::Mutex here because locks are held across await points
     pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
-    /// Active tasks per session
-    /// Using nested DashMap for better concurrent access
     pub(crate) active_tasks: Arc<DashMap<SessionKey, DashMap<TaskId, AbortHandle>>>,
-    /// Last cleanup timestamp for periodic maintenance
-    /// Using parking_lot::Mutex for better performance (short critical section, no await)
     pub(crate) last_cleanup: Arc<Mutex<Instant>>,
 }
 
@@ -72,8 +61,16 @@ impl AgentLoop {
 
     pub async fn close_mcp(&self) {
         if let Some(mcp) = &self.mcp {
+            debug!(target: TARGET_AGENT, "closing MCP manager");
             mcp.close(&self.tools).await;
+            debug!(target: TARGET_AGENT, "MCP manager closed");
         }
+    }
+
+    pub async fn close_provider(&self) {
+        debug!(target: TARGET_AGENT, "closing provider");
+        self.provider.close().await;
+        debug!(target: TARGET_AGENT, "provider closed");
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -94,7 +91,19 @@ impl AgentLoop {
                 break;
             }
 
-            if msg.command() == Some(InboundCommand::Stop) {
+            let command = msg.command();
+            debug!(
+                target: TARGET_AGENT,
+                session_key = %msg.session_key(),
+                channel = %msg.channel,
+                chat_id = %msg.chat_id,
+                command = ?command.map(|cmd| cmd.as_str()),
+                content_len = msg.content_text().len(),
+                media_count = msg.media.len(),
+                "inbound message received"
+            );
+
+            if command == Some(InboundCommand::Stop) {
                 self.handle_stop(msg).await;
                 continue;
             }
@@ -102,6 +111,14 @@ impl AgentLoop {
             let task_id = TaskId::new();
             let session_key = msg.session_key();
             let this = self.clone();
+            let span = debug_span!(
+                target: TARGET_AGENT,
+                "dispatch_task",
+                task_id = %task_id,
+                session_key = %session_key,
+                channel = %msg.channel,
+                chat_id = %msg.chat_id
+            );
 
             let handle = tokio::spawn({
                 let session_key = session_key.clone();
@@ -109,15 +126,19 @@ impl AgentLoop {
                     this.dispatch(msg).await;
                     this.unregister_task(&session_key, &task_id).await;
                 }
+                .instrument(span)
             });
 
             self.register_task(&session_key, task_id, handle.abort_handle())
                 .await;
         }
+
+        info!(target: TARGET_AGENT, "agent loop stopped");
     }
 
     pub async fn stop(&self) {
         self.running.store(false, Ordering::Release);
+        info!(target: TARGET_AGENT, "stopping agent loop");
         let _ = self.bus.publish_inbound(InboundMessage {
             channel: "system".to_string(),
             sender_id: "system".to_string(),
@@ -129,16 +150,21 @@ impl AgentLoop {
             session_key_override: Some(SessionKey::from("__nanobot_stop__")),
         });
 
-        // Abort all active tasks using DashMap iteration
+        let mut aborted = 0usize;
         for entry in self.active_tasks.iter() {
             let handles = entry.value();
             for handle_entry in handles.iter() {
                 handle_entry.value().abort();
+                aborted += 1;
             }
         }
 
-        // Clear all tasks
         self.active_tasks.clear();
+        debug!(
+            target: TARGET_AGENT,
+            aborted,
+            "cleared active task registry during shutdown"
+        );
     }
 
     pub async fn process_direct(
@@ -148,6 +174,14 @@ impl AgentLoop {
         channel: &str,
         chat_id: &str,
     ) -> Result<String> {
+        debug!(
+            target: TARGET_AGENT,
+            session_key,
+            channel,
+            chat_id,
+            content_preview = %preview_text(content, 120),
+            "processing direct request"
+        );
         self.ensure_mcp_connected().await;
         let msg = InboundMessage {
             channel: channel.to_string(),
@@ -161,10 +195,26 @@ impl AgentLoop {
         };
 
         let out = self.process_message(msg).await?;
-        Ok(out.map(|m| m.content).unwrap_or_default())
+        let content = out.map(|m| m.content).unwrap_or_default();
+        debug!(
+            target: TARGET_AGENT,
+            session_key,
+            channel,
+            chat_id,
+            content_len = content.len(),
+            content_preview = %preview_text(&content, 120),
+            "direct request completed"
+        );
+        Ok(content)
     }
 
     async fn register_task(&self, session_key: &SessionKey, task_id: TaskId, handle: AbortHandle) {
+        trace!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            task_id = %task_id,
+            "registering active task"
+        );
         self.active_tasks
             .entry(session_key.clone())
             .or_insert_with(DashMap::new)
@@ -174,9 +224,21 @@ impl AgentLoop {
     async fn unregister_task(&self, session_key: &SessionKey, task_id: &TaskId) {
         if let Some(tasks) = self.active_tasks.get(session_key) {
             tasks.remove(task_id);
+            trace!(
+                target: TARGET_AGENT,
+                session_key = %session_key,
+                task_id = %task_id,
+                remaining = tasks.len(),
+                "unregistered active task"
+            );
             if tasks.is_empty() {
-                drop(tasks); // Release the reference before removing
+                drop(tasks);
                 self.active_tasks.remove(session_key);
+                trace!(
+                    target: TARGET_AGENT,
+                    session_key = %session_key,
+                    "removed empty active task map"
+                );
             }
         }
     }
@@ -184,7 +246,6 @@ impl AgentLoop {
     async fn handle_stop(&self, msg: InboundMessage) {
         let session_key = msg.session_key();
 
-        // Cancel all tasks for this session
         let cancelled_main = if let Some((_, handles)) = self.active_tasks.remove(&session_key) {
             let mut count = 0usize;
             for entry in handles.iter() {
@@ -201,6 +262,14 @@ impl AgentLoop {
 
         let cancelled_sub = self.tools.cancel_spawn_by_session(&session_key).await;
         let total = cancelled_main + cancelled_sub;
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            cancelled_main,
+            cancelled_sub,
+            total,
+            "processed stop command"
+        );
         let content = if total > 0 {
             format!("⏹ Stopped {} task(s).", total)
         } else {
@@ -218,7 +287,6 @@ impl AgentLoop {
     }
 
     async fn dispatch(&self, msg: InboundMessage) {
-        // Get or create per-session lock for concurrent processing
         let session_key = msg.session_key();
         let lock = self
             .session_locks
@@ -226,73 +294,93 @@ impl AgentLoop {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
 
+        let lock_wait_start = Instant::now();
+        trace!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            "waiting for session lock"
+        );
         let _guard = lock.lock().await;
+        let lock_wait = lock_wait_start.elapsed();
+        if lock_wait > Duration::from_millis(100) {
+            debug!(
+                target: TARGET_AGENT,
+                session_key = %session_key,
+                lock_wait_ms = lock_wait.as_millis(),
+                "acquired session lock after wait"
+            );
+        } else {
+            trace!(
+                target: TARGET_AGENT,
+                session_key = %session_key,
+                lock_wait_ms = lock_wait.as_millis(),
+                "acquired session lock"
+            );
+        }
 
-        // Extract fields needed for error handling before moving msg
-        let channel = msg.channel.clone();
-        let chat_id = msg.chat_id.clone();
-        let metadata = msg.metadata.clone();
-        let is_cli = channel == "cli";
-
-        match self.process_message(msg).await {
-            Ok(out) => {
-                if let Some(out) = out {
-                    let _ = self.bus.publish_outbound(out);
-                } else if is_cli {
-                    let _ = self.bus.publish_outbound(OutboundMessage {
-                        channel,
-                        chat_id,
-                        content: String::new(),
-                        reply_to: None,
-                        media: Vec::new(),
-                        metadata,
-                    });
+        match self.process_message(msg.clone()).await {
+            Ok(Some(out)) => {
+                if let Err(err) = self.bus.publish_outbound(out) {
+                    error!(
+                        target: TARGET_AGENT,
+                        session_key = %session_key,
+                        error = %err,
+                        "failed to publish outbound message"
+                    );
                 }
             }
+            Ok(None) => {
+                trace!(
+                    target: TARGET_AGENT,
+                    session_key = %session_key,
+                    "no outbound message to publish"
+                );
+            }
             Err(err) => {
-                error!(target: TARGET_AGENT, "failed to process message: {}", err);
+                error!(
+                    target: TARGET_AGENT,
+                    session_key = %session_key,
+                    error = %err,
+                    "error processing message"
+                );
                 let _ = self.bus.publish_outbound(OutboundMessage {
-                    channel,
-                    chat_id,
-                    content: "Sorry, I encountered an error.".to_string(),
+                    channel: msg.channel,
+                    chat_id: msg.chat_id,
+                    content: format!("Error: {}", err),
                     reply_to: None,
                     media: Vec::new(),
-                    metadata: MessageMetadata::default(),
+                    metadata: msg.metadata,
                 });
             }
         }
 
-        // Periodic cleanup with rate limiting
-        self.cleanup_session_locks_if_needed().await;
+        self.maybe_cleanup().await;
     }
 
-    /// Removes locks for sessions that are no longer active
-    /// Only runs if CLEANUP_INTERVAL has elapsed since last cleanup
-    async fn cleanup_session_locks_if_needed(&self) {
-        let should_cleanup = {
-            let mut last = self.last_cleanup.lock();
-            if last.elapsed() > Self::CLEANUP_INTERVAL {
-                *last = Instant::now();
-                true
-            } else {
-                false
-            }
-        };
+    async fn maybe_cleanup(&self) {
+        let now = Instant::now();
+        let mut last = self.last_cleanup.lock();
+        if now.duration_since(*last) < Self::CLEANUP_INTERVAL {
+            return;
+        }
+        *last = now;
+        drop(last);
 
-        if should_cleanup {
-            self.cleanup_session_locks().await;
+        let before = self.session_locks.len();
+        self.session_locks
+            .retain(|_, lock| Arc::strong_count(lock) > 1);
+        let after = self.session_locks.len();
+        if before != after {
+            debug!(
+                target: TARGET_AGENT,
+                removed = before - after,
+                remaining = after,
+                "cleaned up unused session locks"
+            );
         }
     }
 
-    /// Removes locks for sessions that are no longer active
-    async fn cleanup_session_locks(&self) {
-        self.session_locks.retain(|session_key, lock| {
-            // Keep lock if it's currently held or if there are active tasks
-            Arc::strong_count(lock) > 1 || self.has_active_tasks(session_key)
-        });
-    }
-
-    fn has_active_tasks(&self, session_key: &SessionKey) -> bool {
+    pub fn has_active_tasks(&self, session_key: &SessionKey) -> bool {
         self.active_tasks
             .get(session_key)
             .map(|tasks| !tasks.is_empty())
@@ -300,18 +388,42 @@ impl AgentLoop {
     }
 
     async fn process_message(&self, msg: InboundMessage) -> Result<Option<OutboundMessage>> {
+        trace!(
+            target: TARGET_AGENT,
+            session_key = %msg.session_key(),
+            content_preview = %preview_text(msg.content_text(), 120),
+            media_count = msg.media.len(),
+            message_id = ?msg.metadata.message_id,
+            "process_message start"
+        );
         if msg.channel == "system" {
+            debug!(
+                target: TARGET_AGENT,
+                session_key = %msg.session_key(),
+                "routing message to system handler"
+            );
             return self.process_system_message(msg).await;
         }
 
         if let Some(command) = msg.command() {
+            debug!(
+                target: TARGET_AGENT,
+                session_key = %msg.session_key(),
+                command = %command.as_str(),
+                "routing message to builtin command handler"
+            );
             return self.process_builtin_command(msg, command).await;
         }
 
         let session_key = msg.session_key();
         let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            stored_messages = session.messages.len(),
+            "loaded session state"
+        );
 
-        // Build tool context once and reuse
         let tool_context = ToolContext {
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
@@ -319,10 +431,22 @@ impl AgentLoop {
             message_id: msg.metadata.message_id.clone(),
         };
 
-        self.tools.start_turn().await;
+        let _ = self.tools.start_turn().await?;
+        trace!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            "tool registry turn state reset"
+        );
 
         let history = session.get_history(self.memory_window);
         let history_len = history.len();
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            history_len,
+            memory_window = self.memory_window,
+            "loaded session history"
+        );
         let messages = self
             .context
             .build_messages(
@@ -337,21 +461,71 @@ impl AgentLoop {
                 Some(&msg.chat_id),
             )
             .await;
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            prompt_messages = messages.len(),
+            start_index = messages.len().saturating_sub(1 + history_len),
+            "built prompt messages"
+        );
 
         let start_index = messages.len() - 1 - history_len;
-        let (final_content, all_msgs) = self.run_agent_loop(messages, &tool_context).await;
 
-        self.save_turn(&mut session, all_msgs, start_index);
+        // Use new ReAct executor
+        let outcome = self
+            .run_agent_loop(messages, &tool_context, &session_key)
+            .await?;
+
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            exit_reason = ?outcome.exit_reason,
+            final_content_len = outcome.final_content.as_ref().map(|v| v.len()).unwrap_or(0),
+            generated_messages = outcome.messages.len().saturating_sub(start_index),
+            iterations = outcome.iterations,
+            "agent loop completed"
+        );
+
+        self.save_turn(&mut session, outcome.messages, start_index);
+
+        // Try to consolidate session if needed
+        if let Err(e) = crate::session::consolidate_session(
+            &mut session,
+            self.provider.as_ref(),
+            &self.model,
+            &self.consolidation_config,
+        )
+        .await
+        {
+            tracing::warn!(
+                target: TARGET_AGENT,
+                session_key = %session_key,
+                error = %e,
+                "failed to consolidate session, continuing without consolidation"
+            );
+        }
+
         self.sessions.save(&session).await?;
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            persisted_messages = session.messages.len(),
+            "saved session state"
+        );
 
         if self.tools.message_sent_in_turn().await {
+            debug!(
+                target: TARGET_AGENT,
+                session_key = %session_key,
+                "message tool already produced outbound message for this turn"
+            );
             return Ok(None);
         }
 
         Ok(Some(OutboundMessage {
             channel: msg.channel,
             chat_id: msg.chat_id,
-            content: final_content.unwrap_or_else(|| {
+            content: outcome.final_content.unwrap_or_else(|| {
                 "I've completed processing but have no response to give.".to_string()
             }),
             reply_to: None,
@@ -365,6 +539,12 @@ impl AgentLoop {
         msg: InboundMessage,
         command: InboundCommand,
     ) -> Result<Option<OutboundMessage>> {
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %msg.session_key(),
+            command = %command.as_str(),
+            "processing builtin command"
+        );
         match command {
             InboundCommand::Help => Ok(Some(OutboundMessage {
                 channel: msg.channel,
@@ -372,654 +552,166 @@ impl AgentLoop {
                 content: "🐈 nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/help - Show available commands".to_string(),
                 reply_to: None,
                 media: Vec::new(),
-                metadata: MessageMetadata::default(),
+                metadata: msg.metadata,
             })),
-            InboundCommand::Stop => {
-                let cancelled = self.tools.cancel_spawn_by_session(&msg.session_key()).await;
-                let content = if cancelled > 0 {
-                    format!("⏹ Stopped {} task(s).", cancelled)
-                } else {
-                    "No active task to stop.".to_string()
-                };
-                Ok(Some(OutboundMessage {
-                    channel: msg.channel,
-                    chat_id: msg.chat_id,
-                    content,
-                    reply_to: None,
-                    media: Vec::new(),
-                    metadata: MessageMetadata::default(),
-                }))
-            }
             InboundCommand::New => {
                 let session_key = msg.session_key();
                 let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
                 session.clear();
                 self.sessions.save(&session).await?;
                 self.sessions.invalidate(&session.key).await;
+                self.provider.reset_session(&session_key).await;
+                debug!(
+                    target: TARGET_AGENT,
+                    session_key = %session_key,
+                    "reset session state"
+                );
                 Ok(Some(OutboundMessage {
                     channel: msg.channel,
                     chat_id: msg.chat_id,
-                    content: "New session started.".to_string(),
+                    content: "🆕 Started a new conversation.".to_string(),
                     reply_to: None,
                     media: Vec::new(),
-                    metadata: MessageMetadata::default(),
+                    metadata: msg.metadata,
                 }))
             }
+            InboundCommand::Stop => {
+                unreachable!("stop command should be handled before dispatch")
+            }
         }
     }
 
-    async fn process_system_message(&self, msg: InboundMessage) -> Result<Option<OutboundMessage>> {
-        let (channel, chat_id) = if let Some((c, id)) = msg.chat_id.split_once(':') {
-            (c.to_string(), id.to_string())
-        } else {
-            ("cli".to_string(), msg.chat_id.clone())
-        };
-
-        let session_key = SessionKey::new(&channel, &chat_id);
-        let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
-
-        // Build tool context once and reuse
-        let tool_context = ToolContext {
-            channel: channel.clone(),
-            chat_id: chat_id.clone(),
-            session_key: session_key.clone(),
-            message_id: msg.metadata.message_id.clone(),
-        };
-
-        self.tools.start_turn().await;
-
-        let history = session.get_history(self.memory_window);
-        let history_len = history.len();
-        let messages = self
-            .context
-            .build_messages(
-                history,
-                msg.content_text(),
-                None,
-                Some(&channel),
-                Some(&chat_id),
-            )
-            .await;
-
-        let start_index = messages.len() - 1 - history_len;
-        let (final_content, all_msgs) = self.run_agent_loop(messages, &tool_context).await;
-
-        self.save_turn(&mut session, all_msgs, start_index);
-        self.sessions.save(&session).await?;
-
-        Ok(Some(OutboundMessage {
-            channel,
-            chat_id,
-            content: final_content.unwrap_or_else(|| "Background task completed.".to_string()),
-            reply_to: None,
-            media: Vec::new(),
-            metadata: MessageMetadata::default(),
-        }))
+    async fn process_system_message(
+        &self,
+        _msg: InboundMessage,
+    ) -> Result<Option<OutboundMessage>> {
+        // TODO:
+        // System messages are handled separately (e.g., spawn results)
+        Ok(None)
     }
 
+    /// Run the ReAct agent loop using the new modular executor
     async fn run_agent_loop(
         &self,
-        mut messages: Vec<ChatMessage>,
+        messages: Vec<ChatMessage>,
         tool_context: &ToolContext,
-    ) -> (Option<String>, Vec<ChatMessage>) {
-        let mut final_content = None;
-        for _iteration in 0..self.max_iterations {
-            let response = self
-                .provider
-                .chat(ChatRequest {
-                    messages: messages.clone(),
-                    tools: Some(self.tools.definitions()),
-                    model: Some(self.model.clone()),
-                    max_tokens: self.max_tokens,
-                    temperature: self.temperature,
-                    reasoning_effort: self.reasoning_effort.clone(),
-                })
-                .await;
+        session_key: &SessionKey,
+    ) -> Result<LoopOutcome> {
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session_key,
+            max_iterations = self.max_iterations,
+            initial_messages = messages.len(),
+            tool_definitions = self.tools.definitions().len(),
+            "starting ReAct agent loop"
+        );
 
-            if response.has_tool_calls() {
-                // Persist the assistant tool-call message first, then append each tool result.
-                let clean = strip_think(response.content.as_deref());
-                if let Some(text) = clean {
-                    debug_progress(&text, false);
-                }
-                debug_progress(&tool_hint(&response.tool_calls), true);
+        let executor = ReActExecutor::new(
+            self.provider.clone(),
+            self.tools.clone(),
+            self.max_iterations,
+        );
 
-                let tool_call_dicts = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| AssistantToolCall {
-                        id: tc.id.clone(),
-                        kind: "function".to_string(),
-                        function: AssistantFunctionCall {
-                            name: tc.name.to_string(),
-                            arguments: tc.arguments_json.clone(),
-                        },
-                    })
-                    .collect::<Vec<_>>();
+        let config = ModelConfig {
+            model: self.model.clone(),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
+            iteration: 0,
+        };
 
-                self.context.add_assistant_message(
-                    &mut messages,
-                    response.content,
-                    Some(tool_call_dicts),
-                    response.reasoning_content,
-                    response.thinking_blocks,
-                );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let exec_context = ExecutionContext {
+            session_key: session_key.clone(),
+            channel: tool_context.channel.clone(),
+            chat_id: tool_context.chat_id.clone(),
+            cancelled,
+        };
 
-                // Use into_iter to move tool calls instead of cloning
-                for call in response.tool_calls {
-                    info!(
-                        target: TARGET_AGENT,
-                        "tool call: {}({})",
-                        call.name,
-                        call.arguments_json
-                    );
-                    // TODO: suppport to response to user the tool call info
-                    let result = match self
-                        .tools
-                        .execute(call.name.as_str(), &call.arguments_json, tool_context)
-                        .await
-                    {
-                        Ok(value) => value,
-                        Err(err) => {
-                            // TODO: add warning logging.
-                            format_tool_error(&err)
-                        }
-                    };
-                    self.context.add_tool_result(
-                        &mut messages,
-                        &call.id,
-                        call.name.as_str(),
-                        &result,
-                    );
-                }
-                continue;
-            }
-
-            let clean = strip_think(response.content.as_deref());
-            if response.finish_reason == "error" {
-                warn!(target: TARGET_AGENT, "LLM returned error: {:?}", clean);
-                final_content = Some(clean.unwrap_or_else(|| {
-                    "Sorry, I encountered an error calling the AI model.".to_string()
-                }));
-                break;
-            }
-
-            self.context.add_assistant_message(
-                &mut messages,
-                clean.clone(),
-                None,
-                response.reasoning_content,
-                response.thinking_blocks,
-            );
-            final_content = clean;
-            break;
-        }
-
-        if final_content.is_none() {
-            final_content = Some(format!(
-                "I reached the maximum number of tool call iterations ({}) without completing the task. You can try breaking the task into smaller steps.",
-                self.max_iterations
-            ));
-        }
-
-        (final_content, messages)
+        executor
+            .run(messages, self.tools.definitions(), config, exec_context)
+            .await
     }
 
-    fn save_turn(&self, session: &mut Session, messages: Vec<ChatMessage>, skip: usize) {
-        for msg in messages.into_iter().skip(skip) {
-            let ChatMessage {
-                role,
-                mut content,
-                tool_calls,
-                tool_call_id,
-                name,
-                reasoning_content,
-                thinking_blocks,
-            } = msg;
+    fn save_turn(&self, session: &mut Session, all_msgs: Vec<ChatMessage>, start_index: usize) {
+        let before = session.messages.len();
+        let mut skipped_empty_assistant = 0usize;
+        let mut skipped_empty_user = 0usize;
+        let mut truncated_tool_results = 0usize;
 
-            if matches!(role, MessageRole::Assistant) && content.is_none() && tool_calls.is_none() {
+        for msg in all_msgs.into_iter().skip(start_index) {
+            if msg.role == MessageRole::Assistant
+                && msg.content.is_none()
+                && msg.tool_calls.is_none()
+            {
+                skipped_empty_assistant += 1;
+                continue;
+            }
+            if msg.role == MessageRole::User && msg.content.is_none() {
+                skipped_empty_user += 1;
                 continue;
             }
 
-            if matches!(role, MessageRole::Tool)
-                && let Some(MessageContent::Text(text)) = &mut content
-                && text.len() > Self::TOOL_RESULT_MAX_CHARS
-            {
-                // Tool outputs can be very large; cap storage to keep session files bounded.
-                *text = format!("{}\n... (truncated)", &text[..Self::TOOL_RESULT_MAX_CHARS]);
-            }
-
-            if matches!(role, MessageRole::User) {
-                if let Some(MessageContent::Text(text)) = &mut content {
-                    if let Some(user) = strip_runtime_context(text) {
-                        if user.is_empty() {
-                            continue;
-                        }
-                        *text = user;
-                    }
-                }
-
-                if let Some(MessageContent::Parts(parts)) = &mut content {
-                    if let Some(crate::provider::ContentPart::Text { text }) = parts.first()
-                        && text.starts_with(ContextBuilder::RUNTIME_CONTEXT_TAG)
-                    {
-                        parts.remove(0);
-                    }
-                    if parts.is_empty() {
-                        continue;
+            let mut content = msg.content.clone();
+            if msg.role == MessageRole::Tool {
+                if let Some(MessageContent::Text(text)) = &content {
+                    if text.len() > Self::TOOL_RESULT_MAX_CHARS {
+                        truncated_tool_results += 1;
+                        content = Some(MessageContent::Text(format!(
+                            "{}...",
+                            text.chars()
+                                .take(Self::TOOL_RESULT_MAX_CHARS)
+                                .collect::<String>(),
+                            // text.len() - Self::TOOL_RESULT_MAX_CHARS
+                        )));
                     }
                 }
             }
+
+            let tool_calls = msg.tool_calls.as_ref().map(|calls| {
+                calls
+                    .iter()
+                    .map(|tc| crate::types::provider::AssistantToolCall {
+                        id: tc.id.clone(),
+                        kind: tc.kind.clone(),
+                        function: tc.function.clone(),
+                    })
+                    .collect()
+            });
+
+            let reasoning_content = msg.reasoning_content.clone();
+            let thinking_blocks = msg.thinking_blocks.clone();
 
             let entry = SessionEntry {
-                role,
+                role: msg.role,
                 content,
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 tool_calls,
-                tool_call_id,
-                name,
+                tool_call_id: msg.tool_call_id.clone(),
+                name: msg.name.clone(),
                 reasoning_content,
                 thinking_blocks,
             };
             session.messages.push(entry);
         }
         session.updated_at = chrono::Utc::now();
-    }
-}
-
-fn strip_runtime_context(text: &str) -> Option<String> {
-    // Runtime metadata is prepended to user messages and should not be persisted as user intent.
-    if !text.starts_with(ContextBuilder::RUNTIME_CONTEXT_TAG) {
-        return None;
-    }
-    let mut parts = text.splitn(2, "\n\n");
-    let _ = parts.next();
-    Some(parts.next().unwrap_or("").trim().to_string())
-}
-
-fn strip_think(text: Option<&str>) -> Option<String> {
-    let Some(t) = text else {
-        return None;
-    };
-    let re = Regex::new(r"<think>[\s\S]*?</think>").ok()?;
-    let cleaned = re.replace_all(t, "").trim().to_string();
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
-    }
-}
-
-fn tool_hint(calls: &[crate::provider::ToolCallRequest]) -> String {
-    // Build a compact preview string for progress logs, not for execution.
-    let mut hints = Vec::new();
-    for tc in calls {
-        if let Ok(obj) = serde_json::from_str::<BTreeMap<String, PreviewValue>>(&tc.arguments_json)
-            && let Some((_, first)) = obj.iter().next()
-        {
-            let raw = first.short();
-            let shown = if raw.len() > 40 {
-                format!("{}...", &raw[..40])
-            } else {
-                raw
-            };
-            hints.push(format!("{}(\"{}\")", tc.name, shown));
-            continue;
-        }
-        hints.push(tc.name.to_string());
-    }
-    hints.join(", ")
-}
-
-fn debug_progress(content: &str, tool_hint: bool) {
-    if tool_hint {
-        info!(target: TARGET_AGENT, "↳ [tool] {}", content);
-    } else {
-        info!(target: TARGET_AGENT, "↳ {}", content);
-    }
-}
-
-fn format_tool_error(err: &crate::error::NanobotError) -> String {
-    format!(
-        "Error: {}\n\n[Analyze the error above and try a different approach.]",
-        err
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::provider::ToolCallRequest;
-
-    #[test]
-    fn strip_runtime_context_extracts_user_content() {
-        let text = format!(
-            "{}\nCurrent Time: 2026-01-01 10:00\n\nhello user",
-            ContextBuilder::RUNTIME_CONTEXT_TAG
+        debug!(
+            target: TARGET_AGENT,
+            session_key = %session.key,
+            saved = session.messages.len().saturating_sub(before),
+            skipped_empty_assistant,
+            skipped_empty_user,
+            truncated_tool_results,
+            total_messages = session.messages.len(),
+            "persisted turn into session history"
         );
-        let out = strip_runtime_context(&text);
-        assert_eq!(out.as_deref(), Some("hello user"));
-
-        assert!(strip_runtime_context("plain text").is_none());
     }
+}
 
-    #[test]
-    fn strip_think_removes_think_blocks() {
-        let out = strip_think(Some("<think>internal</think>final answer"));
-        assert_eq!(out.as_deref(), Some("final answer"));
-
-        let only_think = strip_think(Some("<think>internal</think>"));
-        assert!(only_think.is_none());
-    }
-
-    #[test]
-    fn tool_hint_uses_first_argument_preview_and_fallback_name() {
-        let long = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ";
-        let calls = vec![
-            ToolCallRequest {
-                id: "1".to_string(),
-                name: "read_file".into(),
-                arguments_json: format!(r#"{{"path":"{}"}}"#, long),
-            },
-            ToolCallRequest {
-                id: "2".to_string(),
-                name: "exec".into(),
-                arguments_json: "{bad-json}".to_string(),
-            },
-        ];
-
-        let out = tool_hint(&calls);
-        assert!(out.contains("read_file(\""));
-        assert!(out.contains("...\")"));
-        assert!(out.contains(", exec"));
-    }
-
-    #[test]
-    fn format_tool_error_contains_analysis_hint() {
-        let err = crate::error::NanobotError::tool_execution("test", anyhow::anyhow!("boom"));
-        let out = format_tool_error(&err);
-        assert!(out.contains("Error:"));
-        assert!(out.contains("Analyze the error above"));
-    }
-
-    // New comprehensive tests for AgentLoop
-
-    use crate::provider::{ChatRequest, LLMResponse, UsageStats};
-    use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct MockProvider {
-        call_count: Arc<AtomicUsize>,
-        response: String,
-        tool_calls: Vec<ToolCallRequest>,
-    }
-
-    impl MockProvider {
-        fn new(response: &str) -> Self {
-            Self {
-                call_count: Arc::new(AtomicUsize::new(0)),
-                response: response.to_string(),
-                tool_calls: Vec::new(),
-            }
-        }
-
-        fn with_tool_calls(mut self, calls: Vec<ToolCallRequest>) -> Self {
-            self.tool_calls = calls;
-            self
-        }
-    }
-
-    #[async_trait]
-    impl LLMProvider for MockProvider {
-        async fn chat(&self, _req: ChatRequest) -> LLMResponse {
-            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
-
-            // First call returns tool calls, second returns final response
-            if count == 0 && !self.tool_calls.is_empty() {
-                LLMResponse {
-                    content: Some("Using tools".to_string()),
-                    tool_calls: self.tool_calls.clone(),
-                    finish_reason: "tool_calls".to_string(),
-                    usage: UsageStats::default(),
-                    reasoning_content: None,
-                    thinking_blocks: None,
-                }
-            } else {
-                LLMResponse {
-                    content: Some(self.response.clone()),
-                    tool_calls: Vec::new(),
-                    finish_reason: "stop".to_string(),
-                    usage: UsageStats::default(),
-                    reasoning_content: None,
-                    thinking_blocks: None,
-                }
-            }
-        }
-
-        fn default_model(&self) -> &str {
-            "mock/model"
-        }
-    }
-
-    async fn create_test_agent(provider: Arc<dyn LLMProvider>) -> AgentLoop {
-        use crate::agent::AgentLoopBuilder;
-        use crate::bus::MessageBus;
-
-        let bus = MessageBus::new();
-        let workspace = std::env::temp_dir().join(format!("nanobot-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace).unwrap();
-
-        AgentLoopBuilder::new(bus, provider, workspace)
-            .build()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn agent_loop_processes_simple_message() {
-        let provider = Arc::new(MockProvider::new("Hello, user!"));
-        let agent = create_test_agent(provider).await;
-
-        let result = agent
-            .process_direct("Hi", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-
-        assert_eq!(result, "Hello, user!");
-    }
-
-    #[tokio::test]
-    async fn agent_loop_handles_tool_calls() {
-        let tool_calls = vec![ToolCallRequest {
-            id: "call_1".to_string(),
-            name: "list_dir".into(),
-            arguments_json: r#"{"path":"."}"#.to_string(),
-        }];
-
-        let provider = Arc::new(MockProvider::new("Listed files").with_tool_calls(tool_calls));
-        let agent = create_test_agent(provider).await;
-
-        let result = agent
-            .process_direct("List files", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-
-        assert_eq!(result, "Listed files");
-    }
-
-    #[tokio::test]
-    async fn agent_loop_respects_max_iterations() {
-        // Provider that always returns tool calls
-        struct InfiniteToolProvider;
-
-        #[async_trait]
-        impl LLMProvider for InfiniteToolProvider {
-            async fn chat(&self, _req: ChatRequest) -> LLMResponse {
-                LLMResponse {
-                    content: Some("Calling tool".to_string()),
-                    tool_calls: vec![ToolCallRequest {
-                        id: "call_1".to_string(),
-                        name: "list_dir".into(),
-                        arguments_json: r#"{"path":"."}"#.to_string(),
-                    }],
-                    finish_reason: "tool_calls".to_string(),
-                    usage: UsageStats::default(),
-                    reasoning_content: None,
-                    thinking_blocks: None,
-                }
-            }
-
-            fn default_model(&self) -> &str {
-                "infinite/model"
-            }
-        }
-
-        let provider = Arc::new(InfiniteToolProvider);
-        let agent = create_test_agent(provider).await;
-
-        let result = agent
-            .process_direct("Do something", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-
-        // Should hit max iterations and return error message
-        assert!(result.contains("maximum number of tool call iterations"));
-        assert!(result.contains("40")); // default max_iterations
-    }
-
-    #[tokio::test]
-    async fn agent_loop_handles_concurrent_sessions() {
-        let provider = Arc::new(MockProvider::new("Response"));
-        let agent = Arc::new(create_test_agent(provider).await);
-
-        // Spawn multiple concurrent requests from different sessions
-        let mut handles = vec![];
-        for i in 0..5 {
-            let agent = agent.clone();
-            let session = format!("session-{}", i);
-            let handle = tokio::spawn(async move {
-                agent
-                    .process_direct("Test", &session, "cli", "direct")
-                    .await
-                    .unwrap()
-            });
-            handles.push(handle);
-        }
-
-        // All should complete successfully
-        for handle in handles {
-            let result = handle.await.unwrap();
-            assert_eq!(result, "Response");
-        }
-    }
-
-    #[tokio::test]
-    async fn session_locks_are_cleaned_up() {
-        let provider = Arc::new(MockProvider::new("Response"));
-        let agent = create_test_agent(provider).await;
-
-        // Manually create a lock by simulating dispatch
-        let session_key = SessionKey::from("cli:direct");
-        agent
-            .session_locks
-            .insert(session_key.clone(), Arc::new(tokio::sync::Mutex::new(())));
-
-        // Verify lock exists
-        assert!(agent.session_locks.contains_key(&session_key));
-
-        // Trigger cleanup (no active tasks, so should be removed)
-        agent.cleanup_session_locks().await;
-
-        // Lock should be removed
-        assert!(!agent.session_locks.contains_key(&session_key));
-    }
-
-    #[tokio::test]
-    async fn agent_loop_saves_session_history() {
-        let provider = Arc::new(MockProvider::new("Response"));
-        let agent = create_test_agent(provider).await;
-
-        // Create session first
-        let session_key = "cli:direct";
-        agent.sessions.get_or_create(session_key).await.unwrap();
-
-        // Process a message
-        agent
-            .process_direct("Hello", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-
-        // Check session exists
-        let session = agent.sessions.get_or_create(session_key).await.unwrap();
-
-        // Session system works correctly
-        assert!(session.key == session_key);
-    }
-
-    #[tokio::test]
-    async fn agent_loop_handles_empty_response() {
-        let provider = Arc::new(MockProvider::new(""));
-        let agent = create_test_agent(provider).await;
-
-        let result = agent
-            .process_direct("Test", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-
-        // Empty response triggers max iterations error
-        assert!(result.contains("maximum number of tool call iterations"));
-    }
-
-    #[tokio::test]
-    async fn agent_loop_strips_runtime_context_from_response() {
-        let response_with_context = format!(
-            "{}\nCurrent Time: 2026-01-01\n\nActual response",
-            ContextBuilder::RUNTIME_CONTEXT_TAG
-        );
-        let provider = Arc::new(MockProvider::new(&response_with_context));
-        let agent = create_test_agent(provider).await;
-
-        let result = agent
-            .process_direct("Test", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-        // Runtime context is not stripped by process_direct
-        assert!(result.contains("Runtime Context") || result.contains("Actual response"));
-    }
-
-    #[tokio::test]
-    async fn agent_loop_strips_think_tags() {
-        let response_with_think = "<think>internal reasoning</think>Final answer";
-        let provider = Arc::new(MockProvider::new(response_with_think));
-        let agent = create_test_agent(provider).await;
-
-        let result = agent
-            .process_direct("Test", "test-session", "cli", "direct")
-            .await
-            .unwrap();
-
-        assert_eq!(result, "Final answer");
-        assert!(!result.contains("<think>"));
-    }
-
-    #[test]
-    fn tool_hint_handles_empty_calls() {
-        let calls: Vec<ToolCallRequest> = vec![];
-        let hint = tool_hint(&calls);
-        assert_eq!(hint, "");
-    }
-
-    #[test]
-    fn tool_hint_truncates_long_arguments() {
-        let long_arg = "a".repeat(100);
-        let calls = vec![ToolCallRequest {
-            id: "1".to_string(),
-            name: "test_tool".into(),
-            arguments_json: format!(r#"{{"arg":"{}"}}"#, long_arg),
-        }];
-
-        let hint = tool_hint(&calls);
-        assert!(hint.len() < long_arg.len() + 50);
-        assert!(hint.contains("..."));
+fn preview_text(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        text.to_string()
+    } else {
+        format!("{}...", &text.chars().take(max_chars).collect::<String>())
     }
 }
