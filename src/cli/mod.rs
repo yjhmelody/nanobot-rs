@@ -23,8 +23,11 @@ use crate::types::SessionKey;
 use crate::utils::helpers::{get_workspace_path, sync_workspace_templates};
 
 #[derive(Debug, Parser)]
-#[command(name = "nanobot-rs")]
-#[command(about = "nanobot")]
+#[command(
+    name = "nanobot-rs",
+    about = "nanobot command-line interface",
+    long_about = "nanobot-rs command-line interface for onboarding, running the agent, and managing providers."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -32,30 +35,50 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(about = "Initialize or refresh config and workspace templates.")]
+    #[command(
+        long_about = "Create or refresh ~/.nanobot/config.json and ensure workspace templates are present. Use --overwrite to reset to defaults."
+    )]
     Onboard(OnboardArgs),
+    #[command(about = "Run the agent in interactive or one-shot mode.")]
+    #[command(
+        long_about = "Start an interactive session by default, or run a single prompt with --message."
+    )]
     Agent(AgentArgs),
+    #[command(about = "Run the gateway service.")]
+    #[command(
+        long_about = "Start the gateway service with the configured channels and heartbeat loop."
+    )]
     Gateway(GatewayArgs),
+    #[command(about = "Show status of config, workspace, and providers.")]
+    #[command(
+        long_about = "Print paths and availability checks for config and workspace."
+    )]
     Status,
+    #[command(about = "Manage provider configuration and connectivity checks.")]
+    #[command(
+        long_about = "Login to a provider or show provider auth status."
+    )]
     Provider(ProviderArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct OnboardArgs {
-    #[arg(long)]
+    #[arg(long, help = "Overwrite existing config with defaults.")]
     pub overwrite: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct AgentArgs {
-    #[arg(long, short)]
+    #[arg(long, short, help = "Send a single message and exit.")]
     pub message: Option<String>,
-    #[arg(long, short, default_value = "cli:direct")]
+    #[arg(long, short, default_value = "cli:direct", help = "Session key in channel:chat_id format.")]
     pub session: String,
 }
 
 #[derive(Debug, Args)]
 pub struct GatewayArgs {
-    #[arg(long, short, default_value_t = 18790)]
+    #[arg(long, short, default_value_t = 18790, help = "Port to bind the gateway service.")]
     pub port: u16,
 }
 
@@ -67,23 +90,33 @@ pub struct ProviderArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommands {
+    #[command(about = "Store provider credentials.")]
+    #[command(
+        long_about = "Write provider API key into the config file for the selected provider."
+    )]
     Login(ProviderLoginArgs),
+    #[command(about = "Show provider auth status.")]
+    #[command(
+        long_about = "Check whether the selected provider has credentials configured."
+    )]
     Status(ProviderStatusArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ProviderLoginArgs {
+    #[arg(help = "Provider name (e.g., anthropic, openai, custom).")]
     pub provider: String,
-    #[arg(long)]
+    #[arg(long, help = "Optional API host override.")]
     pub host: Option<String>,
-    #[arg(long = "config-dir")]
+    #[arg(long = "config-dir", help = "Config directory override.")]
     pub config_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct ProviderStatusArgs {
+    #[arg(help = "Provider name (e.g., anthropic, openai, custom).")]
     pub provider: String,
-    #[arg(long = "config-dir")]
+    #[arg(long = "config-dir", help = "Config directory override.")]
     pub config_dir: Option<PathBuf>,
 }
 
@@ -510,23 +543,25 @@ struct SessionTargetPicker {
 }
 
 impl SessionTargetPicker {
-    fn pick_target(&self) -> (String, String) {
-        if let Ok(sessions) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.sessions.list_sessions())
-        }) {
-            for item in sessions {
-                let key = item.key;
-                if let Some((channel, chat_id)) = key.split_once(':') {
-                    if channel == "cli" || channel == "system" {
-                        continue;
-                    }
-                    if self.enabled_channels.contains(channel) && !chat_id.is_empty() {
-                        return (channel.to_string(), chat_id.to_string());
-                    }
+    async fn pick_target(&self) -> (String, String) {
+        let Ok(sessions) = self.agent.sessions.list_sessions().await else {
+            return ("cli".to_string(), "direct".to_string());
+        };
+
+        sessions
+            .into_iter()
+            .find_map(|item| {
+                let (channel, chat_id) = item.key.split_once(':')?;
+                if channel == "cli" || channel == "system" {
+                    return None;
                 }
-            }
-        }
-        ("cli".to_string(), "direct".to_string())
+                if self.enabled_channels.contains(channel) && !chat_id.is_empty() {
+                    Some((channel.to_string(), chat_id.to_string()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| ("cli".to_string(), "direct".to_string()))
     }
 }
 
@@ -582,7 +617,7 @@ struct GatewayHeartbeatExecuteHandler {
 #[async_trait]
 impl HeartbeatExecuteHandler for GatewayHeartbeatExecuteHandler {
     async fn on_execute(&self, tasks: String) -> Result<String> {
-        let (channel, chat_id) = self.picker.pick_target();
+        let (channel, chat_id) = self.picker.pick_target().await;
         self.agent
             .process_direct(&tasks, "heartbeat", &channel, &chat_id)
             .await
@@ -599,7 +634,7 @@ struct GatewayHeartbeatNotifyHandler {
 #[async_trait]
 impl HeartbeatNotifyHandler for GatewayHeartbeatNotifyHandler {
     async fn on_notify(&self, response: String) {
-        let (channel, chat_id) = self.picker.pick_target();
+        let (channel, chat_id) = self.picker.pick_target().await;
         if channel == "cli" {
             return;
         }

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use nanobot_rs::observability;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -464,7 +463,6 @@ async fn run_nanobot(
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .env("HOME", home)
-        .env(observability::ENV_NANOBOT_OTLP_TRACES, "false")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdout(Stdio::piped())

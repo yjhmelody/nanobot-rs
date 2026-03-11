@@ -10,6 +10,7 @@ use crate::heartbeat::HeartbeatService;
 use crate::provider::make_provider;
 use crate::utils::helpers::get_data_path;
 
+#[derive(Clone)]
 pub struct RuntimeBundle {
     pub config: Config,
     pub bus: MessageBus,

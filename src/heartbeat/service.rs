@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use tokio::sync::{Mutex, RwLock};
+use parking_lot::RwLock;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -65,11 +66,11 @@ impl HeartbeatService {
     }
 
     pub async fn register_on_execute_handler(&self, handler: Arc<dyn HeartbeatExecuteHandler>) {
-        *self.on_execute.write().await = Some(handler);
+        *self.on_execute.write() = Some(handler);
     }
 
     pub async fn register_on_notify_handler(&self, handler: Arc<dyn HeartbeatNotifyHandler>) {
-        *self.on_notify.write().await = Some(handler);
+        *self.on_notify.write() = Some(handler);
     }
 
     pub async fn start(self: &Arc<Self>) {
@@ -123,7 +124,7 @@ impl HeartbeatService {
             return None;
         }
 
-        let handler = self.on_execute.read().await.clone()?;
+        let handler = self.on_execute.read().clone()?;
         let response = match handler.on_execute(tasks).await {
             Ok(v) => v,
             Err(err) => {
@@ -149,7 +150,7 @@ impl HeartbeatService {
             return Ok(());
         }
 
-        let execute_handler = self.on_execute.read().await.clone();
+        let execute_handler = self.on_execute.read().clone();
         let Some(execute_handler) = execute_handler else {
             return Ok(());
         };
@@ -159,7 +160,8 @@ impl HeartbeatService {
             return Ok(());
         }
 
-        if let Some(notify_handler) = self.on_notify.read().await.clone() {
+        let notify_handler = self.on_notify.read().clone();
+        if let Some(notify_handler) = notify_handler {
             notify_handler.on_notify(response).await;
         }
 
