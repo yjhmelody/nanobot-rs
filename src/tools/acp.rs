@@ -12,6 +12,7 @@ use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
 use crate::types::tools::ACPExecuteArgs;
+use std::sync::OnceLock;
 
 const ACP_EXECUTE_TOOL_NAME: &str = "acp_execute";
 const ACP_EXECUTE_DESCRIPTION: &str = "Execute a coding task using an ACP agent. \
@@ -178,28 +179,31 @@ impl Tool for ACPTool {
     }
 
     fn definition(&self) -> Arc<ToolDefinition> {
-        Arc::new(tool_definition_from_json(json!({
-            "type": "function",
-            "function": {
-                "name": self.name(),
-                "description": self.definition_description(),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "agent_id": self.definition_agent_schema(),
-                        "task": {
-                            "type": "string",
-                            "description": "Coding task to execute by the ACP agent"
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
+        DEF.get_or_init(||{
+            Arc::new(tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": self.name(),
+                    "description": self.definition_description(),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_id": self.definition_agent_schema(),
+                            "task": {
+                                "type": "string",
+                                "description": "Coding task to execute by the ACP agent"
+                            },
+                            "cwd": {
+                                "type": "string",
+                                "description": "Optional working directory for the ACP agent process"
+                            }
                         },
-                        "cwd": {
-                            "type": "string",
-                            "description": "Optional working directory for the ACP agent process"
-                        }
-                    },
-                    "required": ["agent_id", "task"]
+                        "required": ["agent_id", "task"]
+                    }
                 }
-            }
-        })))
+            })))
+        }).clone()
     }
 
     async fn execute(&self, args_json: &str, _context: &ToolContext) -> Result<String> {
@@ -258,7 +262,11 @@ mod tests {
             .expect("agent_id schema");
         assert_eq!(
             agent_schema.enum_values.as_ref(),
-            Some(&vec!["claude".to_string(), "codex".to_string()])
+            Some(&vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "copilot".to_string()
+            ])
         );
     }
 
