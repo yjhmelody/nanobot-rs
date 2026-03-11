@@ -8,6 +8,7 @@ use serde_json::json;
 use tokio::process::Command;
 
 use crate::error::{NanobotError, Result};
+use crate::tool_error;
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -22,42 +23,33 @@ impl ShellTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
-
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
-        DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
-                "type": "function",
-                "function": {
-                    "name": "exec",
-                    "description": "Execute a shell command and return its output. Use with caution.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "description": "The shell command to execute"
-                            },
-                            "working_dir": {
-                                "type": "string",
-                                "description": "Optional working directory for the command"
-                            }
+}
+pub fn definition() -> Arc<ToolDefinition> {
+    static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
+    DEF.get_or_init(|| {
+        Arc::new(tool_definition_from_json(json!({
+            "type": "function",
+            "function": {
+                "name": "exec",
+                "description": "Execute a shell command and return its output. Use with caution.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
                         },
-                        "required": ["command"]
-                    }
+                        "working_dir": {
+                            "type": "string",
+                            "description": "Optional working directory for the command"
+                        }
+                    },
+                    "required": ["command"]
                 }
-            }))
-        })
-        .clone()
-    }
-}
-
-pub fn build_tool(config: SharedToolConfig) -> Arc<dyn Tool> {
-    Arc::new(ShellTool::new(config))
-}
-
-pub fn definition() -> ToolDefinition {
-    ShellTool::definition_static()
+            }
+        })))
+    })
+    .clone()
 }
 
 #[async_trait]
@@ -66,8 +58,8 @@ impl Tool for ShellTool {
         "exec"
     }
 
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
+    fn definition(&self) -> Arc<ToolDefinition> {
+        definition()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -114,10 +106,7 @@ pub async fn execute(
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return Err(NanobotError::tool_execution(
-                "exec",
-                anyhow::anyhow!("executing command: {}", e),
-            ));
+            return Err(tool_error!("exec", "executing command: {}", e));
         }
     };
 

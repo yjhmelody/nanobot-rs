@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -10,7 +11,7 @@ use crate::types::provider::{ChatMessage, LLMResponse};
 pub struct ChatRequest {
     pub session_key: Option<SessionKey>,
     pub messages: Vec<ChatMessage>,
-    pub tools: Option<Vec<ToolDefinition>>,
+    pub tools: Option<Vec<Arc<ToolDefinition>>>,
     pub model: Option<String>,
     pub max_tokens: i32,
     pub temperature: f32,

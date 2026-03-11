@@ -84,6 +84,19 @@ Types are being consolidated into `src/types/`:
 - Use `Result<T>` for fallible operations, never panic in library code
 - Async functions: `async fn` + `#[async_trait]` for traits
 - Logging: `tracing::{info, warn, error}` (not `println!`)
+- Error handling: Use `tool_error!` macro for tool execution errors
+
+**Error Handling Best Practices**:
+```rust
+// ✅ Good: Use tool_error! macro
+use crate::tool_error;
+
+std::fs::read_to_string(path)
+    .map_err(|e| tool_error!("read_file", "failed to read {}: {}", path, e))?;
+
+// ❌ Bad: Verbose boilerplate
+NanobotError::tool_execution("read_file", anyhow::anyhow!("failed to read {}: {}", path, e))
+```
 
 ### Concurrency & Performance Guidelines
 

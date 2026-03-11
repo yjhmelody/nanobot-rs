@@ -384,8 +384,8 @@ impl Tool for MCPToolWrapper {
         &self.name
     }
 
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(&self.name, &self.description, self.parameters.clone())
+    fn definition(&self) -> Arc<ToolDefinition> {
+        Arc::new(ToolDefinition::function(&self.name, &self.description, self.parameters.clone()))
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -434,8 +434,8 @@ mod tests {
     use crate::tools::registry::ToolRegistry;
     use crate::types::SessionKey;
 
-    fn definition_names(defs: Vec<ToolDefinition>) -> HashSet<String> {
-        defs.into_iter().map(|d| d.function.name).collect()
+    fn definition_names(defs: Vec<Arc<ToolDefinition>>) -> HashSet<String> {
+        defs.into_iter().map(|d| d.function.name.clone()).collect()
     }
 
     fn temp_path(prefix: &str) -> PathBuf {

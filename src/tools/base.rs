@@ -15,7 +15,8 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 
     /// OpenAI-compatible function definition.
-    fn definition(&self) -> ToolDefinition;
+    /// Returns Arc for cheap cloning (8 bytes vs 184 bytes).
+    fn definition(&self) -> std::sync::Arc<ToolDefinition>;
 
     /// Execute tool using raw JSON args with runtime context.
     async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Result<String>;

@@ -5,6 +5,52 @@ use thiserror::Error;
 /// Result type alias using NanobotError.
 pub type Result<T> = std::result::Result<T, NanobotError>;
 
+/// Macro to create a tool execution error with automatic tool name capture.
+///
+/// This macro simplifies creating tool execution errors by reducing boilerplate.
+///
+/// # Examples
+///
+/// ```
+/// use nanobot_rs::tool_error;
+///
+/// // Simple error message
+/// let err = tool_error!("read_file", "file not found");
+///
+/// // Formatted error message
+/// let path = "/tmp/test.txt";
+/// let err = tool_error!("read_file", "failed to read {}", path);
+///
+/// // Use with Result::map_err
+/// # use std::io;
+/// # fn example() -> Result<(), nanobot_rs::error::NanobotError> {
+/// std::fs::read_to_string("/tmp/test.txt")
+///     .map_err(|e| tool_error!("read_file", "failed to read: {}", e))?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Comparison
+///
+/// Before:
+/// ```ignore
+/// NanobotError::tool_execution("read_file", anyhow::anyhow!("file not found"))
+/// ```
+///
+/// After:
+/// ```ignore
+/// tool_error!("read_file", "file not found")
+/// ```
+#[macro_export]
+macro_rules! tool_error {
+    ($tool:expr, $msg:expr) => {
+        $crate::error::NanobotError::tool_execution($tool, anyhow::anyhow!($msg))
+    };
+    ($tool:expr, $fmt:expr, $($arg:tt)*) => {
+        $crate::error::NanobotError::tool_execution($tool, anyhow::anyhow!($fmt, $($arg)*))
+    };
+}
+
 /// Core error types for nanobot-rs.
 ///
 /// This provides type-safe error handling with specific error variants
@@ -121,6 +167,20 @@ impl NanobotError {
         Self::ToolExecution {
             tool_name: tool_name.into(),
             source,
+        }
+    }
+
+    /// Creates a tool execution error with context.
+    ///
+    /// This is a convenience method that wraps the error with additional context.
+    pub fn tool_exec<T>(tool_name: impl Into<String>) -> impl FnOnce(T) -> Self
+    where
+        T: Into<anyhow::Error>,
+    {
+        let name = tool_name.into();
+        move |err| Self::ToolExecution {
+            tool_name: name,
+            source: err.into(),
         }
     }
 
@@ -264,6 +324,20 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("read_file"));
         assert!(msg.contains("file not found"));
+    }
+
+    #[test]
+    fn tool_error_macro_works() {
+        let err = tool_error!("read_file", "file not found");
+        let msg = err.to_string();
+        assert!(msg.contains("read_file"));
+        assert!(msg.contains("file not found"));
+
+        let path = "/tmp/test.txt";
+        let err = tool_error!("read_file", "failed to read {}", path);
+        let msg = err.to_string();
+        assert!(msg.contains("read_file"));
+        assert!(msg.contains("/tmp/test.txt"));
     }
 
     #[test]

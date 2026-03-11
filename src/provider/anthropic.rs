@@ -125,7 +125,7 @@ impl AnthropicProvider {
                 (!tools.is_empty()).then(|| {
                     tools
                         .into_iter()
-                        .map(AnthropicToolDefinition::from)
+                        .map(|t| AnthropicToolDefinition::from((*t).clone()))
                         .collect()
                 })
             }),
@@ -483,6 +483,7 @@ fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -609,11 +610,11 @@ mod tests {
             ChatRequest {
                 session_key: None,
                 messages: vec![ChatMessage::user_text("hello")],
-                tools: Some(vec![ToolDefinition::function(
+                tools: Some(vec![Arc::new(ToolDefinition::function(
                     "read_file",
                     "Read a file",
                     JsonSchema::object(properties, vec!["path"]),
-                )]),
+                ))]),
                 model: None,
                 max_tokens: 1024,
                 temperature: 1.5,

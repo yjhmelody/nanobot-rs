@@ -245,7 +245,7 @@ impl OpenAICompatProvider {
             tools: req.tools.map(|tools| {
                 tools
                     .into_iter()
-                    .map(ResponseToolDefinition::from)
+                    .map(|t| ResponseToolDefinition::from((*t).clone()))
                     .collect()
             }),
             tool_choice,
@@ -513,6 +513,8 @@ fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     use crate::provider::{AssistantFunctionCall, AssistantToolCall};
@@ -641,11 +643,11 @@ mod tests {
         let req = ChatRequest {
             session_key: None,
             messages: vec![ChatMessage::user_text("hi")],
-            tools: Some(vec![ToolDefinition::function(
+            tools: Some(vec![Arc::new(ToolDefinition::function(
                 "read_file",
                 "Read a file",
                 JsonSchema::object(Default::default(), vec![]),
-            )]),
+            ))]),
             model: Some("openai/gpt-5.4".to_string()),
             max_tokens: 128,
             temperature: 0.0,

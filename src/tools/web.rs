@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -19,11 +19,18 @@ impl WebSearchTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "web_search",
@@ -45,20 +52,9 @@ impl WebSearchTool {
                         "required": ["query"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for WebSearchTool {
-    fn name(&self) -> &str {
-        "web_search"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -81,11 +77,18 @@ impl WebFetchTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "web_fetch",
@@ -105,20 +108,9 @@ impl WebFetchTool {
                         "required": ["url"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for WebFetchTool {
-    fn name(&self) -> &str {
-        "web_fetch"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {

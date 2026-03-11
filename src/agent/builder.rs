@@ -341,7 +341,7 @@ mod tests {
             .tools
             .definitions()
             .into_iter()
-            .map(|d| d.function.name)
+            .map(|d| d.function.name.clone())
             .collect();
         assert!(names.contains(&"spawn".to_string()));
     }

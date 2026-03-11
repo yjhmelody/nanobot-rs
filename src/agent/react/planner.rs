@@ -23,7 +23,7 @@ impl Planner {
     pub async fn query(
         &self,
         messages: &[ChatMessage],
-        tools: &[ToolDefinition],
+        tools: &[Arc<ToolDefinition>],
         config: &ModelConfig,
     ) -> Result<PlannerResponse> {
         debug!(

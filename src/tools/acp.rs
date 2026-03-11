@@ -1,5 +1,7 @@
 //! ACP tool for delegating coding tasks to ACP agents.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -175,8 +177,8 @@ impl Tool for ACPTool {
         ACP_EXECUTE_TOOL_NAME
     }
 
-    fn definition(&self) -> ToolDefinition {
-        tool_definition_from_json(json!({
+    fn definition(&self) -> Arc<ToolDefinition> {
+        Arc::new(tool_definition_from_json(json!({
             "type": "function",
             "function": {
                 "name": self.name(),
@@ -197,7 +199,7 @@ impl Tool for ACPTool {
                     "required": ["agent_id", "task"]
                 }
             }
-        }))
+        })))
     }
 
     async fn execute(&self, args_json: &str, _context: &ToolContext) -> Result<String> {

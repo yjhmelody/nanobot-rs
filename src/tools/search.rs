@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -82,11 +82,18 @@ impl SearchFilesTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for SearchFilesTool {
+    fn name(&self) -> &str {
+        "search_files"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "search_files",
@@ -126,20 +133,9 @@ impl SearchFilesTool {
                         "required": ["query"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for SearchFilesTool {
-    fn name(&self) -> &str {
-        "search_files"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -169,11 +165,18 @@ impl GrepCodeTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for GrepCodeTool {
+    fn name(&self) -> &str {
+        "grep_code"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "grep_code",
@@ -209,20 +212,9 @@ impl GrepCodeTool {
                         "required": ["query"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for GrepCodeTool {
-    fn name(&self) -> &str {
-        "grep_code"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -513,11 +505,20 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> Result<Vec<SearchResult>> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[tokio::test]
     async fn search_files_tool_definition_is_valid() {
-        let def = SearchFilesTool::definition_static();
+        let config = SharedToolConfig::new(
+            PathBuf::from("/tmp"),
+            false,
+            Default::default(),
+            Default::default(),
+        );
+        let tool = SearchFilesTool::new(config);
+        let def = tool.definition();
         assert_eq!(def.function.name, "search_files");
         assert!(
             def.function
@@ -541,7 +542,14 @@ mod tests {
 
     #[tokio::test]
     async fn grep_code_tool_definition_is_valid() {
-        let def = GrepCodeTool::definition_static();
+        let config = SharedToolConfig::new(
+            PathBuf::from("/tmp"),
+            false,
+            Default::default(),
+            Default::default(),
+        );
+        let tool = GrepCodeTool::new(config);
+        let def = tool.definition();
         assert_eq!(def.function.name, "grep_code");
         assert!(
             def.function

@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -24,39 +25,43 @@ impl MessageTool {
         }
     }
 
-    pub fn definition() -> ToolDefinition {
-        tool_definition_from_json(json!({
-            "type": "function",
-            "function": {
-                "name": "message",
-                "description": "Send a message to the user. Use this when you want to communicate something.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "The message content to send"
-                        },
-                        "channel": {
-                            "type": "string",
-                            "description": "Optional: target channel (telegram, discord, etc.)"
-                        },
-                        "chat_id": {
-                            "type": "string",
-                            "description": "Optional: target chat/user ID"
-                        },
-                        "media": {
-                            "type": "array",
-                            "description": "Optional: list of file paths to attach (images, audio, documents)",
-                            "items": {
-                                "type": "string"
+    pub fn definition() -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
+        DEF.get_or_init(|| {
+            Arc::new(tool_definition_from_json(json!({
+                "type": "function",
+                "function": {
+                    "name": "message",
+                    "description": "Send a message to the user. Use this when you want to communicate something.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "The message content to send"
+                            },
+                            "channel": {
+                                "type": "string",
+                                "description": "Optional: target channel (telegram, discord, etc.)"
+                            },
+                            "chat_id": {
+                                "type": "string",
+                                "description": "Optional: target chat/user ID"
+                            },
+                            "media": {
+                                "type": "array",
+                                "description": "Optional: list of file paths to attach (images, audio, documents)",
+                                "items": {
+                                    "type": "string"
+                                }
                             }
-                        }
-                    },
-                    "required": ["content"]
+                        },
+                        "required": ["content"]
+                    }
                 }
-            }
-        }))
+            })))
+        })
+        .clone()
     }
 
     async fn execute_typed(&self, args: MessageArgs, ctx: &ToolContext) -> Result<String> {
@@ -110,7 +115,7 @@ impl Tool for MessageTool {
         "message"
     }
 
-    fn definition(&self) -> ToolDefinition {
+    fn definition(&self) -> Arc<ToolDefinition> {
         Self::definition()
     }
 

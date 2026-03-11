@@ -38,7 +38,7 @@ impl ReActExecutor {
     pub async fn run(
         &self,
         mut messages: Vec<ChatMessage>,
-        tools: Vec<crate::tools::base::ToolDefinition>,
+        tools: Vec<std::sync::Arc<crate::tools::base::ToolDefinition>>,
         config: ModelConfig,
         context: ExecutionContext,
     ) -> Result<LoopOutcome> {

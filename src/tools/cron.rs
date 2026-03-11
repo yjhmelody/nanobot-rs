@@ -21,10 +21,10 @@ impl CronTool {
         Self { service }
     }
 
-    pub fn definition() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+    pub fn definition() -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "cron",
@@ -65,7 +65,7 @@ impl CronTool {
                         "required": ["action"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
     }
@@ -255,7 +255,7 @@ impl Tool for CronTool {
         "cron"
     }
 
-    fn definition(&self) -> ToolDefinition {
+    fn definition(&self) -> Arc<ToolDefinition> {
         Self::definition()
     }
 

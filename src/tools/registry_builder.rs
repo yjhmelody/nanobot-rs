@@ -185,7 +185,7 @@ mod tests {
         let names: Vec<_> = registry
             .definitions()
             .into_iter()
-            .map(|d| d.function.name)
+            .map(|d| d.function.name.clone())
             .collect();
         assert!(names.contains(&"spawn".to_string()));
 
@@ -213,12 +213,12 @@ mod tests {
             "builder_echo"
         }
 
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition::function(
+        fn definition(&self) -> Arc<ToolDefinition> {
+            Arc::new(ToolDefinition::function(
                 self.name(),
                 "Echo tool for builder tests",
                 JsonSchema::object(BTreeMap::new(), Vec::new()),
-            )
+            ))
         }
 
         async fn execute(
@@ -241,7 +241,7 @@ mod tests {
         let names: Vec<_> = registry
             .definitions()
             .into_iter()
-            .map(|d| d.function.name)
+            .map(|d| d.function.name.clone())
             .collect();
         assert!(names.contains(&"builder_echo".to_string()));
 
@@ -269,12 +269,12 @@ mod tests {
             "exec"
         }
 
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition::function(
+        fn definition(&self) -> Arc<ToolDefinition> {
+            Arc::new(ToolDefinition::function(
                 self.name(),
                 "Conflict tool for builder tests",
                 JsonSchema::object(BTreeMap::new(), Vec::new()),
-            )
+            ))
         }
 
         async fn execute(

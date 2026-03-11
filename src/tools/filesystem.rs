@@ -1,12 +1,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs as async_fs;
 
 use crate::error::{NanobotError, Result};
+use crate::tool_error;
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -21,11 +22,18 @@ impl ReadFileTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for ReadFileTool {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "read_file",
@@ -41,20 +49,9 @@ impl ReadFileTool {
                         "required": ["path"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for ReadFileTool {
-    fn name(&self) -> &str {
-        "read_file"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -76,11 +73,18 @@ impl WriteFileTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for WriteFileTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "write_file",
@@ -100,20 +104,9 @@ impl WriteFileTool {
                         "required": ["path", "content"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for WriteFileTool {
-    fn name(&self) -> &str {
-        "write_file"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -135,11 +128,18 @@ impl EditFileTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for EditFileTool {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "edit_file",
@@ -163,20 +163,9 @@ impl EditFileTool {
                         "required": ["path", "old_text", "new_text"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for EditFileTool {
-    fn name(&self) -> &str {
-        "edit_file"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -198,11 +187,18 @@ impl ListDirTool {
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
+}
 
-    fn definition_static() -> ToolDefinition {
-        static DEF: OnceLock<ToolDefinition> = OnceLock::new();
+#[async_trait]
+impl Tool for ListDirTool {
+    fn name(&self) -> &str {
+        "list_dir"
+    }
+
+    fn definition(&self) -> Arc<ToolDefinition> {
+        static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
-            tool_definition_from_json(json!({
+            Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
                     "name": "list_dir",
@@ -218,20 +214,9 @@ impl ListDirTool {
                         "required": ["path"]
                     }
                 }
-            }))
+            })))
         })
         .clone()
-    }
-}
-
-#[async_trait]
-impl Tool for ListDirTool {
-    fn name(&self) -> &str {
-        "list_dir"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        Self::definition_static()
     }
 
     async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
@@ -264,32 +249,27 @@ async fn resolve_path(path: &str, workspace: &Path, allowed_dir: Option<&Path>) 
     let resolved = async_fs::canonicalize(&full)
         .await
         .or_else(|_| Ok::<PathBuf, io::Error>(full.clone()))
-        .map_err(|e| {
-            NanobotError::tool_execution(
-                "filesystem",
-                anyhow::anyhow!("resolving path {}: {}", full.display(), e),
-            )
-        })?;
+        .map_err(|e| tool_error!("filesystem", "resolving path {}: {}", full.display(), e))?;
 
     if let Some(allowed) = allowed_dir {
         let allowed = async_fs::canonicalize(allowed)
             .await
             .or_else(|_| Ok::<PathBuf, io::Error>(allowed.to_path_buf()))
             .map_err(|e| {
-                NanobotError::tool_execution(
+                tool_error!(
                     "filesystem",
-                    anyhow::anyhow!("resolving allowed dir {}: {}", allowed.display(), e),
+                    "resolving allowed dir {}: {}",
+                    allowed.display(),
+                    e
                 )
             })?;
         // Enforce workspace boundary for both read and write operations.
         if !resolved.starts_with(&allowed) {
-            return Err(NanobotError::tool_execution(
+            return Err(tool_error!(
                 "filesystem",
-                anyhow::anyhow!(
-                    "path {} is outside allowed directory {}",
-                    path,
-                    allowed.display()
-                ),
+                "path {} is outside allowed directory {}",
+                path,
+                allowed.display()
             ));
         }
     }
