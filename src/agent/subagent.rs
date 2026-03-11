@@ -18,6 +18,10 @@ use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
 use crate::types::task::TaskId;
 
+const SUBAGENT_PROMPT_TEMPLATE: &str =
+    "# Subagent\n\nCurrent Time: {runtime}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{workspace}";
+const SUBAGENT_SKILLS_PREAMBLE: &str = "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n";
+
 struct SubagentManagerInner {
     provider: Arc<dyn LLMProvider>,
     workspace: std::path::PathBuf,
@@ -311,18 +315,13 @@ async fn run_subagent_loop_impl(
     let runtime = chrono::Local::now()
         .format("%Y-%m-%d %H:%M (%A)")
         .to_string();
-    let mut parts = vec![format!(
-        "# Subagent\n\nCurrent Time: {}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{}",
-        runtime,
-        workspace.display(),
-    )];
+    let mut parts = vec![SUBAGENT_PROMPT_TEMPLATE
+        .replace("{runtime}", &runtime)
+        .replace("{workspace}", &workspace.display().to_string())];
 
     let skills = SkillsLoader::new(workspace).build_skills_summary().await;
     if !skills.trim().is_empty() {
-        parts.push(format!(
-            "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{}",
-            skills
-        ));
+        parts.push(format!("{SUBAGENT_SKILLS_PREAMBLE}{skills}"));
     }
 
     let system_prompt = parts.join("\n\n");

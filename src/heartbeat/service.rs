@@ -1,9 +1,8 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -11,9 +10,12 @@ use tracing::{error, info};
 
 use crate::observability::TARGET_HEARTBEAT;
 use crate::provider::{ChatMessage, ChatRequest, LLMProvider};
-use crate::tools::base::{JsonSchema, ToolDefinition, parse_args};
 use crate::types::SessionKey;
 use crate::types::heartbeat::HeartbeatDecisionArgs;
+
+const HEARTBEAT_SYSTEM_PROMPT: &str = "You are a heartbeat agent. Review HEARTBEAT.md and reply with JSON only: {\"action\":\"run|skip\",\"tasks\":\"...\"}. Use action=skip and empty tasks when no active tasks exist.";
+const HEARTBEAT_USER_PROMPT_PREFIX: &str =
+    "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n";
 
 #[async_trait]
 pub trait HeartbeatExecuteHandler: Send + Sync {
@@ -82,13 +84,13 @@ impl HeartbeatService {
         let this = self.clone();
         let handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(this.interval_s)).await;
                 if !this.running.load(Ordering::SeqCst) {
                     break;
                 }
                 if let Err(err) = this.tick().await {
                     error!(target: TARGET_HEARTBEAT, "heartbeat tick failed: {}", err);
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(this.interval_s)).await;
             }
         });
 
@@ -175,36 +177,18 @@ impl HeartbeatService {
             .filter(|s| !s.is_empty())
     }
 
-    fn definition(&self) -> ToolDefinition {
-        let mut props = BTreeMap::new();
-        props.insert(
-            "action".to_string(),
-            JsonSchema::string(None).with_enum(vec!["skip", "run"]),
-        );
-        props.insert("tasks".to_string(), JsonSchema::string(None));
-        ToolDefinition::function(
-            "heartbeat",
-            "Report heartbeat decision after reviewing tasks.",
-            JsonSchema::object(props, vec!["action"]),
-        )
-    }
-
     async fn decide(&self, content: &str) -> Result<(String, String)> {
-        let tool = self.definition();
         let response = self
             .provider
             .chat(ChatRequest {
                 session_key: Some(SessionKey::from("system:heartbeat")),
                 messages: vec![
                     ChatMessage::system_text(
-                        "You are a heartbeat agent. Call the heartbeat tool to report your decision.",
+                        HEARTBEAT_SYSTEM_PROMPT,
                     ),
-                    ChatMessage::user_text(format!(
-                        "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n{}",
-                        content
-                    )),
+                    ChatMessage::user_text(format!("{HEARTBEAT_USER_PROMPT_PREFIX}{content}")),
                 ],
-                tools: Some(vec![tool]),
+                tools: None,
                 model: Some(self.model.clone()),
                 max_tokens: 512,
                 temperature: 0.0,
@@ -212,13 +196,65 @@ impl HeartbeatService {
             })
             .await;
 
-        if !response.has_tool_calls() {
+        let Some(content) = response.content.as_deref() else {
             return Ok(("skip".to_string(), String::new()));
+        };
+
+        let parsed = Self::parse_decision_response(content)?;
+        Ok((parsed.action.trim().to_lowercase(), parsed.tasks))
+    }
+
+    fn parse_decision_response(content: &str) -> Result<HeartbeatDecisionArgs> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            bail!("heartbeat response was empty");
         }
 
-        let parsed: HeartbeatDecisionArgs = parse_args(&response.tool_calls[0].arguments_json)?;
+        if let Ok(parsed) = serde_json::from_str::<HeartbeatDecisionArgs>(trimmed) {
+            return Ok(parsed);
+        }
 
-        Ok((parsed.action, parsed.tasks))
+        if let Some(extracted) = Self::extract_json_block(trimmed) {
+            if let Ok(parsed) = serde_json::from_str::<HeartbeatDecisionArgs>(&extracted) {
+                return Ok(parsed);
+            }
+        }
+
+        if let Some(extracted) = Self::extract_json_object(trimmed) {
+            if let Ok(parsed) = serde_json::from_str::<HeartbeatDecisionArgs>(&extracted) {
+                return Ok(parsed);
+            }
+        }
+
+        bail!("heartbeat response did not contain valid JSON")
+    }
+
+    fn extract_json_block(content: &str) -> Option<String> {
+        let mut parts = content.split("```");
+        let mut index = 0;
+        while let Some(part) = parts.next() {
+            if index % 2 == 1 {
+                let mut block = part.trim_start();
+                if let Some(stripped) = block.strip_prefix("json") {
+                    block = stripped;
+                }
+                let block = block.trim();
+                if block.starts_with('{') && block.ends_with('}') {
+                    return Some(block.to_string());
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn extract_json_object(content: &str) -> Option<String> {
+        let start = content.find('{')?;
+        let end = content.rfind('}')?;
+        if start >= end {
+            return None;
+        }
+        Some(content[start..=end].to_string())
     }
 }
 
@@ -226,7 +262,7 @@ impl HeartbeatService {
 mod tests {
     use super::*;
 
-    use crate::types::provider::{LLMResponse, ToolCallRequest, UsageStats};
+    use crate::types::provider::{LLMResponse, UsageStats};
 
     struct StubProvider {
         responses: Mutex<Vec<LLMResponse>>,
@@ -297,13 +333,9 @@ mod tests {
 
     fn run_decision(tasks: &str) -> LLMResponse {
         LLMResponse {
-            content: None,
-            tool_calls: vec![ToolCallRequest {
-                id: "tc1".to_string(),
-                name: "heartbeat".into(),
-                arguments_json: format!(r#"{{"action":"run","tasks":"{}"}}"#, tasks),
-            }],
-            finish_reason: "tool_calls".to_string(),
+            content: Some(format!(r#"{{"action":"run","tasks":"{}"}}"#, tasks)),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
             usage: UsageStats::default(),
             reasoning_content: None,
             thinking_blocks: None,
@@ -312,13 +344,23 @@ mod tests {
 
     fn skip_decision() -> LLMResponse {
         LLMResponse {
-            content: None,
-            tool_calls: vec![ToolCallRequest {
-                id: "tc1".to_string(),
-                name: "heartbeat".into(),
-                arguments_json: r#"{"action":"skip","tasks":""}"#.to_string(),
-            }],
-            finish_reason: "tool_calls".to_string(),
+            content: Some(r#"{"action":"skip","tasks":""}"#.to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
+            usage: UsageStats::default(),
+            reasoning_content: None,
+            thinking_blocks: None,
+        }
+    }
+
+    fn run_decision_block(tasks: &str) -> LLMResponse {
+        LLMResponse {
+            content: Some(format!(
+                "Decision:\n```json\n{{\"action\":\"run\",\"tasks\":\"{}\"}}\n```",
+                tasks
+            )),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
             usage: UsageStats::default(),
             reasoning_content: None,
             thinking_blocks: None,
@@ -353,6 +395,37 @@ mod tests {
 
         let provider: Arc<dyn LLMProvider> =
             Arc::new(StubProvider::new(vec![run_decision("finish docs")]));
+        let service = HeartbeatService::new(
+            workspace.clone(),
+            provider,
+            "openai/gpt-4o-mini".to_string(),
+            60,
+            true,
+        );
+        let exec = Arc::new(ExecRecorder {
+            seen: Mutex::new(Vec::new()),
+            response: "done".to_string(),
+        });
+        service.register_on_execute_handler(exec.clone()).await;
+
+        let out = service.trigger_now().await;
+        assert_eq!(out.as_deref(), Some("done"));
+
+        let seen = exec.seen.lock().await.clone();
+        assert_eq!(seen, vec!["finish docs".to_string()]);
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn trigger_now_parses_json_from_code_block() {
+        let workspace = temp_workspace("code-block");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::write(workspace.join("HEARTBEAT.md"), "- check project")
+            .expect("write heartbeat file");
+
+        let provider: Arc<dyn LLMProvider> =
+            Arc::new(StubProvider::new(vec![run_decision_block("finish docs")]));
         let service = HeartbeatService::new(
             workspace.clone(),
             provider,

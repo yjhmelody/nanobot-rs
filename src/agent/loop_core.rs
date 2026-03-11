@@ -15,7 +15,7 @@ use crate::bus::{InboundCommand, InboundMessage, MessageBus, MessageMetadata, Ou
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
 use crate::provider::LLMProvider;
-use crate::session::{JsonlSessionStore, Session, SessionEntry};
+use crate::session::{Session, SessionEntry, SessionManager};
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
@@ -32,11 +32,10 @@ pub struct AgentLoop {
     pub(crate) max_tokens: i32,
     pub(crate) memory_window: usize,
     pub(crate) reasoning_effort: Option<String>,
-    pub(crate) consolidation_config: crate::session::ConsolidationConfig,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) mcp: Option<Arc<MCPManager>>,
     pub(crate) context: ContextBuilder,
-    pub(crate) sessions: Arc<JsonlSessionStore>,
+    pub(crate) sessions: Arc<SessionManager>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_tasks: Arc<DashMap<SessionKey, DashMap<TaskId, AbortHandle>>>,
@@ -438,7 +437,7 @@ impl AgentLoop {
             "tool registry turn state reset"
         );
 
-        let history = session.get_history(self.memory_window);
+        let history = self.sessions.get_history(&session, self.memory_window).await?;
         let history_len = history.len();
         debug!(
             target: TARGET_AGENT,
@@ -450,6 +449,8 @@ impl AgentLoop {
         let messages = self
             .context
             .build_messages(
+                &self.sessions,
+                session_key.as_str(),
                 history,
                 msg.content_text(),
                 if msg.media.is_empty() {
@@ -488,24 +489,8 @@ impl AgentLoop {
 
         self.save_turn(&mut session, outcome.messages, start_index);
 
-        // Try to consolidate session if needed
-        if let Err(e) = crate::session::consolidate_session(
-            &mut session,
-            self.provider.as_ref(),
-            &self.model,
-            &self.consolidation_config,
-        )
-        .await
-        {
-            tracing::warn!(
-                target: TARGET_AGENT,
-                session_key = %session_key,
-                error = %e,
-                "failed to consolidate session, continuing without consolidation"
-            );
-        }
-
-        self.sessions.save(&session).await?;
+        // SessionManager handles consolidation internally via its strategy
+        self.sessions.save(&mut session).await?;
         debug!(
             target: TARGET_AGENT,
             session_key = %session_key,
@@ -558,7 +543,7 @@ impl AgentLoop {
                 let session_key = msg.session_key();
                 let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
                 session.clear();
-                self.sessions.save(&session).await?;
+                self.sessions.save(&mut session).await?;
                 self.sessions.invalidate(&session.key).await;
                 self.provider.reset_session(&session_key).await;
                 debug!(

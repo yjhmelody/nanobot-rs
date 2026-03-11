@@ -3,17 +3,21 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::Local;
 
-use crate::agent::memory::MemoryStore;
 use crate::agent::skills::SkillsLoader;
+use crate::session::SessionManager;
 use crate::types::provider::{
     AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole,
 };
+
+const IDENTITY_PROMPT_TEMPLATE: &str =
+    "# nanobot :cat:\n\nYou are nanobot, a helpful AI assistant.\n\n## Runtime\nRust runtime\n\n## Workspace\nYour workspace is at: {workspace}\n- Long-term memory: {workspace}/memory/MEMORY.md\n- History log: {workspace}/memory/HISTORY.md\n- Custom skills: {workspace}/skills/{skill-name}/SKILL.md\n\n## nanobot Guidelines\n- State intent before tool calls, but NEVER predict or claim results before receiving them.\n- Before modifying a file, read it first. Do not assume files or directories exist.\n- After writing or editing a file, re-read it if accuracy matters.\n- If a tool call fails, analyze the error before retrying with a different approach.\n- Ask for clarification when the request is ambiguous.\n\nReply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.";
+const SKILLS_SUMMARY_PREAMBLE: &str =
+    "# Skills\n\nThe following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.\nSkills with available=\"false\" need dependencies installed first - you can try installing them with apt/brew.\n\n";
 
 // TODO: design a cache for context
 #[derive(Debug, Clone)]
 pub struct ContextBuilder {
     workspace: PathBuf,
-    memory: MemoryStore,
     skills: SkillsLoader,
 }
 
@@ -41,15 +45,10 @@ impl ContextBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if the memory store cannot be initialized.
+    /// Returns an error if initialization fails.
     pub fn new(workspace: PathBuf) -> Result<Self> {
-        let memory = MemoryStore::new(&workspace)?;
         let skills = SkillsLoader::new(&workspace);
-        Ok(Self {
-            workspace,
-            memory,
-            skills,
-        })
+        Ok(Self { workspace, skills })
     }
 
     /// Builds the system prompt for the agent.
@@ -57,22 +56,36 @@ impl ContextBuilder {
     /// The system prompt includes:
     /// - Agent identity and role
     /// - Bootstrap files content (if available)
-    /// - Memory context (short-term and long-term)
+    /// - Memory context (from SessionManager)
     /// - Active skills (always-on skills)
     /// - Available skills summary
+    ///
+    /// # Arguments
+    ///
+    /// * `session_manager` - Session manager for retrieving memory context
+    /// * `session_key` - Current session key for memory lookup
     ///
     /// # Returns
     ///
     /// Returns the complete system prompt as a string.
-    pub async fn build_system_prompt(&self) -> String {
+    pub async fn build_system_prompt(
+        &self,
+        session_manager: &SessionManager,
+        session_key: &str,
+    ) -> String {
         let mut parts = vec![self.identity_section()];
 
+        // TODO: watch these files for changes and update context cache
         let bootstrap = self.load_bootstrap_files().await;
         if !bootstrap.trim().is_empty() {
             parts.push(bootstrap);
         }
 
-        let memory = self.memory.get_memory_context().await;
+        // Get memory context from SessionManager
+        let memory = session_manager
+            .get_memory_context("", session_key)
+            .await
+            .unwrap_or_default();
         if !memory.trim().is_empty() {
             parts.push(format!("# Memory\n\n{}", memory));
         }
@@ -87,10 +100,7 @@ impl ContextBuilder {
 
         let summary = self.skills.build_skills_summary().await;
         if !summary.trim().is_empty() {
-            parts.push(format!(
-                "# Skills\n\nThe following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.\nSkills with available=\"false\" need dependencies installed first - you can try installing them with apt/brew.\n\n{}",
-                summary
-            ));
+            parts.push(format!("{SKILLS_SUMMARY_PREAMBLE}{summary}"));
         }
 
         parts.join("\n\n---\n\n")
@@ -105,6 +115,8 @@ impl ContextBuilder {
     ///
     /// # Arguments
     ///
+    /// * `session_manager` - Session manager for retrieving memory context
+    /// * `session_key` - Current session key for memory lookup
     /// * `history` - Previous conversation messages
     /// * `current_message` - The new user message text
     /// * `media` - Optional media attachments (URLs or paths)
@@ -116,6 +128,8 @@ impl ContextBuilder {
     /// Returns a vector of chat messages ready for the LLM API.
     pub async fn build_messages(
         &self,
+        session_manager: &SessionManager,
+        session_key: &str,
         history: impl IntoIterator<Item = ChatMessage>,
         current_message: &str,
         media: Option<&[String]>,
@@ -134,7 +148,9 @@ impl ContextBuilder {
         };
 
         let mut messages = Vec::new();
-        messages.push(ChatMessage::system_text(self.build_system_prompt().await));
+        messages.push(ChatMessage::system_text(
+            self.build_system_prompt(session_manager, session_key).await,
+        ));
         messages.extend(history);
         messages.push(ChatMessage {
             role: MessageRole::User,
@@ -227,10 +243,7 @@ impl ContextBuilder {
 
     fn identity_section(&self) -> String {
         let workspace = self.workspace.display().to_string();
-        format!(
-            "# nanobot :cat:\n\nYou are nanobot, a helpful AI assistant.\n\n## Runtime\nRust runtime\n\n## Workspace\nYour workspace is at: {}\n- Long-term memory: {}/memory/MEMORY.md\n- History log: {}/memory/HISTORY.md\n- Custom skills: {}/skills/{{skill-name}}/SKILL.md\n\n## nanobot Guidelines\n- State intent before tool calls, but NEVER predict or claim results before receiving them.\n- Before modifying a file, read it first. Do not assume files or directories exist.\n- After writing or editing a file, re-read it if accuracy matters.\n- If a tool call fails, analyze the error before retrying with a different approach.\n- Ask for clarification when the request is ambiguous.\n\nReply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.",
-            workspace, workspace, workspace, workspace
-        )
+        IDENTITY_PROMPT_TEMPLATE.replace("{workspace}", &workspace)
     }
 
     async fn load_bootstrap_files(&self) -> String {
@@ -345,26 +358,50 @@ mod tests {
 
     #[tokio::test]
     async fn build_system_prompt_includes_identity() {
-        let workspace = temp_workspace("system-prompt");
-        fs::create_dir_all(&workspace).expect("create workspace");
+        use crate::session::{JsonlSessionStore, SessionManager};
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().expect("create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
 
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
-        let prompt = builder.build_system_prompt().await;
+        let store = JsonlSessionStore::new(&workspace)
+            .await
+            .expect("create store");
+        let session_manager = SessionManager::new(Box::new(store));
+
+        let prompt = builder
+            .build_system_prompt(&session_manager, "test-session")
+            .await;
 
         assert!(prompt.contains("nanobot"));
         assert!(prompt.contains(&workspace.display().to_string()));
-
-        let _ = fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]
     async fn build_messages_includes_system_and_user() {
-        let workspace = temp_workspace("messages");
-        fs::create_dir_all(&workspace).expect("create workspace");
+        use crate::session::{JsonlSessionStore, SessionManager};
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().expect("create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
 
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
+        let store = JsonlSessionStore::new(&workspace)
+            .await
+            .expect("create store");
+        let session_manager = SessionManager::new(Box::new(store));
+
         let messages = builder
-            .build_messages(vec![], "Hello", None, Some("cli"), Some("direct"))
+            .build_messages(
+                &session_manager,
+                "test-session",
+                vec![],
+                "Hello",
+                None,
+                Some("cli"),
+                Some("direct"),
+            )
             .await;
 
         assert!(messages.len() >= 2);
@@ -374,23 +411,37 @@ mod tests {
         let user_content = messages[1].content_as_text().unwrap_or("");
         assert!(user_content.contains("Hello"));
         assert!(user_content.contains("Channel: cli"));
-
-        let _ = fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]
     async fn build_messages_includes_history() {
-        let workspace = temp_workspace("history");
-        fs::create_dir_all(&workspace).expect("create workspace");
+        use crate::session::{JsonlSessionStore, SessionManager};
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().expect("create temp dir");
+        let workspace = temp_dir.path().to_path_buf();
 
         let builder = ContextBuilder::new(workspace.clone()).expect("new builder");
+        let store = JsonlSessionStore::new(&workspace)
+            .await
+            .expect("create store");
+        let session_manager = SessionManager::new(Box::new(store));
+
         let history = vec![
             ChatMessage::user_text("Previous question"),
             ChatMessage::assistant(Some("Previous answer".to_string()), None, None, None),
         ];
 
         let messages = builder
-            .build_messages(history, "New question", None, None, None)
+            .build_messages(
+                &session_manager,
+                "test-session",
+                history,
+                "New question",
+                None,
+                None,
+                None,
+            )
             .await;
 
         // System + 2 history + 1 new user
@@ -399,8 +450,6 @@ mod tests {
         assert!(matches!(messages[1].role, MessageRole::User));
         assert!(matches!(messages[2].role, MessageRole::Assistant));
         assert!(matches!(messages[3].role, MessageRole::User));
-
-        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]

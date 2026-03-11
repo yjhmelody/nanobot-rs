@@ -9,7 +9,10 @@ use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, MCPServerConfig, WebToolsConfig};
 use crate::cron::CronService;
 use crate::provider::LLMProvider;
-use crate::session::{ConsolidationConfig, JsonlSessionStore};
+use crate::session::{
+    ConsolidationConfig, FileMemoryProvider, JsonlSessionStore, LlmConsolidationStrategy,
+    SessionManager,
+};
 use crate::tools::acp::ACPTool;
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolRegistry, ToolRegistryBuilder};
@@ -167,7 +170,24 @@ impl AgentLoopBuilder {
     /// - Session manager initialization fails
     pub async fn build(self) -> Result<AgentLoop> {
         let context = ContextBuilder::new(self.workspace.clone())?;
-        let sessions = Arc::new(JsonlSessionStore::new(&self.workspace).await?);
+        let store = JsonlSessionStore::new(&self.workspace).await?;
+
+        // Build SessionManager with consolidation and memory providers
+        let mut session_manager = SessionManager::new(Box::new(store));
+
+        // Add LLM-based consolidation strategy
+        let consolidation_strategy = LlmConsolidationStrategy::new(
+            self.provider.clone(),
+            self.config.model.clone(),
+            self.consolidation_config.clone(),
+        );
+        session_manager = session_manager.with_consolidation(Box::new(consolidation_strategy));
+
+        // Add file-based memory provider
+        let memory_provider = FileMemoryProvider::new(&self.workspace)?;
+        session_manager = session_manager.add_memory_provider(Box::new(memory_provider));
+
+        let sessions = Arc::new(session_manager);
         let tools = self.build_tool_registry()?;
 
         // Create SubagentManager with ToolRegistry
@@ -201,7 +221,6 @@ impl AgentLoopBuilder {
             max_tokens: self.config.max_tokens,
             memory_window: self.config.memory_window,
             reasoning_effort: self.config.reasoning_effort,
-            consolidation_config: self.consolidation_config,
             tools,
             mcp,
             context,
