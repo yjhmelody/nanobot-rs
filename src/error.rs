@@ -122,10 +122,7 @@ pub enum NanobotError {
 
     /// Channel adapter error.
     #[error("Channel '{channel}' error: {message}")]
-    Channel {
-        channel: String,
-        message: String,
-    },
+    Channel { channel: String, message: String },
 
     /// Generic error for cases not covered by specific variants.
     #[error(transparent)]

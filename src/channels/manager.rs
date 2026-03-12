@@ -77,13 +77,9 @@ impl ChannelManager {
                     continue;
                 }
                 if let Some(channel) = channels.get(&msg.channel) {
-                    if let Err(err) = dispatch_outbound(
-                        channel.as_ref(),
-                        &mut stream_registry,
-                        msg,
-                        stream_mode,
-                    )
-                    .await
+                    if let Err(err) =
+                        dispatch_outbound(channel.as_ref(), &mut stream_registry, msg, stream_mode)
+                            .await
                     {
                         error!(
                             target: TARGET_CHANNELS,

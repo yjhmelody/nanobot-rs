@@ -234,11 +234,7 @@ fn guard_command(
             let allowed_dir = allowed_dir.canonicalize().map_err(|e| {
                 NanobotError::tool_execution(
                     "exec",
-                    anyhow::anyhow!(
-                        "canonicalizing workspace {}: {}",
-                        allowed_dir.display(),
-                        e
-                    ),
+                    anyhow::anyhow!("canonicalizing workspace {}: {}", allowed_dir.display(), e),
                 )
             })?;
             if cwd != allowed_dir && !cwd.starts_with(&allowed_dir) {
@@ -320,11 +316,7 @@ fn resolve_working_dir(
         let allowed_dir = allowed_dir.canonicalize().map_err(|e| {
             NanobotError::tool_execution(
                 "exec",
-                anyhow::anyhow!(
-                    "canonicalizing workspace {}: {}",
-                    allowed_dir.display(),
-                    e
-                ),
+                anyhow::anyhow!("canonicalizing workspace {}: {}", allowed_dir.display(), e),
             )
         })?;
         if resolved != allowed_dir && !resolved.starts_with(&allowed_dir) {

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::SessionKey;
 use crate::bus::MessageId;
+use crate::types::SessionKey;
 
 /// Context information passed into tool execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

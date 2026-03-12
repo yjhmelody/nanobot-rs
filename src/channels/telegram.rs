@@ -181,7 +181,8 @@ impl ChannelAdapter for TelegramChannel {
 
         let mut last_message_id = None;
         for chunk in split_text(&msg.content, TELEGRAM_TEXT_LIMIT) {
-            let response = self.client
+            let response = self
+                .client
                 .post(self.endpoint("sendMessage"))
                 .json(&TelegramSendMessage {
                     chat_id,
@@ -208,10 +209,7 @@ impl ChannelAdapter for TelegramChannel {
             NanobotError::channel("telegram", format!("invalid chat_id '{}'", msg.chat_id))
         })?;
         let message_id = message_id.parse::<i64>().map_err(|_| {
-            NanobotError::channel(
-                "telegram",
-                format!("invalid message_id '{}'", message_id),
-            )
+            NanobotError::channel("telegram", format!("invalid message_id '{}'", message_id))
         })?;
         let text = truncate_text(&msg.content, TELEGRAM_TEXT_LIMIT);
 

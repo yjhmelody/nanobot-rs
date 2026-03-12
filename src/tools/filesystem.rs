@@ -18,11 +18,13 @@ use crate::types::tools::{EditFileArgs, ListDirArgs, ReadFileArgs, WriteFileArgs
 const READ_FILE_DESC: &str = "Read the contents of a file at the given path.";
 const READ_FILE_PATH_DESC: &str = "The file path to read";
 
-const WRITE_FILE_DESC: &str = "Write content to a file at the given path. Creates parent directories if needed.";
+const WRITE_FILE_DESC: &str =
+    "Write content to a file at the given path. Creates parent directories if needed.";
 const WRITE_FILE_PATH_DESC: &str = "The file path to write to";
 const WRITE_FILE_CONTENT_DESC: &str = "The content to write";
 
-const EDIT_FILE_DESC: &str = "Edit a file by replacing old_text with new_text. The old_text must exist exactly in the file.";
+const EDIT_FILE_DESC: &str =
+    "Edit a file by replacing old_text with new_text. The old_text must exist exactly in the file.";
 const EDIT_FILE_PATH_DESC: &str = "The file path to edit";
 const EDIT_FILE_OLD_TEXT_DESC: &str = "The exact text to find and replace";
 const EDIT_FILE_NEW_TEXT_DESC: &str = "The text to replace with";

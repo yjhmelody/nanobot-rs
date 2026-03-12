@@ -17,12 +17,14 @@ use crate::tools::config::SharedToolConfig;
 // Tool descriptions
 const SEARCH_FILES_DESC: &str = "Search for text in files using ripgrep. Fast full-text search across the codebase with regex support.";
 const SEARCH_FILES_QUERY_DESC: &str = "Search query (supports regex if regex=true)";
-const SEARCH_FILES_PATH_DESC: &str = "Directory or file to search (optional, defaults to workspace root)";
+const SEARCH_FILES_PATH_DESC: &str =
+    "Directory or file to search (optional, defaults to workspace root)";
 const SEARCH_FILES_CASE_SENSITIVE_DESC: &str = "Case sensitive search (default: false)";
 const SEARCH_FILES_REGEX_DESC: &str = "Treat query as regex (default: false)";
 const SEARCH_FILES_FILE_PATTERN_DESC: &str = "File pattern to filter (e.g., '*.rs', '*.{js,ts}')";
 const SEARCH_FILES_LIMIT_DESC: &str = "Maximum number of results (default: 50)";
-const SEARCH_FILES_CONTEXT_LINES_DESC: &str = "Number of context lines before/after match (default: 2)";
+const SEARCH_FILES_CONTEXT_LINES_DESC: &str =
+    "Number of context lines before/after match (default: 2)";
 
 const GREP_CODE_DESC: &str = "Search for text in code files with language-specific filtering. Automatically excludes common non-code files.";
 const GREP_CODE_QUERY_DESC: &str = "Search query";
@@ -30,7 +32,8 @@ const GREP_CODE_PATH_DESC: &str = "Directory to search (optional, defaults to wo
 const GREP_CODE_LANGUAGE_DESC: &str = "Filter by language (e.g., 'rust', 'python', 'javascript')";
 const GREP_CODE_CASE_SENSITIVE_DESC: &str = "Case sensitive search (default: false)";
 const GREP_CODE_LIMIT_DESC: &str = "Maximum number of results (default: 50)";
-const GREP_CODE_CONTEXT_LINES_DESC: &str = "Number of context lines before/after match (default: 2)";
+const GREP_CODE_CONTEXT_LINES_DESC: &str =
+    "Number of context lines before/after match (default: 2)";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

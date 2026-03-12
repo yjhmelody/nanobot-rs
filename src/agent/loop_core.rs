@@ -11,7 +11,9 @@ use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, debug_span, error, info, trace};
 
 use crate::agent::ContextProvider;
-use crate::agent::react::{ExecutionContext, LoopOutcome, ModelConfig, ProgressEmitter, ReActExecutor};
+use crate::agent::react::{
+    ExecutionContext, LoopOutcome, ModelConfig, ProgressEmitter, ReActExecutor,
+};
 use crate::agent::traits::Agent;
 use crate::bus::{
     InboundCommand, InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage,
@@ -353,9 +355,7 @@ impl AgentLoop {
                     );
                 }
                 if self.send_usage_summary {
-                    if let Some(usage_text) =
-                        out.usage.as_ref().and_then(format_usage_summary)
-                    {
+                    if let Some(usage_text) = out.usage.as_ref().and_then(format_usage_summary) {
                         let usage_msg = OutboundMessage {
                             channel: out.message.channel.clone(),
                             chat_id: out.message.chat_id.clone(),
@@ -593,17 +593,17 @@ impl AgentLoop {
         Ok(Some(OutboundEnvelope {
             usage: outcome.usage.clone(),
             message: OutboundMessage {
-            channel: msg.channel,
-            chat_id: msg.chat_id,
-            content: outcome.final_content.unwrap_or_else(|| {
-                "I've completed processing but have no response to give.".to_string()
-            }),
-            reply_to,
-            media: Vec::new(),
-            metadata: MessageMetadata {
-                message_id: msg.metadata.message_id,
-                stream_id: Some(stream_id),
-            },
+                channel: msg.channel,
+                chat_id: msg.chat_id,
+                content: outcome.final_content.unwrap_or_else(|| {
+                    "I've completed processing but have no response to give.".to_string()
+                }),
+                reply_to,
+                media: Vec::new(),
+                metadata: MessageMetadata {
+                    message_id: msg.metadata.message_id,
+                    stream_id: Some(stream_id),
+                },
             },
         }))
     }

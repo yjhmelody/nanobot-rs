@@ -184,7 +184,7 @@ impl Tool for ACPTool {
 
     fn definition(&self) -> Arc<ToolDefinition> {
         static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
-        DEF.get_or_init(||{
+        DEF.get_or_init(|| {
             Arc::new(tool_definition_from_json(json!({
                 "type": "function",
                 "function": {
@@ -207,7 +207,8 @@ impl Tool for ACPTool {
                     }
                 }
             })))
-        }).clone()
+        })
+        .clone()
     }
 
     async fn execute(&self, args_json: &str, _context: &ToolContext) -> Result<String> {
