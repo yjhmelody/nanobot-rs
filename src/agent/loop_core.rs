@@ -23,7 +23,7 @@ use crate::session::{Session, SessionEntry, SessionManager};
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
-use crate::types::provider::{ChatMessage, MessageContent, MessageRole};
+use crate::types::provider::{ChatMessage, MessageContent, MessageRole, UsageStats};
 use crate::types::task::TaskId;
 
 pub struct AgentLoop {
@@ -36,6 +36,7 @@ pub struct AgentLoop {
     pub(crate) max_tokens: i32,
     pub(crate) memory_window: usize,
     pub(crate) reasoning_effort: Option<String>,
+    pub(crate) send_usage_summary: bool,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) mcp: Option<Arc<MCPManager>>,
     pub(crate) context: Arc<dyn ContextProvider>,
@@ -44,6 +45,11 @@ pub struct AgentLoop {
     pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) active_tasks: Arc<DashMap<SessionKey, DashMap<TaskId, AbortHandle>>>,
     pub(crate) last_cleanup: Arc<Mutex<Instant>>,
+}
+
+struct OutboundEnvelope {
+    message: OutboundMessage,
+    usage: Option<UsageStats>,
 }
 
 impl AgentLoop {
@@ -198,7 +204,22 @@ impl AgentLoop {
         };
 
         let out = self.process_message(msg).await?;
-        let content = out.map(|m| m.content).unwrap_or_default();
+        let mut content = out
+            .as_ref()
+            .map(|m| m.message.content.clone())
+            .unwrap_or_default();
+        if self.send_usage_summary {
+            if let Some(usage_text) = out
+                .as_ref()
+                .and_then(|m| m.usage.as_ref())
+                .and_then(format_usage_summary)
+            {
+                if !content.is_empty() {
+                    content.push_str("\n\n");
+                }
+                content.push_str(&usage_text);
+            }
+        }
         debug!(
             target: TARGET_AGENT,
             session_key = %session_key,
@@ -323,13 +344,38 @@ impl AgentLoop {
 
         match self.process_message(msg.clone()).await {
             Ok(Some(out)) => {
-                if let Err(err) = self.bus.publish_outbound(out) {
+                if let Err(err) = self.bus.publish_outbound(out.message.clone()) {
                     error!(
                         target: TARGET_AGENT,
                         session_key = %session_key,
                         error = %err,
                         "failed to publish outbound message"
                     );
+                }
+                if self.send_usage_summary {
+                    if let Some(usage_text) =
+                        out.usage.as_ref().and_then(format_usage_summary)
+                    {
+                        let usage_msg = OutboundMessage {
+                            channel: out.message.channel.clone(),
+                            chat_id: out.message.chat_id.clone(),
+                            content: usage_text,
+                            reply_to: out.message.reply_to.clone(),
+                            media: Vec::new(),
+                            metadata: MessageMetadata {
+                                message_id: None,
+                                stream_id: out.message.metadata.stream_id.clone(),
+                            },
+                        };
+                        if let Err(err) = self.bus.publish_outbound(usage_msg) {
+                            error!(
+                                target: TARGET_AGENT,
+                                session_key = %session_key,
+                                error = %err,
+                                "failed to publish usage summary"
+                            );
+                        }
+                    }
                 }
             }
             Ok(None) => {
@@ -390,7 +436,7 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
-    async fn process_message(&self, msg: InboundMessage) -> Result<Option<OutboundMessage>> {
+    async fn process_message(&self, msg: InboundMessage) -> Result<Option<OutboundEnvelope>> {
         trace!(
             target: TARGET_AGENT,
             session_key = %msg.session_key(),
@@ -405,7 +451,12 @@ impl AgentLoop {
                 session_key = %msg.session_key(),
                 "routing message to system handler"
             );
-            return self.process_system_message(msg).await;
+            return self.process_system_message(msg).await.map(|msg| {
+                msg.map(|message| OutboundEnvelope {
+                    message,
+                    usage: None,
+                })
+            });
         }
 
         if let Some(command) = msg.command() {
@@ -415,7 +466,12 @@ impl AgentLoop {
                 command = %command.as_str(),
                 "routing message to builtin command handler"
             );
-            return self.process_builtin_command(msg, command).await;
+            return self.process_builtin_command(msg, command).await.map(|msg| {
+                msg.map(|message| OutboundEnvelope {
+                    message,
+                    usage: None,
+                })
+            });
         }
 
         let session_key = msg.session_key();
@@ -534,7 +590,9 @@ impl AgentLoop {
             return Ok(None);
         }
 
-        Ok(Some(OutboundMessage {
+        Ok(Some(OutboundEnvelope {
+            usage: outcome.usage.clone(),
+            message: OutboundMessage {
             channel: msg.channel,
             chat_id: msg.chat_id,
             content: outcome.final_content.unwrap_or_else(|| {
@@ -545,6 +603,7 @@ impl AgentLoop {
             metadata: MessageMetadata {
                 message_id: msg.metadata.message_id,
                 stream_id: Some(stream_id),
+            },
             },
         }))
     }
@@ -768,5 +827,23 @@ fn preview_text(text: &str, max_chars: usize) -> String {
         text.to_string()
     } else {
         format!("{}...", &text.chars().take(max_chars).collect::<String>())
+    }
+}
+
+fn format_usage_summary(usage: &UsageStats) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(v) = usage.prompt_tokens {
+        parts.push(format!("prompt={}", v));
+    }
+    if let Some(v) = usage.completion_tokens {
+        parts.push(format!("completion={}", v));
+    }
+    if let Some(v) = usage.total_tokens {
+        parts.push(format!("total={}", v));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Usage: {}", parts.join(", ")))
     }
 }

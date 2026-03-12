@@ -350,6 +350,19 @@ impl AgentDefaults {
 }
 
 /// Configuration for outbound channel adapters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum StreamMode {
+    #[default]
+    /// Edit the same message for both progress and final output.
+    UpdateAll,
+    /// Edit only progress messages; send final output as a new message.
+    UpdateProgress,
+    /// Always send new messages; never edit.
+    Append,
+}
+
+/// Configuration for outbound channel adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ChannelsConfig {
@@ -357,6 +370,10 @@ pub struct ChannelsConfig {
     pub send_progress: bool,
     /// Emit tool hints when tools are invoked.
     pub send_tool_hints: bool,
+    /// Send a usage summary message after the final response.
+    pub send_usage_summary: bool,
+    /// Streaming message behavior for adapters that support edits.
+    pub stream_mode: StreamMode,
     /// Telegram channel configuration.
     pub telegram: GenericChannelConfig,
     /// Discord channel configuration.
@@ -370,6 +387,8 @@ impl Default for ChannelsConfig {
         Self {
             send_progress: true,
             send_tool_hints: false,
+            send_usage_summary: false,
+            stream_mode: StreamMode::UpdateAll,
             telegram: GenericChannelConfig::default(),
             discord: GenericChannelConfig::default(),
             feishu: GenericChannelConfig::default(),

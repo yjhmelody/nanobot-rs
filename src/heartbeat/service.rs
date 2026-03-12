@@ -85,13 +85,13 @@ impl HeartbeatService {
         let this = self.clone();
         let handle = tokio::spawn(async move {
             loop {
+                tokio::time::sleep(std::time::Duration::from_secs(this.interval_s)).await;
                 if !this.running.load(Ordering::SeqCst) {
                     break;
                 }
                 if let Err(err) = this.tick().await {
                     error!(target: TARGET_HEARTBEAT, "heartbeat tick failed: {}", err);
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(this.interval_s)).await;
             }
         });
 

@@ -11,7 +11,7 @@ use crate::channels::base::ChannelAdapter;
 use crate::channels::cli::CliChannel;
 use crate::channels::placeholder::PlaceholderChannel;
 use crate::channels::telegram::TelegramChannel;
-use crate::config::schema::{ChannelsConfig, GenericChannelConfig};
+use crate::config::schema::{ChannelsConfig, GenericChannelConfig, StreamMode};
 use crate::observability::TARGET_CHANNELS;
 
 pub struct ChannelManager {
@@ -63,6 +63,7 @@ impl ChannelManager {
         let channels = self.channels.clone();
         let send_progress = self.config.send_progress;
         let send_tool_hints = self.config.send_tool_hints;
+        let stream_mode = self.config.stream_mode;
 
         let handle = tokio::spawn(async move {
             info!(target: TARGET_CHANNELS, "outbound dispatcher started");
@@ -76,8 +77,13 @@ impl ChannelManager {
                     continue;
                 }
                 if let Some(channel) = channels.get(&msg.channel) {
-                    if let Err(err) =
-                        dispatch_outbound(channel.as_ref(), &mut stream_registry, msg).await
+                    if let Err(err) = dispatch_outbound(
+                        channel.as_ref(),
+                        &mut stream_registry,
+                        msg,
+                        stream_mode,
+                    )
+                    .await
                     {
                         error!(
                             target: TARGET_CHANNELS,
@@ -184,6 +190,7 @@ async fn dispatch_outbound(
     channel: &dyn ChannelAdapter,
     stream_registry: &mut HashMap<String, String>,
     msg: OutboundMessage,
+    stream_mode: StreamMode,
 ) -> crate::error::Result<()> {
     let is_tool_hint = msg
         .metadata
@@ -199,11 +206,16 @@ async fn dispatch_outbound(
         .unwrap_or(false);
     let stream_id = msg.metadata.stream_id.clone();
 
-    if !is_tool_hint {
+    if !is_tool_hint && stream_mode != StreamMode::Append {
         if let Some(stream_id) = stream_id {
             let key = format!("{}:{}:{}", msg.channel, msg.chat_id, stream_id);
             if let Some(message_id) = stream_registry.get(&key).cloned() {
                 if channel.supports_stream_updates() {
+                    if stream_mode == StreamMode::UpdateProgress && !is_progress {
+                        stream_registry.remove(&key);
+                        let _ = channel.send(msg).await?;
+                        return Ok(());
+                    }
                     channel.update(&message_id, msg).await?;
                     if !is_progress {
                         stream_registry.remove(&key);

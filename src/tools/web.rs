@@ -231,7 +231,7 @@ pub async fn execute_fetch(
 
     let res = client
         .get(&parsed.to_string())
-        .header("User-Agent", "Mozilla/5.0 nanobot-rs")
+        .header("User-Agent", "Mozilla/5.0")
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await;

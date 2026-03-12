@@ -72,6 +72,7 @@ impl Tool for ShellTool {
         execute(
             args_json,
             snapshot.workspace.as_path(),
+            snapshot.allowed_dir.as_deref(),
             snapshot.exec.timeout_secs,
             snapshot.exec.restrict_to_workspace,
             &snapshot.exec.path_append,
@@ -83,19 +84,24 @@ impl Tool for ShellTool {
 pub async fn execute(
     args_json: &str,
     default_working_dir: &Path,
+    allowed_dir: Option<&Path>,
     timeout_secs: u64,
     restrict_to_workspace: bool,
     path_append: &str,
 ) -> Result<String> {
     let typed = parse_args::<ExecArgs>(args_json)?;
     let command = typed.command;
+    let cwd = resolve_working_dir(
+        typed.working_dir.as_deref(),
+        default_working_dir,
+        if restrict_to_workspace {
+            allowed_dir
+        } else {
+            None
+        },
+    )?;
 
-    let cwd = typed
-        .working_dir
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| default_working_dir.to_path_buf());
-
-    guard_command(&command, &cwd, restrict_to_workspace)?;
+    guard_command(&command, &cwd, allowed_dir, restrict_to_workspace)?;
 
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-lc").arg(&command).current_dir(&cwd);
@@ -171,7 +177,12 @@ pub async fn execute(
     Ok(result)
 }
 
-fn guard_command(command: &str, cwd: &Path, restrict_to_workspace: bool) -> Result<()> {
+fn guard_command(
+    command: &str,
+    cwd: &Path,
+    allowed_dir: Option<&Path>,
+    restrict_to_workspace: bool,
+) -> Result<()> {
     let deny_patterns = [
         r"\brm\s+-[rf]{1,2}\b",
         r"\bdel\s+/[fq]\b",
@@ -206,6 +217,12 @@ fn guard_command(command: &str, cwd: &Path, restrict_to_workspace: bool) -> Resu
                 anyhow::anyhow!("command blocked by safety guard (path traversal detected)"),
             ));
         }
+        if command.contains("~/") || command.contains("~\\") {
+            return Err(NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("command blocked by safety guard (home path detected)"),
+            ));
+        }
 
         let cwd = cwd.canonicalize().map_err(|e| {
             NanobotError::tool_execution(
@@ -213,12 +230,35 @@ fn guard_command(command: &str, cwd: &Path, restrict_to_workspace: bool) -> Resu
                 anyhow::anyhow!("canonicalizing cwd {}: {}", cwd.display(), e),
             )
         })?;
+        if let Some(allowed_dir) = allowed_dir {
+            let allowed_dir = allowed_dir.canonicalize().map_err(|e| {
+                NanobotError::tool_execution(
+                    "exec",
+                    anyhow::anyhow!(
+                        "canonicalizing workspace {}: {}",
+                        allowed_dir.display(),
+                        e
+                    ),
+                )
+            })?;
+            if cwd != allowed_dir && !cwd.starts_with(&allowed_dir) {
+                return Err(NanobotError::tool_execution(
+                    "exec",
+                    anyhow::anyhow!("working_dir outside workspace"),
+                ));
+            }
+        }
         // Best-effort scan for absolute paths referenced in the shell string.
         for abs in extract_absolute_paths(command) {
             let p = std::path::PathBuf::from(abs);
             if p.is_absolute() {
                 if let Ok(resolved) = p.canonicalize() {
-                    if resolved != cwd && !resolved.starts_with(&cwd) {
+                    let base = if let Some(allowed_dir) = allowed_dir {
+                        allowed_dir
+                    } else {
+                        &cwd
+                    };
+                    if resolved != base && !resolved.starts_with(base) {
                         return Err(NanobotError::tool_execution(
                             "exec",
                             anyhow::anyhow!(
@@ -254,6 +294,50 @@ fn extract_absolute_paths(command: &str) -> Vec<String> {
     paths
 }
 
+fn resolve_working_dir(
+    working_dir: Option<&str>,
+    workspace: &Path,
+    allowed_dir: Option<&Path>,
+) -> Result<std::path::PathBuf> {
+    let raw_path = match working_dir {
+        Some(value) => std::path::PathBuf::from(value),
+        None => workspace.to_path_buf(),
+    };
+    let candidate = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        workspace.join(raw_path)
+    };
+
+    let resolved = candidate.canonicalize().map_err(|e| {
+        NanobotError::tool_execution(
+            "exec",
+            anyhow::anyhow!("canonicalizing working_dir {}: {}", candidate.display(), e),
+        )
+    })?;
+
+    if let Some(allowed_dir) = allowed_dir {
+        let allowed_dir = allowed_dir.canonicalize().map_err(|e| {
+            NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!(
+                    "canonicalizing workspace {}: {}",
+                    allowed_dir.display(),
+                    e
+                ),
+            )
+        })?;
+        if resolved != allowed_dir && !resolved.starts_with(&allowed_dir) {
+            return Err(NanobotError::tool_execution(
+                "exec",
+                anyhow::anyhow!("working_dir outside workspace"),
+            ));
+        }
+    }
+
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,7 +353,7 @@ mod tests {
     #[test]
     fn guard_blocks_path_traversal_when_restricted() {
         let cwd = std::path::PathBuf::from("/tmp");
-        let blocked = guard_command("cat ../secret.txt", &cwd, true);
+        let blocked = guard_command("cat ../secret.txt", &cwd, Some(&cwd), true);
         assert!(blocked.is_err());
         assert!(
             blocked
@@ -283,7 +367,22 @@ mod tests {
     #[test]
     fn guard_allows_safe_command() {
         let cwd = std::path::PathBuf::from("/tmp");
-        let blocked = guard_command("echo hello", &cwd, false);
+        let blocked = guard_command("echo hello", &cwd, None, false);
         assert!(blocked.is_ok());
+    }
+
+    #[test]
+    fn resolve_working_dir_rejects_outside_workspace() {
+        let workspace = std::env::temp_dir().join("nanobot-shell-ws");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let outside = std::env::temp_dir().join("nanobot-shell-out");
+        std::fs::create_dir_all(&outside).expect("create outside");
+
+        let resolved = resolve_working_dir(
+            Some(outside.to_str().expect("outside str")),
+            workspace.as_path(),
+            Some(workspace.as_path()),
+        );
+        assert!(resolved.is_err());
     }
 }

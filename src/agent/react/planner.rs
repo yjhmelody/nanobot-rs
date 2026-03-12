@@ -3,7 +3,7 @@
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, trace};
 
 use crate::bus::{MessageBus, MessageId, MessageMetadata, OutboundMessage};
@@ -13,12 +13,13 @@ use crate::observability::TARGET_REACT;
 use crate::provider::streaming::{StreamAccumulator, StreamError, StreamEvent};
 use crate::provider::{ChatRequest, LLMProvider};
 use crate::tools::base::ToolDefinition;
-use crate::types::provider::{ChatMessage, ToolCallRequest};
+use crate::types::provider::{ChatMessage, ToolCallRequest, UsageStats};
+use crate::utils::throttle::{Throttle, truncate_text};
 
-const PROGRESS_MIN_CHARS: usize = 16;
-const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(120);
+const PROGRESS_MIN_CHARS: usize = 24;
+const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const TOOL_HINT_MIN_CHARS: usize = 24;
-const TOOL_HINT_MIN_INTERVAL: Duration = Duration::from_millis(200);
+const TOOL_HINT_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const TOOL_HINT_MAX_CHARS: usize = 480;
 
 /// Queries the model and parses responses
@@ -70,8 +71,7 @@ impl Planner {
         let mut progress_state = ProgressState::new();
         let mut tool_hint_state = ToolHintState::new();
         let mut saw_event = false;
-        let mut last_sent_at = Instant::now();
-        let mut last_sent_len = 0usize;
+        let mut progress_throttle = Throttle::new(PROGRESS_MIN_CHARS, PROGRESS_MIN_INTERVAL);
         let mut done_response = None;
 
         while let Some(event) = stream.next().await {
@@ -102,11 +102,8 @@ impl Planner {
                     index,
                 } => {
                     if let Some(progress) = progress {
-                        if let Some(hint) = tool_hint_state.update_args(
-                            id,
-                            arguments_json,
-                            *index,
-                        ) {
+                        if let Some(hint) = tool_hint_state.update_args(id, arguments_json, *index)
+                        {
                             progress.send_tool_hint(&hint);
                         }
                     }
@@ -125,14 +122,9 @@ impl Planner {
 
             if let Some(progress) = progress {
                 if let Some(content) = progress_state.apply_event(&event) {
-                    let now = Instant::now();
-                    let should_send = content.len().saturating_sub(last_sent_len)
-                        >= PROGRESS_MIN_CHARS
-                        || now.duration_since(last_sent_at) >= PROGRESS_MIN_INTERVAL;
-                    if should_send && content.len() > last_sent_len {
+                    if progress_throttle.should_send(content.len()) {
                         progress.send_progress(&content);
-                        last_sent_len = content.len();
-                        last_sent_at = now;
+                        progress_throttle.mark_sent(content.len());
                     }
                 }
             }
@@ -140,7 +132,7 @@ impl Planner {
 
         if let Some(progress) = progress {
             if let Some(content) = progress_state.content() {
-                if content.len() > last_sent_len {
+                if progress_throttle.should_send(content.len()) {
                     progress.send_progress(&content);
                 }
             }
@@ -165,6 +157,7 @@ impl Planner {
             finish_reason: response.finish_reason,
             reasoning_content: response.reasoning_content,
             thinking_blocks: response.thinking_blocks,
+            usage: response.usage,
         })
     }
 }
@@ -277,8 +270,7 @@ struct ToolHintState {
 
 struct ToolHintCall {
     args: String,
-    last_sent_at: Instant,
-    last_sent_len: usize,
+    throttle: Throttle,
     index: usize,
 }
 
@@ -290,30 +282,28 @@ impl ToolHintState {
     }
 
     fn update_args(&mut self, id: &str, delta: &str, index: usize) -> Option<String> {
-        let entry = self.calls.entry(id.to_string()).or_insert_with(|| ToolHintCall {
-            args: String::new(),
-            last_sent_at: Instant::now(),
-            last_sent_len: 0,
-            index,
-        });
+        let entry = self
+            .calls
+            .entry(id.to_string())
+            .or_insert_with(|| ToolHintCall {
+                args: String::new(),
+                throttle: Throttle::new(TOOL_HINT_MIN_CHARS, TOOL_HINT_MIN_INTERVAL),
+                index,
+            });
 
         entry.args.push_str(delta);
-        let now = Instant::now();
-        let len_delta = entry.args.len().saturating_sub(entry.last_sent_len);
-        let time_ok = now.duration_since(entry.last_sent_at) >= TOOL_HINT_MIN_INTERVAL;
-        let size_ok = len_delta >= TOOL_HINT_MIN_CHARS;
-        if !time_ok && !size_ok {
+
+        if !entry.throttle.should_send(entry.args.len()) {
             return None;
         }
 
-        entry.last_sent_at = now;
-        entry.last_sent_len = entry.args.len();
+        entry.throttle.mark_sent(entry.args.len());
 
         Some(format!(
             "Tool call args (id={}, index={}): {}",
             id,
             entry.index,
-            truncate_for_hint(&entry.args)
+            truncate_text(&entry.args, TOOL_HINT_MAX_CHARS)
         ))
     }
 
@@ -331,19 +321,13 @@ impl ToolHintState {
                 "Tool call ready: id={}, index={}, args={}",
                 id,
                 index,
-                truncate_for_hint(&args)
+                truncate_text(&args, TOOL_HINT_MAX_CHARS)
             ))
         }
     }
 }
 
-fn truncate_for_hint(value: &str) -> String {
-    if value.len() <= TOOL_HINT_MAX_CHARS {
-        return value.to_string();
-    }
-    let truncated: String = value.chars().take(TOOL_HINT_MAX_CHARS).collect();
-    format!("{}…", truncated)
-}
+// Remove the old truncate_for_hint function as we now use truncate_text from utils
 
 /// Configuration for model query
 #[derive(Debug, Clone)]
@@ -363,16 +347,22 @@ pub struct PlannerResponse {
     pub finish_reason: String,
     pub reasoning_content: Option<String>,
     pub thinking_blocks: Option<Vec<String>>,
+    pub usage: UsageStats,
 }
 
 impl PlannerResponse {
-    /// Check if this is a final answer (no tool calls)
+    /// Check if this is a final answer (no tool calls and not truncated)
     pub fn is_final(&self) -> bool {
-        self.tool_calls.is_empty()
+        self.tool_calls.is_empty() && self.finish_reason != "length"
     }
 
     /// Check if model wants to use tools
     pub fn has_tool_calls(&self) -> bool {
         !self.tool_calls.is_empty()
+    }
+
+    /// Check if response was truncated due to max_tokens limit
+    pub fn is_truncated(&self) -> bool {
+        self.finish_reason == "length"
     }
 }

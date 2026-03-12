@@ -1,6 +1,6 @@
 //! ReAct loop state machine types
 
-use crate::types::provider::ChatMessage;
+use crate::types::provider::{ChatMessage, UsageStats};
 
 /// State of the ReAct loop
 #[derive(Debug, Clone)]
@@ -37,6 +37,8 @@ pub struct LoopOutcome {
     pub exit_reason: LoopExitReason,
     /// Number of iterations executed
     pub iterations: usize,
+    /// Usage statistics for the final model call (if available).
+    pub usage: Option<UsageStats>,
 }
 
 impl LoopOutcome {
@@ -45,12 +47,14 @@ impl LoopOutcome {
         messages: Vec<ChatMessage>,
         exit_reason: LoopExitReason,
         iterations: usize,
+        usage: Option<UsageStats>,
     ) -> Self {
         Self {
             final_content,
             messages,
             exit_reason,
             iterations,
+            usage,
         }
     }
 }

@@ -71,6 +71,7 @@ impl StreamAccumulator {
                 output_tokens,
                 total_tokens,
             } => {
+                dbg!(total_tokens);
                 if let Some(tokens) = input_tokens {
                     self.usage.prompt_tokens = Some(*tokens as u64);
                 }

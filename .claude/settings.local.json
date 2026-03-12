@@ -31,7 +31,11 @@
       "Bash(ls -1 src/session/*.rs | wc -l)",
       "Bash(ls -la src/session/*.rs)",
       "Bash(grep -v \"^$\")",
-      "WebFetch(domain:docs.anthropic.com)"
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(grep -n \"finish_reason.*length\\\\|stop_reason.*max_tokens\" src/provider/*.rs)",
+      "Bash(ls -lh workspace/sessions/*.jsonl 2>/dev/null | tail -5)",
+      "Bash(find . -name \"*.jsonl\" -type f 2>/dev/null | head -5)",
+      "Bash(find src:*)"
     ]
   }
 }

@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::observability::TARGET_REACT;
 use crate::provider::LLMProvider;
 use crate::tools::{ToolContext, ToolRegistry};
-use crate::types::provider::{AssistantToolCall, ChatMessage};
+use crate::types::provider::{AssistantToolCall, ChatMessage, UsageStats};
 
 use super::planner::{ModelConfig, Planner, ProgressEmitter};
 use super::state::{LoopExitReason, LoopOutcome, LoopState};
@@ -40,13 +40,14 @@ impl ReActExecutor {
     pub async fn run(
         &self,
         mut messages: Vec<ChatMessage>,
-        tools: Vec<std::sync::Arc<crate::tools::base::ToolDefinition>>,
+        tools: Vec<Arc<crate::tools::base::ToolDefinition>>,
         config: ModelConfig,
         context: ExecutionContext,
         progress: Option<ProgressEmitter>,
     ) -> Result<LoopOutcome> {
         let mut state = LoopState::QueryModel { iteration: 0 };
         let mut iterations = 0;
+        let mut last_usage: Option<UsageStats> = None;
 
         loop {
             // Check cancellation
@@ -57,6 +58,7 @@ impl ReActExecutor {
                     messages,
                     LoopExitReason::Cancelled,
                     iterations,
+                    last_usage.clone(),
                 ));
             }
 
@@ -71,6 +73,7 @@ impl ReActExecutor {
                             messages,
                             LoopExitReason::MaxIterations,
                             iterations,
+                            last_usage.clone(),
                         ));
                     }
 
@@ -80,6 +83,30 @@ impl ReActExecutor {
                         .await
                     {
                         Ok(response) => {
+                            last_usage = Some(response.usage.clone());
+                            // Check if response was truncated due to max_tokens
+                            if response.is_truncated() {
+                                warn!(
+                                    target: TARGET_REACT,
+                                    iteration,
+                                    "Response truncated due to max_tokens limit"
+                                );
+                                // Add truncated content to messages
+                                if let Some(content) = response.content {
+                                    messages.push(ChatMessage::assistant(
+                                        Some(content.clone()),
+                                        None,
+                                        response.reasoning_content,
+                                        response.thinking_blocks,
+                                    ));
+                                }
+                                // Continue to next iteration to let model complete the response
+                                state = LoopState::QueryModel {
+                                    iteration: iteration + 1,
+                                };
+                                continue;
+                            }
+
                             if response.is_final() {
                                 // Model returned final answer
                                 if let Some(content) = response.content {
@@ -95,6 +122,7 @@ impl ReActExecutor {
                                         messages,
                                         LoopExitReason::Finished,
                                         iterations,
+                                        last_usage.clone(),
                                     ));
                                 } else {
                                     // Empty response, treat as finished
@@ -103,6 +131,7 @@ impl ReActExecutor {
                                         messages,
                                         LoopExitReason::Finished,
                                         iterations,
+                                        last_usage.clone(),
                                     ));
                                 }
                             } else {
@@ -146,6 +175,7 @@ impl ReActExecutor {
                                 messages,
                                 LoopExitReason::ProviderError,
                                 iterations,
+                                last_usage.clone(),
                             ));
                         }
                     }
@@ -183,10 +213,8 @@ impl ReActExecutor {
 
                     if let Some(progress) = &progress {
                         let tc = &tool_calls[0];
-                        progress.send_tool_hint(&format!(
-                            "Running tool: {} (id={})",
-                            tc.name, tc.id
-                        ));
+                        progress
+                            .send_tool_hint(&format!("Running tool: {} (id={})", tc.name, tc.id));
                     }
 
                     // Execute first tool, get diagnostic if multiple
@@ -214,9 +242,7 @@ impl ReActExecutor {
                         let result_preview = truncate_tool_result(&obs_content_for_hint);
                         progress.send_tool_hint(&format!(
                             "Tool result: {} (id={}) -> {}",
-                            tool_calls[0].name,
-                            tool_calls[0].id,
-                            result_preview
+                            tool_calls[0].name, tool_calls[0].id, result_preview
                         ));
                     }
 
@@ -227,7 +253,13 @@ impl ReActExecutor {
                 }
 
                 LoopState::Finish { reason } => {
-                    return Ok(LoopOutcome::new(None, messages, reason, iterations));
+                    return Ok(LoopOutcome::new(
+                        None,
+                        messages,
+                        reason,
+                        iterations,
+                        last_usage.clone(),
+                    ));
                 }
             }
         }

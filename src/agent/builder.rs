@@ -84,6 +84,7 @@ pub struct AgentLoopBuilder {
     mcp_servers: HashMap<String, MCPServerConfig>,
     acp_config: Option<crate::acp::config::ACPConfig>,
     restrict_to_workspace: bool,
+    send_usage_summary: bool,
 
     // Optional dependencies
     cron_service: Option<Arc<CronService>>,
@@ -109,6 +110,7 @@ impl AgentLoopBuilder {
             mcp_servers: HashMap::new(),
             acp_config: None,
             restrict_to_workspace: false,
+            send_usage_summary: false,
             cron_service: None,
         }
     }
@@ -158,6 +160,12 @@ impl AgentLoopBuilder {
     /// Sets the cron service for scheduled tasks.
     pub fn with_cron_service(mut self, service: Arc<CronService>) -> Self {
         self.cron_service = Some(service);
+        self
+    }
+
+    /// Sends a usage summary message after the final response.
+    pub fn with_send_usage_summary(mut self, enabled: bool) -> Self {
+        self.send_usage_summary = enabled;
         self
     }
 
@@ -222,6 +230,7 @@ impl AgentLoopBuilder {
             max_tokens: self.config.max_tokens,
             memory_window: self.config.memory_window,
             reasoning_effort: self.config.reasoning_effort,
+            send_usage_summary: self.send_usage_summary,
             tools,
             mcp,
             context,
