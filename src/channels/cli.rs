@@ -1,10 +1,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::bus::OutboundMessage;
-use crate::channels::base::ChannelAdapter;
+use crate::channels::base::{ChannelAdapter, SendOutcome};
+use crate::error::Result;
 
 pub struct CliChannel {
     running: AtomicBool,
@@ -34,12 +34,12 @@ impl ChannelAdapter for CliChannel {
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome> {
         if msg.content.trim().is_empty() {
-            return Ok(());
+            return Ok(SendOutcome::default());
         }
         println!("\n🐈 [{}:{}]\n{}\n", msg.channel, msg.chat_id, msg.content);
-        Ok(())
+        Ok(SendOutcome::default())
     }
 
     fn is_running(&self) -> bool {

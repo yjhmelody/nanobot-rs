@@ -42,3 +42,18 @@ pub(crate) struct TelegramSendMessage {
     pub(crate) chat_id: i64,
     pub(crate) text: String,
 }
+
+/// Telegram editMessageText request body.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TelegramEditMessageText {
+    pub(crate) chat_id: i64,
+    pub(crate) message_id: i64,
+    pub(crate) text: String,
+}
+
+/// Telegram send/edit response wrapper.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TelegramSendMessageResponse {
+    pub(crate) ok: bool,
+    pub(crate) result: TelegramMessage,
+}

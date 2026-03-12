@@ -1,7 +1,12 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::bus::OutboundMessage;
+use crate::error::Result;
+
+#[derive(Debug, Clone, Default)]
+pub struct SendOutcome {
+    pub message_id: Option<String>,
+}
 
 /// Common runtime contract for external channel adapters.
 #[async_trait]
@@ -16,7 +21,19 @@ pub trait ChannelAdapter: Send + Sync {
     async fn stop(&self) -> Result<()>;
 
     /// Deliver an outbound message to the external platform.
-    async fn send(&self, msg: OutboundMessage) -> Result<()>;
+    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome>;
+
+    /// Update an existing message on platforms that support edits.
+    async fn update(&self, message_id: &str, msg: OutboundMessage) -> Result<()> {
+        let _ = message_id;
+        let _ = self.send(msg).await?;
+        Ok(())
+    }
+
+    /// Whether the adapter supports message updates for streaming.
+    fn supports_stream_updates(&self) -> bool {
+        false
+    }
 
     /// Best-effort runtime status.
     fn is_running(&self) -> bool;

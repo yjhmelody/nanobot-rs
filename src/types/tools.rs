@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::types::SessionKey;
+use crate::bus::MessageId;
 
 /// Context information passed into tool execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -15,7 +16,7 @@ pub struct ToolContext {
     /// Session key used for cancellation and state scoping.
     pub session_key: SessionKey,
     /// Optional source message id for threaded/reply scenarios.
-    pub message_id: Option<String>,
+    pub message_id: Option<MessageId>,
 }
 
 /// OpenAI-compatible tool definition wrapper.

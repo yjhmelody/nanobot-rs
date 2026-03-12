@@ -13,7 +13,9 @@ use tracing::{Instrument, debug, debug_span, error, info, trace};
 use crate::agent::ContextProvider;
 use crate::agent::react::{ExecutionContext, LoopOutcome, ModelConfig, ProgressEmitter, ReActExecutor};
 use crate::agent::traits::Agent;
-use crate::bus::{InboundCommand, InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
+use crate::bus::{
+    InboundCommand, InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage,
+};
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
 use crate::provider::LLMProvider;
@@ -478,11 +480,25 @@ impl AgentLoop {
         let start_index = messages.len() - 1 - history_len;
 
         // Use new ReAct executor
+        let reply_to = msg
+            .metadata
+            .message_id
+            .as_ref()
+            .and_then(MessageId::external_id)
+            .map(str::to_string);
+        let stream_id = msg
+            .metadata
+            .message_id
+            .as_ref()
+            .and_then(MessageId::external_id)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("stream:{}", TaskId::new().as_str()));
         let progress = ProgressEmitter::new(
             self.bus.clone(),
             msg.channel.clone(),
             msg.chat_id.clone(),
-            msg.metadata.message_id.clone(),
+            reply_to.clone(),
+            stream_id.clone(),
         );
         let outcome = self
             .run_agent_loop(messages, &tool_context, &session_key, Some(progress))
@@ -524,9 +540,12 @@ impl AgentLoop {
             content: outcome.final_content.unwrap_or_else(|| {
                 "I've completed processing but have no response to give.".to_string()
             }),
-            reply_to: None,
+            reply_to,
             media: Vec::new(),
-            metadata: msg.metadata,
+            metadata: MessageMetadata {
+                message_id: msg.metadata.message_id,
+                stream_id: Some(stream_id),
+            },
         }))
     }
 

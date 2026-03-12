@@ -4,8 +4,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::bus::MessageBus;
-use crate::bus::events::{MessageMetadata, OutboundMessage};
+use crate::bus::{MessageBus, MessageId, MessageMetadata, OutboundMessage};
 use crate::error::{NanobotError, Result};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
@@ -13,11 +12,13 @@ use crate::tools::base::{
 use crate::types::tools::MessageArgs;
 
 // Tool descriptions
-const MESSAGE_DESC: &str = "Send a message to the user. Use this when you want to communicate something.";
+const MESSAGE_DESC: &str =
+    "Send a message to the user. Use this when you want to communicate something.";
 const MESSAGE_CONTENT_DESC: &str = "The message content to send";
 const MESSAGE_CHANNEL_DESC: &str = "Optional: target channel (telegram, discord, etc.)";
 const MESSAGE_CHAT_ID_DESC: &str = "Optional: target chat/user ID";
-const MESSAGE_MEDIA_DESC: &str = "Optional: list of file paths to attach (images, audio, documents)";
+const MESSAGE_MEDIA_DESC: &str =
+    "Optional: list of file paths to attach (images, audio, documents)";
 
 pub struct MessageTool {
     bus: Option<MessageBus>,
@@ -74,7 +75,10 @@ impl MessageTool {
     async fn execute_typed(&self, args: MessageArgs, ctx: &ToolContext) -> Result<String> {
         let channel = args.channel.unwrap_or_else(|| ctx.channel.clone());
         let chat_id = args.chat_id.unwrap_or_else(|| ctx.chat_id.clone());
-        let message_id = args.message_id.or_else(|| ctx.message_id.clone());
+        let message_id = args
+            .message_id
+            .map(MessageId::External)
+            .or_else(|| ctx.message_id.clone());
 
         if channel.trim().is_empty() || chat_id.trim().is_empty() {
             return Err(NanobotError::tool_execution(
@@ -86,7 +90,10 @@ impl MessageTool {
         let media = args.media.unwrap_or_default();
 
         if let Some(bus) = &self.bus {
-            let metadata = MessageMetadata { message_id };
+            let metadata = MessageMetadata {
+                message_id,
+                stream_id: None,
+            };
             let msg = OutboundMessage {
                 channel: channel.clone(),
                 chat_id: chat_id.clone(),
@@ -145,6 +152,7 @@ impl Tool for MessageTool {
 mod tests {
     use super::*;
     use crate::bus::MessageBus;
+    use crate::bus::MessageId;
     use crate::types::SessionKey;
 
     #[tokio::test]
@@ -156,7 +164,7 @@ mod tests {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
             session_key: SessionKey::from("cli:direct"),
-            message_id: Some("orig-1".to_string()),
+            message_id: Some(MessageId::External("orig-1".to_string())),
         };
 
         tool.start_turn().await.expect("start turn");
@@ -177,6 +185,9 @@ mod tests {
 
         let emitted = rx.recv().await.expect("outbound message should exist");
         assert_eq!(emitted.content, "hello");
-        assert_eq!(emitted.metadata.message_id.as_deref(), Some("msg-2"));
+        assert_eq!(
+            emitted.metadata.message_id,
+            Some(MessageId::External("msg-2".to_string()))
+        );
     }
 }

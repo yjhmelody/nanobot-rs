@@ -1,7 +1,74 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde::{Deserializer, Serializer};
 
 use crate::types::SessionKey;
+
+/// Message identifier used for routing and streaming.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageId {
+    /// Provider-specific message id for replies/updates.
+    External(String),
+    /// Internal progress marker.
+    Progress,
+    /// Internal tool hint marker.
+    ToolHint,
+}
+
+impl MessageId {
+    pub const PROGRESS_TAG: &'static str = "__progress__";
+    pub const TOOL_HINT_TAG: &'static str = "__tool_hint__";
+
+    pub fn from_raw(value: String) -> Self {
+        match value.as_str() {
+            Self::PROGRESS_TAG => Self::Progress,
+            Self::TOOL_HINT_TAG => Self::ToolHint,
+            _ => Self::External(value),
+        }
+    }
+
+    pub fn as_raw(&self) -> &str {
+        match self {
+            Self::External(value) => value,
+            Self::Progress => Self::PROGRESS_TAG,
+            Self::ToolHint => Self::TOOL_HINT_TAG,
+        }
+    }
+
+    pub fn external_id(&self) -> Option<&str> {
+        match self {
+            Self::External(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn is_progress(&self) -> bool {
+        matches!(self, Self::Progress)
+    }
+
+    pub fn is_tool_hint(&self) -> bool {
+        matches!(self, Self::ToolHint)
+    }
+}
+
+impl Serialize for MessageId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_raw())
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_raw(value))
+    }
+}
 
 /// Metadata attached to inbound/outbound messages.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -9,7 +76,10 @@ use crate::types::SessionKey;
 pub struct MessageMetadata {
     #[serde(default)]
     /// Optional per-message identifier from the channel adapter.
-    pub message_id: Option<String>,
+    pub message_id: Option<MessageId>,
+    #[serde(default)]
+    /// Optional stream identifier for correlating progressive updates.
+    pub stream_id: Option<String>,
 }
 
 /// Message received from an external channel into the bus.

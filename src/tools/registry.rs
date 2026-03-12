@@ -401,7 +401,7 @@ mod tests {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
             session_key: SessionKey::from("cli:direct"),
-            message_id: Some("m1".to_string()),
+            message_id: Some(crate::bus::MessageId::External("m1".to_string())),
         };
 
         let out = reg

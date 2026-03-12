@@ -1,6 +1,6 @@
 use tokio::sync::broadcast;
 
-use crate::bus::events::{InboundMessage, OutboundMessage};
+use super::{InboundMessage, OutboundMessage};
 
 /// Multi-subscriber message bus using broadcast channels.
 ///
@@ -149,7 +149,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    use crate::bus::events::MessageMetadata;
+    use crate::bus::MessageMetadata;
 
     #[tokio::test]
     async fn single_subscriber_receives_messages() {

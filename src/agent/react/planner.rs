@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace};
 
-use crate::bus::{MessageBus, MessageMetadata, OutboundMessage};
+use crate::bus::{MessageBus, MessageId, MessageMetadata, OutboundMessage};
 use crate::error::Result;
 use crate::error::{NanobotError, ProviderError};
 use crate::observability::TARGET_REACT;
@@ -62,19 +62,21 @@ impl Planner {
 
         let mut stream = self
             .provider
-            .chat_stream(request)
+            .chat_stream(request.clone())
             .await
             .map_err(map_stream_error)?;
 
         let mut accumulator = StreamAccumulator::new();
         let mut progress_state = ProgressState::new();
         let mut tool_hint_state = ToolHintState::new();
+        let mut saw_event = false;
         let mut last_sent_at = Instant::now();
         let mut last_sent_len = 0usize;
         let mut done_response = None;
 
         while let Some(event) = stream.next().await {
             let event = event.map_err(map_stream_error)?;
+            saw_event = true;
 
             match &event {
                 StreamEvent::Done { response } => {
@@ -144,7 +146,11 @@ impl Planner {
             }
         }
 
-        let response = done_response.unwrap_or_else(|| accumulator.build_response());
+        let response = if !saw_event {
+            self.provider.chat(request).await
+        } else {
+            done_response.unwrap_or_else(|| accumulator.build_response())
+        };
 
         trace!(
             target: TARGET_REACT,
@@ -169,6 +175,7 @@ pub struct ProgressEmitter {
     channel: String,
     chat_id: String,
     reply_to: Option<String>,
+    stream_id: String,
 }
 
 impl ProgressEmitter {
@@ -177,12 +184,14 @@ impl ProgressEmitter {
         channel: impl Into<String>,
         chat_id: impl Into<String>,
         reply_to: Option<String>,
+        stream_id: impl Into<String>,
     ) -> Self {
         Self {
             bus,
             channel: channel.into(),
             chat_id: chat_id.into(),
             reply_to,
+            stream_id: stream_id.into(),
         }
     }
 
@@ -197,7 +206,8 @@ impl ProgressEmitter {
             reply_to: self.reply_to.clone(),
             media: Vec::new(),
             metadata: MessageMetadata {
-                message_id: Some("__progress__".to_string()),
+                message_id: Some(MessageId::Progress),
+                stream_id: Some(self.stream_id.clone()),
             },
         });
     }
@@ -213,7 +223,8 @@ impl ProgressEmitter {
             reply_to: self.reply_to.clone(),
             media: Vec::new(),
             metadata: MessageMetadata {
-                message_id: Some("__tool_hint__".to_string()),
+                message_id: Some(MessageId::ToolHint),
+                stream_id: Some(self.stream_id.clone()),
             },
         });
     }

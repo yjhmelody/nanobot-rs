@@ -120,6 +120,13 @@ pub enum NanobotError {
     #[error("Subagent error: {0}")]
     Subagent(String),
 
+    /// Channel adapter error.
+    #[error("Channel '{channel}' error: {message}")]
+    Channel {
+        channel: String,
+        message: String,
+    },
+
     /// Generic error for cases not covered by specific variants.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -188,6 +195,14 @@ impl NanobotError {
     pub fn invalid_tool_args(tool_name: impl Into<String>, message: impl Into<String>) -> Self {
         Self::InvalidToolArgs {
             tool_name: tool_name.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Creates a channel adapter error.
+    pub fn channel(channel: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Channel {
+            channel: channel.into(),
             message: message.into(),
         }
     }
@@ -287,6 +302,7 @@ impl NanobotError {
             Self::Runtime(_) => "runtime",
             Self::AgentLoop(_) => "agent_loop",
             Self::Subagent(_) => "subagent",
+            Self::Channel { .. } => "channel",
             Self::Other(_) => "other",
         }
     }

@@ -1,18 +1,21 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use reqwest::Client;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::bus::{InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
-use crate::channels::base::{ChannelAdapter, is_sender_allowed};
+use crate::bus::{InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage};
+use crate::channels::base::{ChannelAdapter, SendOutcome, is_sender_allowed};
 use crate::config::schema::GenericChannelConfig;
+use crate::error::{NanobotError, Result};
 use crate::observability::TARGET_CHANNELS;
-use crate::types::channels::{TelegramSendMessage, TelegramUpdatesResponse};
+use crate::types::channels::{
+    TelegramEditMessageText, TelegramSendMessage, TelegramSendMessageResponse,
+    TelegramUpdatesResponse,
+};
 
 const TELEGRAM_API_DEFAULT: &str = "https://api.telegram.org";
 const TELEGRAM_TEXT_LIMIT: usize = 4000;
@@ -31,9 +34,9 @@ pub struct TelegramChannel {
 impl TelegramChannel {
     pub fn new(config: GenericChannelConfig, bus: MessageBus) -> Result<Self> {
         let token = extra_string(&config, &["token", "botToken"])
-            .ok_or_else(|| anyhow::anyhow!("telegram.token is required"))?;
+            .ok_or_else(|| NanobotError::config("telegram.token is required"))?;
         if token.trim().is_empty() {
-            bail!("telegram.token is empty");
+            return Err(NanobotError::config("telegram.token is empty"));
         }
 
         let api_base =
@@ -142,7 +145,8 @@ impl ChannelAdapter for TelegramChannel {
                         timestamp: chrono::Utc::now(),
                         media: Vec::new(),
                         metadata: MessageMetadata {
-                            message_id: Some(message.message_id.to_string()),
+                            message_id: Some(MessageId::External(message.message_id.to_string())),
+                            stream_id: None,
                         },
                         session_key_override: None,
                     };
@@ -170,14 +174,14 @@ impl ChannelAdapter for TelegramChannel {
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        let chat_id = msg
-            .chat_id
-            .parse::<i64>()
-            .with_context(|| format!("invalid telegram chat_id '{}'", msg.chat_id))?;
+    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome> {
+        let chat_id = msg.chat_id.parse::<i64>().map_err(|_| {
+            NanobotError::channel("telegram", format!("invalid chat_id '{}'", msg.chat_id))
+        })?;
 
+        let mut last_message_id = None;
         for chunk in split_text(&msg.content, TELEGRAM_TEXT_LIMIT) {
-            self.client
+            let response = self.client
                 .post(self.endpoint("sendMessage"))
                 .json(&TelegramSendMessage {
                     chat_id,
@@ -185,9 +189,50 @@ impl ChannelAdapter for TelegramChannel {
                 })
                 .send()
                 .await
-                .context("telegram sendMessage failed")?;
+                .map_err(|err| {
+                    NanobotError::channel("telegram", format!("sendMessage failed: {}", err))
+                })?;
+            if let Ok(payload) = response.json::<TelegramSendMessageResponse>().await {
+                if payload.ok {
+                    last_message_id = Some(payload.result.message_id);
+                }
+            }
         }
+        Ok(SendOutcome {
+            message_id: last_message_id.map(|id| id.to_string()),
+        })
+    }
+
+    async fn update(&self, message_id: &str, msg: OutboundMessage) -> Result<()> {
+        let chat_id = msg.chat_id.parse::<i64>().map_err(|_| {
+            NanobotError::channel("telegram", format!("invalid chat_id '{}'", msg.chat_id))
+        })?;
+        let message_id = message_id.parse::<i64>().map_err(|_| {
+            NanobotError::channel(
+                "telegram",
+                format!("invalid message_id '{}'", message_id),
+            )
+        })?;
+        let text = truncate_text(&msg.content, TELEGRAM_TEXT_LIMIT);
+
+        self.client
+            .post(self.endpoint("editMessageText"))
+            .json(&TelegramEditMessageText {
+                chat_id,
+                message_id,
+                text,
+            })
+            .send()
+            .await
+            .map_err(|err| {
+                NanobotError::channel("telegram", format!("editMessageText failed: {}", err))
+            })?;
+
         Ok(())
+    }
+
+    fn supports_stream_updates(&self) -> bool {
+        true
     }
 
     fn is_running(&self) -> bool {
@@ -215,6 +260,15 @@ fn split_text(text: &str, max_len: usize) -> Vec<String> {
         content = content[pos..].trim_start().to_string();
     }
     chunks
+}
+
+fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    out.truncate(max_len);
+    out
 }
 
 fn extra_string(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<String> {

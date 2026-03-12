@@ -1,11 +1,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
 use async_trait::async_trait;
 use tracing::warn;
 
 use crate::bus::OutboundMessage;
-use crate::channels::base::ChannelAdapter;
+use crate::channels::base::{ChannelAdapter, SendOutcome};
+use crate::error::Result;
 use crate::observability::TARGET_CHANNELS;
 
 pub struct PlaceholderChannel {
@@ -43,13 +43,13 @@ impl ChannelAdapter for PlaceholderChannel {
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome> {
         warn!(
             target: TARGET_CHANNELS,
             "dropping outbound for unimplemented channel '{}': {}",
             self.name, msg.chat_id
         );
-        Ok(())
+        Ok(SendOutcome::default())
     }
 
     fn is_running(&self) -> bool {
