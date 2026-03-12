@@ -165,6 +165,43 @@ pub enum ProviderError {
     Other(String),
 }
 
+impl ProviderError {
+    /// Check if this error is retryable (network issues, timeouts, rate limits).
+    ///
+    /// Returns true for transient errors that might succeed on retry:
+    /// - Network connection failures
+    /// - Request timeouts
+    /// - Rate limit errors (should retry with backoff)
+    /// - Server errors (5xx)
+    ///
+    /// Returns false for permanent errors:
+    /// - Authentication failures
+    /// - Invalid configuration
+    /// - Model not available
+    /// - Invalid responses (4xx client errors)
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            // Network errors are usually retryable
+            ProviderError::ApiRequest(e) => {
+                e.is_timeout()
+                    || e.is_connect()
+                    || e.status().map_or(false, |s| s.is_server_error())
+            }
+            // Timeouts are retryable
+            ProviderError::Timeout(_) => true,
+            // Rate limits are retryable (with backoff)
+            ProviderError::RateLimit(_) => true,
+            // These are permanent errors
+            ProviderError::Authentication(_) => false,
+            ProviderError::InvalidConfig(_) => false,
+            ProviderError::ModelNotAvailable(_) => false,
+            ProviderError::InvalidResponse(_) => false,
+            // Generic errors are not retryable by default
+            ProviderError::Other(_) => false,
+        }
+    }
+}
+
 impl NanobotError {
     /// Creates a tool execution error.
     pub fn tool_execution(tool_name: impl Into<String>, source: anyhow::Error) -> Self {

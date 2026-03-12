@@ -139,7 +139,10 @@ impl Planner {
         }
 
         let response = if !saw_event {
-            self.provider.chat(request).await
+            self.provider
+                .chat(request)
+                .await
+                .map_err(|e| anyhow::anyhow!("LLM provider error: {}", e))?
         } else {
             done_response.unwrap_or_else(|| accumulator.build_response())
         };

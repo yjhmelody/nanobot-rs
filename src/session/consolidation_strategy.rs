@@ -196,7 +196,10 @@ async fn generate_summary(
         reasoning_effort: None,
     };
 
-    let response = provider.chat(request).await;
+    let response = provider
+        .chat(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("Consolidation LLM provider error: {}", e))?;
 
     let summary = response
         .content

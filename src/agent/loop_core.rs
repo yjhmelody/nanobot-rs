@@ -21,7 +21,7 @@ use crate::bus::{
 use crate::error::Result;
 use crate::observability::TARGET_AGENT;
 use crate::provider::LLMProvider;
-use crate::session::{Session, SessionEntry, SessionManager};
+use crate::session::{ConsolidationOutcome, Session, SessionEntry, SessionManager};
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
@@ -623,7 +623,7 @@ impl AgentLoop {
             InboundCommand::Help => Ok(Some(OutboundMessage {
                 channel: msg.channel,
                 chat_id: msg.chat_id,
-                content: "🐈 nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/help - Show available commands".to_string(),
+                content: "🐈 nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/compact - Consolidate session history\n/help - Show available commands".to_string(),
                 reply_to: None,
                 media: Vec::new(),
                 metadata: msg.metadata,
@@ -644,6 +644,30 @@ impl AgentLoop {
                     channel: msg.channel,
                     chat_id: msg.chat_id,
                     content: "🆕 Started a new conversation.".to_string(),
+                    reply_to: None,
+                    media: Vec::new(),
+                    metadata: msg.metadata,
+                }))
+            }
+            InboundCommand::Compact => {
+                let session_key = msg.session_key();
+                let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
+                let outcome = self.sessions.consolidate_now(&mut session).await?;
+                let content = match outcome {
+                    ConsolidationOutcome::Disabled => {
+                        "Consolidation is not configured.".to_string()
+                    }
+                    ConsolidationOutcome::Skipped => {
+                        "Nothing to consolidate yet.".to_string()
+                    }
+                    ConsolidationOutcome::Consolidated { removed } => {
+                        format!("✅ Consolidated {} messages.", removed)
+                    }
+                };
+                Ok(Some(OutboundMessage {
+                    channel: msg.channel,
+                    chat_id: msg.chat_id,
+                    content,
                     reply_to: None,
                     media: Vec::new(),
                     metadata: msg.metadata,

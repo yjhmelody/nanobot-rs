@@ -73,6 +73,38 @@ pub enum StreamError {
     Interrupted,
 }
 
+impl From<crate::error::ProviderError> for StreamError {
+    fn from(err: crate::error::ProviderError) -> Self {
+        use crate::error::ProviderError;
+        match err {
+            ProviderError::ApiRequest(e) => {
+                if e.is_timeout() {
+                    StreamError::Network(format!("Request timeout: {}", e))
+                } else if e.is_connect() {
+                    StreamError::Network(format!("Connection failed: {}", e))
+                } else {
+                    StreamError::Network(e.to_string())
+                }
+            }
+            ProviderError::Timeout(secs) => {
+                StreamError::Network(format!("Request timeout after {}s", secs))
+            }
+            ProviderError::RateLimit(msg) => StreamError::Provider(format!("Rate limit: {}", msg)),
+            ProviderError::Authentication(msg) => {
+                StreamError::Provider(format!("Authentication failed: {}", msg))
+            }
+            ProviderError::InvalidResponse(msg) => StreamError::Parse(msg),
+            ProviderError::ModelNotAvailable(msg) => {
+                StreamError::Provider(format!("Model not available: {}", msg))
+            }
+            ProviderError::InvalidConfig(msg) => {
+                StreamError::Provider(format!("Invalid config: {}", msg))
+            }
+            ProviderError::Other(msg) => StreamError::Provider(msg),
+        }
+    }
+}
+
 impl StreamEvent {
     /// Creates a text delta event.
     pub fn text_delta(content: impl Into<String>, index: usize) -> Self {

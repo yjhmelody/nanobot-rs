@@ -130,6 +130,7 @@ pub enum InboundCommand {
     Help,
     Stop,
     New,
+    Compact,
 }
 
 impl InboundCommand {
@@ -138,6 +139,7 @@ impl InboundCommand {
             Self::Help => "/help",
             Self::Stop => "/stop",
             Self::New => "/new",
+            Self::Compact => "/compact",
         }
     }
 
@@ -146,6 +148,7 @@ impl InboundCommand {
             "/help" => Some(Self::Help),
             "/stop" => Some(Self::Stop),
             "/new" => Some(Self::New),
+            "/compact" => Some(Self::Compact),
             _ => None,
         }
     }
@@ -252,5 +255,12 @@ mod tests {
     fn inbound_content_roundtrip_string() {
         let text: String = InboundContent::Command(InboundCommand::Stop).into();
         assert_eq!(text, "/stop");
+    }
+
+    #[test]
+    fn inbound_content_parses_compact_command() {
+        let content: InboundContent = "/compact".into();
+        assert_eq!(content.command(), Some(InboundCommand::Compact));
+        assert_eq!(content.as_text(), "/compact");
     }
 }

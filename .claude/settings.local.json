@@ -35,7 +35,8 @@
       "Bash(grep -n \"finish_reason.*length\\\\|stop_reason.*max_tokens\" src/provider/*.rs)",
       "Bash(ls -lh workspace/sessions/*.jsonl 2>/dev/null | tail -5)",
       "Bash(find . -name \"*.jsonl\" -type f 2>/dev/null | head -5)",
-      "Bash(find src:*)"
+      "Bash(find src:*)",
+      "Bash(grep -rn \"async fn chat.*ChatRequest.*LLMResponse\" src/provider/*.rs | head -10)"
     ]
   }
 }

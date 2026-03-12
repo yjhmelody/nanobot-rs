@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::error::ProviderError;
 use crate::provider::streaming::{StreamError, StreamEvent, StreamResponse};
 use crate::tools::base::ToolDefinition;
 use crate::types::SessionKey;
@@ -27,10 +28,11 @@ pub struct ChatRequest {
 /// response in a single-event stream, but providers should override it for true streaming.
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
+    // TODO: remove this
     /// Returns the default model identifier for this provider.
     fn default_model(&self) -> &str;
 
-    /// Non-streaming chat completion (backward compatible).
+    /// Non-streaming chat completion.
     ///
     /// # Arguments
     ///
@@ -39,7 +41,11 @@ pub trait LLMProvider: Send + Sync {
     /// # Returns
     ///
     /// Complete LLM response with content, tool calls, and usage stats
-    async fn chat(&self, req: ChatRequest) -> LLMResponse;
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProviderError` for network issues, authentication failures, rate limits, etc.
+    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError>;
 
     /// Streaming chat completion (unified interface).
     ///
@@ -58,7 +64,7 @@ pub trait LLMProvider: Send + Sync {
     ///
     /// Returns `StreamError` if the stream cannot be created or if a network/parse error occurs
     async fn chat_stream(&self, req: ChatRequest) -> Result<StreamResponse, StreamError> {
-        let response = self.chat(req).await;
+        let response = self.chat(req).await.map_err(StreamError::from)?;
         Ok(Box::pin(futures::stream::once(async move {
             Ok(StreamEvent::done(response))
         })))

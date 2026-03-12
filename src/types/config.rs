@@ -288,6 +288,9 @@ pub struct AgentDefaults {
     pub model: String,
     /// Provider override ("auto" to infer from model).
     pub provider: String,
+    /// Fallback providers to try in order when primary provider fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_providers: Option<Vec<String>>,
     /// Max tokens for model responses.
     pub max_tokens: i32,
     /// Sampling temperature for model responses.
@@ -298,6 +301,8 @@ pub struct AgentDefaults {
     pub memory_window: usize,
     /// Optional reasoning effort hint for supported providers.
     pub reasoning_effort: Option<String>,
+    /// Enables automatic session consolidation after saving turns.
+    pub auto_consolidate: bool,
 }
 
 impl Default for AgentDefaults {
@@ -306,11 +311,13 @@ impl Default for AgentDefaults {
             workspace: "~/.nanobot/workspace".to_string(),
             model: "anthropic/claude-sonnet-4-5".to_string(),
             provider: "auto".to_string(),
+            fallback_providers: None,
             max_tokens: 8192,
             temperature: 0.1,
             max_tool_iterations: 40,
             memory_window: 100,
             reasoning_effort: None,
+            auto_consolidate: true,
         }
     }
 }

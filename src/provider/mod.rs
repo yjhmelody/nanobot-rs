@@ -1,6 +1,7 @@
 pub mod anthropic;
 mod anthropic_types;
 pub mod base;
+pub mod fallback;
 pub mod openai_compat;
 mod openai_types;
 pub mod proxy;
@@ -19,6 +20,7 @@ pub use crate::provider::base::*;
 pub use crate::types::provider::*;
 
 use anthropic::AnthropicProvider;
+use fallback::FallbackProvider;
 use openai_compat::OpenAICompatProvider;
 pub use tool_name::ToolName;
 
@@ -35,13 +37,41 @@ pub fn make_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
         ));
     }
 
+    // Check if fallback providers are configured
+    if let Some(fallback_names) = &config.agents.defaults.fallback_providers {
+        if !fallback_names.is_empty() {
+            let mut providers = Vec::new();
+
+            // Add primary provider
+            providers.push(create_single_provider(config, &provider_name, &model)?);
+
+            // Add fallback providers
+            for fallback_name in fallback_names {
+                let fallback_provider = create_single_provider(config, fallback_name, &model)?;
+                providers.push(fallback_provider);
+            }
+
+            return Ok(Arc::new(FallbackProvider::new(providers, model)));
+        }
+    }
+
+    // No fallback configured, return single provider
+    create_single_provider(config, &provider_name, &model)
+}
+
+fn create_single_provider(
+    config: &Config,
+    provider_name: &str,
+    model: &str,
+) -> Result<Arc<dyn LLMProvider>> {
     let provider_cfg = config
-        .provider_config(&provider_name)
+        .provider_config(provider_name)
         .cloned()
         .unwrap_or_default();
 
     if provider_name != "custom"
         && provider_cfg.api_key.trim().is_empty()
+        // TODO: what's this model
         && !model.starts_with("bedrock/")
     {
         return Err(anyhow!(
@@ -59,23 +89,25 @@ pub fn make_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
                 .unwrap_or_else(|| "http://localhost:8000/v1".to_string()),
         )
     } else {
-        config.get_api_base(Some(&model))
+        config.get_api_base(Some(model))
     };
 
     let extra_headers = provider_cfg.extra_headers.unwrap_or_default();
 
-    match provider_name.as_str() {
+    // TODO: this is a bit hacky,
+    // we should have a more robust way to determine provider type from model name or config
+    match provider_name {
         "anthropic" => Ok(Arc::new(AnthropicProvider::new(
             provider_cfg.api_key,
             api_base,
-            model,
+            model.to_string(),
             extra_headers,
         ))),
         _ => Ok(Arc::new(OpenAICompatProvider::new(
             provider_cfg.api_key,
             api_base,
-            model,
-            provider_name,
+            model.to_string(),
+            provider_name.to_string(),
             extra_headers,
         ))),
     }

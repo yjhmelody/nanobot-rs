@@ -11,7 +11,7 @@ use super::{InboundMessage, OutboundMessage};
 ///
 /// ```no_run
 /// use nanobot_rs::bus::MessageBus;
-/// use nanobot_rs::bus::events::{InboundMessage, MessageMetadata};
+/// use nanobot_rs::bus::{InboundMessage, MessageMetadata};
 /// use chrono::Utc;
 ///
 /// # async fn example() {

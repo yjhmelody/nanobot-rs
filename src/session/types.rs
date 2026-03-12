@@ -119,6 +119,16 @@ pub struct SessionSummary {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsolidationOutcome {
+    /// Consolidation is not configured.
+    Disabled,
+    /// Consolidation ran but found nothing to compress.
+    Skipped,
+    /// Consolidation completed and removed messages.
+    Consolidated { removed: usize },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SessionMetadataLine {
     #[serde(rename = "_type")]

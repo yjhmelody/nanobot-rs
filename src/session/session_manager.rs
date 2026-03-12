@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::traits::*;
-use super::types::{Session, SessionSummary};
+use super::types::{ConsolidationOutcome, Session, SessionSummary};
 use crate::provider::ChatMessage;
 
 /// Composite session manager that orchestrates multiple components.
@@ -15,6 +15,7 @@ use crate::provider::ChatMessage;
 pub struct SessionManager {
     store: Box<dyn SessionStore>,
     consolidation: Option<Box<dyn ConsolidationStrategy>>,
+    auto_consolidation: bool,
     memory_providers: Vec<Box<dyn MemoryProvider>>,
     transformers: Vec<Box<dyn HistoryTransformer>>,
     hooks: Vec<Box<dyn SessionHook>>,
@@ -26,6 +27,7 @@ impl SessionManager {
         Self {
             store,
             consolidation: None,
+            auto_consolidation: true,
             memory_providers: Vec::new(),
             transformers: Vec::new(),
             hooks: Vec::new(),
@@ -35,6 +37,12 @@ impl SessionManager {
     /// Sets the consolidation strategy.
     pub fn with_consolidation(mut self, strategy: Box<dyn ConsolidationStrategy>) -> Self {
         self.consolidation = Some(strategy);
+        self
+    }
+
+    /// Enables or disables automatic consolidation on save.
+    pub fn with_auto_consolidation(mut self, enabled: bool) -> Self {
+        self.auto_consolidation = enabled;
         self
     }
 
@@ -77,7 +85,9 @@ impl SessionManager {
         }
 
         // Try consolidation if configured
-        if let Some(strategy) = &self.consolidation {
+        if self.auto_consolidation
+            && let Some(strategy) = &self.consolidation
+        {
             if strategy.should_consolidate(session).await {
                 let messages_before = session.messages.len();
                 if strategy.consolidate(session).await? {
@@ -100,6 +110,40 @@ impl SessionManager {
         }
 
         Ok(())
+    }
+
+    /// Forces a consolidation pass for the given session.
+    pub async fn consolidate_now(&self, session: &mut Session) -> Result<ConsolidationOutcome> {
+        let Some(strategy) = &self.consolidation else {
+            return Ok(ConsolidationOutcome::Disabled);
+        };
+
+        for hook in &self.hooks {
+            hook.on_before_save(session).await?;
+        }
+
+        let messages_before = session.messages.len();
+        let consolidated = strategy.consolidate(session).await?;
+        let outcome = if consolidated {
+            let messages_after = session.messages.len();
+            let removed = messages_before.saturating_sub(messages_after);
+
+            for hook in &self.hooks {
+                hook.on_consolidate(session, removed).await?;
+            }
+
+            ConsolidationOutcome::Consolidated { removed }
+        } else {
+            ConsolidationOutcome::Skipped
+        };
+
+        self.store.save(session).await?;
+
+        for hook in &self.hooks {
+            hook.on_after_save(session).await?;
+        }
+
+        Ok(outcome)
     }
 
     /// Gets enriched context from all memory providers.

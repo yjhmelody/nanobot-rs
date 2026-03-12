@@ -194,7 +194,8 @@ impl HeartbeatService {
                 temperature: 0.0,
                 reasoning_effort: None,
             })
-            .await;
+            .await
+            .map_err(|e| anyhow::anyhow!("Heartbeat LLM provider error: {}", e))?;
 
         let Some(content) = response.content.as_deref() else {
             return Ok(("skip".to_string(), String::new()));
@@ -262,6 +263,7 @@ impl HeartbeatService {
 mod tests {
     use super::*;
 
+    use crate::error::ProviderError;
     use crate::types::provider::{LLMResponse, UsageStats};
 
     struct StubProvider {
@@ -278,19 +280,19 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for StubProvider {
-        async fn chat(&self, _req: ChatRequest) -> LLMResponse {
+        async fn chat(&self, _req: ChatRequest) -> Result<LLMResponse, ProviderError> {
             let mut responses = self.responses.lock().await;
             if responses.is_empty() {
-                LLMResponse {
+                Ok(LLMResponse {
                     content: None,
                     tool_calls: Vec::new(),
                     finish_reason: "stop".to_string(),
                     usage: UsageStats::default(),
                     reasoning_content: None,
                     thinking_blocks: None,
-                }
+                })
             } else {
-                responses.remove(0)
+                Ok(responses.remove(0))
             }
         }
 

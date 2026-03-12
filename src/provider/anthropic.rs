@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use tracing::trace;
 
+use crate::error::ProviderError;
 use crate::observability::TARGET_PROVIDER;
 use crate::provider::anthropic_types::{
     AnthropicContentBlock, AnthropicErrorResponse, AnthropicInputContentBlock,
@@ -219,45 +220,49 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LLMProvider for AnthropicProvider {
-    async fn chat(&self, req: ChatRequest) -> LLMResponse {
+    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError> {
         let model = req
             .model
             .clone()
             .unwrap_or_else(|| self.default_model.clone());
         let endpoint = self.endpoint();
-        let payload = match serde_json::to_value(self.build_payload(model, req)) {
-            Ok(value) => value,
-            Err(err) => {
-                return error_response(format!("Error serializing Claude request: {}", err));
-            }
-        };
+        let payload = serde_json::to_value(self.build_payload(model, req)).map_err(|e| {
+            ProviderError::InvalidConfig(format!("Error serializing request: {}", e))
+        })?;
 
-        let response = match self
+        let response = self
             .send_request_with_proxy_fallback(&endpoint, &payload)
             .await
-        {
-            Ok(response) => response,
-            Err(message) => return error_response(message),
-        };
+            .map_err(|msg| ProviderError::Other(msg))?;
 
         let status = response.status();
-        let body_text = match response.text().await {
-            Ok(text) => text,
-            Err(err) => return error_response(format!("Error reading Claude response: {}", err)),
-        };
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ProviderError::ApiRequest(e))?;
 
         if !status.is_success() {
-            return error_response(format!(
-                "Error calling Claude: HTTP {}: {}",
+            let error_msg = format!(
+                "HTTP {}: {}",
                 status.as_u16(),
                 format_error_body(&body_text)
-            ));
+            );
+
+            return Err(match status.as_u16() {
+                401 | 403 => ProviderError::Authentication(error_msg),
+                429 => ProviderError::RateLimit(error_msg),
+                404 => ProviderError::ModelNotAvailable(error_msg),
+                500..=599 => ProviderError::Other(error_msg),
+                _ => ProviderError::InvalidResponse(error_msg),
+            });
         }
 
-        match serde_json::from_str::<AnthropicMessagesResponse>(&body_text) {
-            Ok(parsed) => parse_messages_response(parsed),
-            Err(err) => error_response(format!("Error parsing Claude response: {}", err)),
-        }
+        let parsed =
+            serde_json::from_str::<AnthropicMessagesResponse>(&body_text).map_err(|e| {
+                ProviderError::InvalidResponse(format!("Error parsing response: {}", e))
+            })?;
+
+        Ok(parse_messages_response(parsed))
     }
 
     async fn chat_stream(&self, req: ChatRequest) -> Result<StreamResponse, StreamError> {
@@ -451,17 +456,6 @@ fn map_usage(usage: Option<AnthropicUsage>) -> UsageStats {
             }
         }
         None => UsageStats::default(),
-    }
-}
-
-fn error_response(message: String) -> LLMResponse {
-    LLMResponse {
-        content: Some(message),
-        tool_calls: Vec::new(),
-        finish_reason: "error".to_string(),
-        usage: UsageStats::default(),
-        reasoning_content: None,
-        thinking_blocks: None,
     }
 }
 

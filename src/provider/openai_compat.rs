@@ -5,6 +5,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use tracing::debug;
 use uuid::Uuid;
 
+use crate::error::ProviderError;
 use crate::observability::TARGET_PROVIDER;
 use crate::provider::openai_types::{
     OpenAIResponsesResponse, ResponseFunctionCallItem, ResponseFunctionCallOutputItem,
@@ -257,42 +258,47 @@ impl OpenAICompatProvider {
 
 #[async_trait]
 impl LLMProvider for OpenAICompatProvider {
-    async fn chat(&self, req: ChatRequest) -> LLMResponse {
+    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError> {
         let model = self.resolve_model(req.model.as_deref().unwrap_or(&self.default_model));
         let endpoint = self.endpoint();
-        let payload = serde_json::to_value(self.build_responses_payload(model, req));
+        let payload =
+            serde_json::to_value(self.build_responses_payload(model, req)).map_err(|e| {
+                ProviderError::InvalidConfig(format!("Error serializing LLM request: {}", e))
+            })?;
 
-        let payload = match payload {
-            Ok(value) => value,
-            Err(err) => return error_response(format!("Error serializing LLM request: {}", err)),
-        };
-
-        let response = match self
+        let response = self
             .send_request_with_proxy_fallback(&endpoint, &payload)
             .await
-        {
-            Ok(r) => r,
-            Err(message) => return error_response(message),
-        };
+            .map_err(|msg| {
+                if msg.contains("timeout") {
+                    ProviderError::Timeout(30)
+                } else {
+                    ProviderError::Other(msg)
+                }
+            })?;
 
         let status = response.status();
-        let body_text = match response.text().await {
-            Ok(t) => t,
-            Err(e) => return error_response(format!("Error reading LLM response: {}", e)),
-        };
+        let body_text = response.text().await.map_err(|e| {
+            ProviderError::InvalidResponse(format!("Error reading LLM response: {}", e))
+        })?;
 
         if !status.is_success() {
-            return error_response(format!(
-                "Error calling LLM: HTTP {}: {}",
-                status.as_u16(),
-                body_text
-            ));
+            let error_msg = format!("HTTP {}: {}", status.as_u16(), body_text);
+
+            return Err(match status.as_u16() {
+                401 | 403 => ProviderError::Authentication(error_msg),
+                429 => ProviderError::RateLimit(error_msg),
+                404 => ProviderError::ModelNotAvailable(error_msg),
+                500..=599 => ProviderError::Other(error_msg),
+                _ => ProviderError::InvalidResponse(error_msg),
+            });
         }
 
-        match serde_json::from_str::<OpenAIResponsesResponse>(&body_text) {
-            Ok(parsed) => parse_responses_response(parsed),
-            Err(e) => error_response(format!("Error parsing LLM response: {}", e)),
-        }
+        let parsed = serde_json::from_str::<OpenAIResponsesResponse>(&body_text).map_err(|e| {
+            ProviderError::InvalidResponse(format!("Error parsing LLM response: {}", e))
+        })?;
+
+        Ok(parse_responses_response(parsed))
     }
 
     async fn chat_stream(&self, req: ChatRequest) -> Result<StreamResponse, StreamError> {
@@ -343,22 +349,20 @@ fn canonicalize_explicit_prefix(model: &str, spec_name: &str, canonical_prefix: 
     model.to_string()
 }
 
-fn error_response(message: String) -> LLMResponse {
-    LLMResponse {
-        content: Some(message),
-        tool_calls: Vec::new(),
-        finish_reason: "error".to_string(),
-        usage: UsageStats::default(),
-        reasoning_content: None,
-        thinking_blocks: None,
-    }
-}
-
 fn parse_responses_response(resp: OpenAIResponsesResponse) -> LLMResponse {
     if let Some(error) = resp.error.and_then(|err| err.message)
         && !error.trim().is_empty()
     {
-        return error_response(format!("Error calling LLM: {}", error));
+        // Note: This should ideally return an error, but keeping for backward compatibility
+        // in the response parsing path. The error should be caught earlier in the flow.
+        return LLMResponse {
+            content: Some(format!("Error calling LLM: {}", error)),
+            tool_calls: Vec::new(),
+            finish_reason: "error".to_string(),
+            usage: UsageStats::default(),
+            reasoning_content: None,
+            thinking_blocks: None,
+        };
     }
 
     let mut content_blocks = Vec::new();

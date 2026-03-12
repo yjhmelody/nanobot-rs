@@ -346,7 +346,8 @@ async fn run_subagent_loop_impl(
                 temperature,
                 reasoning_effort: reasoning_effort.map(|s| s.to_string()),
             })
-            .await;
+            .await
+            .map_err(|e| anyhow::anyhow!("Subagent LLM provider error: {}", e))?;
 
         // when tool call the sub agent will end task
         if response.has_tool_calls() {
@@ -442,6 +443,7 @@ fn announce_result_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProviderError;
     use crate::provider::{ChatRequest, LLMResponse, UsageStats};
     use async_trait::async_trait;
 
@@ -452,15 +454,15 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for MockProvider {
-        async fn chat(&self, _req: ChatRequest) -> LLMResponse {
-            LLMResponse {
+        async fn chat(&self, _req: ChatRequest) -> std::result::Result<LLMResponse, ProviderError> {
+            Ok(LLMResponse {
                 content: Some(self.response.clone()),
                 tool_calls: Vec::new(),
                 finish_reason: "stop".to_string(),
                 usage: UsageStats::default(),
                 reasoning_content: None,
                 thinking_blocks: None,
-            }
+            })
         }
 
         fn default_model(&self) -> &str {
@@ -549,16 +551,19 @@ mod tests {
 
         #[async_trait]
         impl LLMProvider for SlowProvider {
-            async fn chat(&self, _req: ChatRequest) -> LLMResponse {
+            async fn chat(
+                &self,
+                _req: ChatRequest,
+            ) -> std::result::Result<LLMResponse, ProviderError> {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                LLMResponse {
+                Ok(LLMResponse {
                     content: Some("Task completed".to_string()),
                     tool_calls: Vec::new(),
                     finish_reason: "stop".to_string(),
                     usage: UsageStats::default(),
                     reasoning_content: None,
                     thinking_blocks: None,
-                }
+                })
             }
 
             fn default_model(&self) -> &str {

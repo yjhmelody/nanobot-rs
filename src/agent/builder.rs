@@ -79,6 +79,7 @@ pub struct AgentLoopBuilder {
     // Configuration
     config: AgentConfig,
     consolidation_config: ConsolidationConfig,
+    auto_consolidation: bool,
     web_config: WebToolsConfig,
     exec_config: ExecToolConfig,
     mcp_servers: HashMap<String, MCPServerConfig>,
@@ -105,6 +106,7 @@ impl AgentLoopBuilder {
             workspace,
             config: AgentConfig::default(),
             consolidation_config: ConsolidationConfig::default(),
+            auto_consolidation: true,
             web_config: WebToolsConfig::default(),
             exec_config: ExecToolConfig::default(),
             mcp_servers: HashMap::new(),
@@ -124,6 +126,12 @@ impl AgentLoopBuilder {
     /// Sets the session consolidation configuration.
     pub fn with_consolidation_config(mut self, config: ConsolidationConfig) -> Self {
         self.consolidation_config = config;
+        self
+    }
+
+    /// Enables or disables automatic session consolidation.
+    pub fn with_auto_consolidation(mut self, enabled: bool) -> Self {
+        self.auto_consolidation = enabled;
         self
     }
 
@@ -182,7 +190,8 @@ impl AgentLoopBuilder {
         let store = JsonlSessionStore::new(&self.workspace).await?;
 
         // Build SessionManager with consolidation and memory providers
-        let mut session_manager = SessionManager::new(Box::new(store));
+        let mut session_manager =
+            SessionManager::new(Box::new(store)).with_auto_consolidation(self.auto_consolidation);
 
         // Add LLM-based consolidation strategy
         let consolidation_strategy = LlmConsolidationStrategy::new(
@@ -266,6 +275,7 @@ impl AgentLoopBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProviderError;
     use crate::provider::{ChatRequest, LLMResponse, UsageStats};
     use async_trait::async_trait;
 
@@ -274,15 +284,15 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for DummyProvider {
-        async fn chat(&self, _req: ChatRequest) -> LLMResponse {
-            LLMResponse {
+        async fn chat(&self, _req: ChatRequest) -> Result<LLMResponse, ProviderError> {
+            Ok(LLMResponse {
                 content: Some("test".to_string()),
                 tool_calls: Vec::new(),
                 finish_reason: "stop".to_string(),
                 usage: UsageStats::default(),
                 reasoning_content: None,
                 thinking_blocks: None,
-            }
+            })
         }
 
         fn default_model(&self) -> &str {

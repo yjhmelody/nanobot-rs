@@ -109,6 +109,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::agent::SpawnService;
+    use crate::error::ProviderError;
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
 
     #[allow(unused)]
@@ -116,15 +117,15 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for DummyProvider {
-        async fn chat(&self, _req: ChatRequest) -> LLMResponse {
-            LLMResponse {
+        async fn chat(&self, _req: ChatRequest) -> std::result::Result<LLMResponse, ProviderError> {
+            Ok(LLMResponse {
                 content: Some("done".to_string()),
                 tool_calls: Vec::new(),
                 finish_reason: "stop".to_string(),
                 usage: UsageStats::default(),
                 reasoning_content: None,
                 thinking_blocks: None,
-            }
+            })
         }
 
         fn default_model(&self) -> &str {

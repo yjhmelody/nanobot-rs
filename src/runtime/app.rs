@@ -56,6 +56,7 @@ pub async fn build_runtime(config: Config) -> Result<RuntimeBundle> {
             .with_restrict_to_workspace(config.tools.restrict_to_workspace)
             .with_cron_service(cron.clone())
             .with_send_usage_summary(config.channels.send_usage_summary)
+            .with_auto_consolidation(config.agents.defaults.auto_consolidate)
             .build()
             .await?,
     );
