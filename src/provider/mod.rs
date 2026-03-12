@@ -1,8 +1,8 @@
 pub mod anthropic;
 mod anthropic_types;
 pub mod base;
-mod openai_types;
 pub mod openai_compat;
+mod openai_types;
 pub mod proxy;
 pub mod registry;
 pub mod streaming;

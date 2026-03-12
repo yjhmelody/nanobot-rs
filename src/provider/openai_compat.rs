@@ -6,18 +6,18 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::observability::TARGET_PROVIDER;
+use crate::provider::openai_types::{
+    OpenAIResponsesResponse, ResponseFunctionCallItem, ResponseFunctionCallOutputItem,
+    ResponseInputContent, ResponseInputItem, ResponseInputMessage, ResponseOutputBlock,
+    ResponseOutputContent, ResponseReasoningConfig, ResponseReasoningSummary,
+    ResponseToolDefinition, ResponsesPayload, ResponsesUsage,
+};
 use crate::provider::proxy::ProxyFallbackHelper;
 use crate::provider::registry::find_spec;
 use crate::provider::streaming::{OpenAiAdapter, StreamAdapter, StreamError, StreamResponse};
 use crate::provider::{
     ChatMessage, ChatRequest, LLMProvider, LLMResponse, MessageContent, MessageRole,
     ToolCallRequest, UsageStats,
-};
-use crate::provider::openai_types::{
-    OpenAIResponsesResponse, ResponseFunctionCallItem, ResponseFunctionCallOutputItem,
-    ResponseInputContent, ResponseInputItem, ResponseInputMessage, ResponseOutputBlock,
-    ResponseOutputContent, ResponseReasoningConfig, ResponseReasoningSummary,
-    ResponseToolDefinition, ResponsesPayload, ResponsesUsage,
 };
 
 #[derive(Debug)]

@@ -5,16 +5,16 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use tracing::trace;
 
 use crate::observability::TARGET_PROVIDER;
+use crate::provider::anthropic_types::{
+    AnthropicContentBlock, AnthropicErrorResponse, AnthropicInputContentBlock,
+    AnthropicInputMessage, AnthropicMessagesPayload, AnthropicMessagesResponse,
+    AnthropicToolDefinition, AnthropicUsage,
+};
 use crate::provider::proxy::ProxyFallbackHelper;
 use crate::provider::streaming::{SseAdapter, StreamAdapter, StreamError, StreamResponse};
 use crate::provider::{
     AssistantToolCall, ChatMessage, ChatRequest, LLMProvider, LLMResponse, MessageContent,
     MessageRole, ToolCallRequest, UsageStats,
-};
-use crate::provider::anthropic_types::{
-    AnthropicContentBlock, AnthropicErrorResponse, AnthropicInputContentBlock,
-    AnthropicInputMessage, AnthropicMessagesPayload, AnthropicMessagesResponse,
-    AnthropicToolDefinition, AnthropicUsage,
 };
 
 const DEFAULT_API_BASE: &str = "https://api.anthropic.com/v1";
