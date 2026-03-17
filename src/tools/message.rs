@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::bus::{MessageBus, MessageId, MessageMetadata, OutboundMessage};
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -72,7 +72,7 @@ impl MessageTool {
         .clone()
     }
 
-    async fn execute_typed(&self, args: MessageArgs, ctx: &ToolContext) -> Result<String> {
+    async fn execute_typed(&self, args: MessageArgs, ctx: &ToolContext) -> ToolResult<String> {
         let channel = args.channel.unwrap_or_else(|| ctx.channel.clone());
         let chat_id = args.chat_id.unwrap_or_else(|| ctx.chat_id.clone());
         let message_id = args
@@ -81,7 +81,7 @@ impl MessageTool {
             .or_else(|| ctx.message_id.clone());
 
         if channel.trim().is_empty() || chat_id.trim().is_empty() {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "message",
                 anyhow::anyhow!("no target channel/chat specified"),
             ));
@@ -103,7 +103,7 @@ impl MessageTool {
                 metadata,
             };
             if let Err(e) = bus.publish_outbound(msg) {
-                return Err(NanobotError::tool_execution(
+                return Err(ToolError::execution(
                     "message",
                     anyhow::anyhow!("sending message: {}", e),
                 ));
@@ -133,17 +133,17 @@ impl Tool for MessageTool {
         Self::definition()
     }
 
-    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> ToolResult<String> {
         let parsed = parse_args::<MessageArgs>(args_json)?;
         self.execute_typed(parsed, ctx).await
     }
 
-    async fn start_turn(&self) -> Result<()> {
+    async fn start_turn(&self) -> ToolResult<()> {
         self.sent_in_turn.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn sent_in_turn(&self) -> Result<bool> {
+    async fn sent_in_turn(&self) -> ToolResult<bool> {
         Ok(self.sent_in_turn.load(Ordering::SeqCst))
     }
 }

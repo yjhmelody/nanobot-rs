@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use crate::config::error::{ConfigError, ConfigResult};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::utils::helpers::expand_tilde;
@@ -74,7 +74,7 @@ impl Config {
     /// - `exec.timeout` is zero
     /// - `gateway.port` is zero
     /// - `heartbeat.interval_s` is zero when enabled
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         // Validate agent defaults
         self.agents.defaults.validate()?;
 
@@ -303,6 +303,30 @@ pub struct AgentDefaults {
     pub reasoning_effort: Option<String>,
     /// Enables automatic session consolidation after saving turns.
     pub auto_consolidate: bool,
+    /// Custom prompt configuration for this agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<PromptConfig>,
+}
+
+/// Configuration for agent prompts
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PromptConfig {
+    /// Name of the prompt template to use
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+
+    /// Variables to substitute in the template
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+
+    /// Inline system prompt (overrides template)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+
+    /// Additional custom instructions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom: Option<String>,
 }
 
 impl Default for AgentDefaults {
@@ -318,38 +342,42 @@ impl Default for AgentDefaults {
             memory_window: 100,
             reasoning_effort: None,
             auto_consolidate: true,
+            prompt: None,
         }
     }
 }
 
 impl AgentDefaults {
     /// Validates agent default configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         if self.max_tokens <= 0 {
-            bail!("max_tokens must be positive, got {}", self.max_tokens);
+            return Err(ConfigError::invalid(format!(
+                "max_tokens must be positive, got {}",
+                self.max_tokens
+            )));
         }
 
         if !(0.0..=2.0).contains(&self.temperature) {
-            bail!(
+            return Err(ConfigError::invalid(format!(
                 "temperature must be in range [0.0, 2.0], got {}",
                 self.temperature
-            );
+            )));
         }
 
         if self.max_tool_iterations == 0 {
-            bail!("max_tool_iterations must be positive");
+            return Err(ConfigError::invalid("max_tool_iterations must be positive"));
         }
 
         if self.memory_window == 0 {
-            bail!("memory_window must be positive");
+            return Err(ConfigError::invalid("memory_window must be positive"));
         }
 
         if self.workspace.trim().is_empty() {
-            bail!("workspace path cannot be empty");
+            return Err(ConfigError::invalid("workspace path cannot be empty"));
         }
 
         if self.model.trim().is_empty() {
-            bail!("model name cannot be empty");
+            return Err(ConfigError::invalid("model name cannot be empty"));
         }
 
         Ok(())
@@ -588,13 +616,13 @@ impl Default for GatewayConfig {
 
 impl GatewayConfig {
     /// Validates gateway configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         if self.port == 0 {
-            bail!("gateway port cannot be zero");
+            return Err(ConfigError::invalid("gateway port cannot be zero"));
         }
 
         if self.host.trim().is_empty() {
-            bail!("gateway host cannot be empty");
+            return Err(ConfigError::invalid("gateway host cannot be empty"));
         }
 
         self.heartbeat.validate()?;
@@ -624,9 +652,11 @@ impl Default for HeartbeatConfig {
 
 impl HeartbeatConfig {
     /// Validates heartbeat configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         if self.enabled && self.interval_s == 0 {
-            bail!("heartbeat interval_s cannot be zero when enabled");
+            return Err(ConfigError::invalid(
+                "heartbeat interval_s cannot be zero when enabled",
+            ));
         }
 
         Ok(())
@@ -660,14 +690,14 @@ impl Default for ToolsConfig {
 
 impl ToolsConfig {
     /// Validates tools configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         self.web.validate()?;
         self.exec.validate()?;
 
         // Validate MCP servers
         for (name, server) in &self.mcp_servers {
             if name.trim().is_empty() {
-                bail!("MCP server name cannot be empty");
+                return Err(ConfigError::invalid("MCP server name cannot be empty"));
             }
             server.validate()?;
         }
@@ -697,7 +727,7 @@ impl Default for WebToolsConfig {
 
 impl WebToolsConfig {
     /// Validates web tools configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         self.search.validate()?;
         Ok(())
     }
@@ -724,9 +754,11 @@ impl Default for WebSearchConfig {
 
 impl WebSearchConfig {
     /// Validates web search configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         if self.max_results == 0 {
-            bail!("web search max_results must be positive");
+            return Err(ConfigError::invalid(
+                "web search max_results must be positive",
+            ));
         }
         Ok(())
     }
@@ -753,9 +785,9 @@ impl Default for ExecToolConfig {
 
 impl ExecToolConfig {
     /// Validates exec tool configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         if self.timeout == 0 {
-            bail!("exec timeout must be positive");
+            return Err(ConfigError::invalid("exec timeout must be positive"));
         }
         Ok(())
     }
@@ -794,17 +826,21 @@ impl Default for MCPServerConfig {
 
 impl MCPServerConfig {
     /// Validates MCP server configuration.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> ConfigResult<()> {
         // Either command or url must be specified
         let has_command = !self.command.trim().is_empty();
         let has_url = !self.url.trim().is_empty();
 
         if !has_command && !has_url {
-            bail!("MCP server must specify either 'command' or 'url'");
+            return Err(ConfigError::invalid(
+                "MCP server must specify either 'command' or 'url'",
+            ));
         }
 
         if self.tool_timeout == 0 {
-            bail!("MCP server tool_timeout must be positive");
+            return Err(ConfigError::invalid(
+                "MCP server tool_timeout must be positive",
+            ));
         }
 
         Ok(())

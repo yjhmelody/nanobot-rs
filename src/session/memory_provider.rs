@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::session::SessionResult;
 use async_trait::async_trait;
 
 use super::memory_store::MemoryStore;
@@ -24,7 +24,7 @@ impl CompositeMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for CompositeMemoryProvider {
-    async fn get_context(&self, query: &str, session_key: &str) -> Result<String> {
+    async fn get_context(&self, query: &str, session_key: &str) -> SessionResult<String> {
         let mut contexts = Vec::new();
 
         for provider in &self.providers {
@@ -43,7 +43,7 @@ impl MemoryProvider for CompositeMemoryProvider {
         content: &str,
         session_key: &str,
         metadata: Option<&serde_json::Value>,
-    ) -> Result<()> {
+    ) -> SessionResult<()> {
         // Store to all providers
         for provider in &self.providers {
             provider.store(content, session_key, metadata).await?;
@@ -51,7 +51,7 @@ impl MemoryProvider for CompositeMemoryProvider {
         Ok(())
     }
 
-    async fn append_history(&self, entry: &str) -> Result<()> {
+    async fn append_history(&self, entry: &str) -> SessionResult<()> {
         // Append to all providers
         for provider in &self.providers {
             provider.append_history(entry).await?;
@@ -66,7 +66,7 @@ pub struct FileMemoryProvider {
 }
 
 impl FileMemoryProvider {
-    pub fn new(workspace: &std::path::Path) -> Result<Self> {
+    pub fn new(workspace: &std::path::Path) -> SessionResult<Self> {
         Ok(Self {
             store: MemoryStore::new(workspace)?,
         })
@@ -79,7 +79,7 @@ impl FileMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for FileMemoryProvider {
-    async fn get_context(&self, _query: &str, _session_key: &str) -> Result<String> {
+    async fn get_context(&self, _query: &str, _session_key: &str) -> SessionResult<String> {
         // Simple implementation: return long-term memory
         // Future: could use query for semantic search
         Ok(self.store.get_memory_context().await)
@@ -90,13 +90,13 @@ impl MemoryProvider for FileMemoryProvider {
         content: &str,
         _session_key: &str,
         _metadata: Option<&serde_json::Value>,
-    ) -> Result<()> {
+    ) -> SessionResult<()> {
         // Simple implementation: overwrite long-term memory
         // Future: could append or merge intelligently
         self.store.write_long_term(content).await
     }
 
-    async fn append_history(&self, entry: &str) -> Result<()> {
+    async fn append_history(&self, entry: &str) -> SessionResult<()> {
         self.store.append_history(entry).await
     }
 }

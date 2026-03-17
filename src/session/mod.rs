@@ -1,5 +1,6 @@
 // pub mod consolidation;
 pub mod consolidation_strategy;
+pub mod error;
 pub mod memory_provider;
 pub mod memory_store;
 pub mod session_hook;
@@ -10,6 +11,7 @@ pub mod transformer;
 pub mod types;
 
 pub use self::consolidation_strategy::*;
+pub use self::error::{SessionError, SessionResult};
 pub use self::memory_provider::*;
 pub use self::memory_store::*;
 pub use self::session_hook::*;

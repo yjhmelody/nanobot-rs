@@ -9,7 +9,7 @@ use tracing::{error, info};
 use crate::agent::skills::SkillsLoader;
 use crate::agent::traits::SpawnService;
 use crate::bus::{InboundMessage, MessageBus, MessageMetadata};
-use crate::error::Result;
+use crate::error::NanobotResult;
 use crate::observability::TARGET_SUBAGENT;
 use crate::provider::{
     AssistantFunctionCall, AssistantToolCall, ChatMessage, ChatRequest, LLMProvider,
@@ -267,7 +267,7 @@ impl SpawnService for SubagentManager {
             .await
     }
 
-    async fn cancel_by_session(&self, session_key: &SessionKey) -> Result<usize> {
+    async fn cancel_by_session(&self, session_key: &SessionKey) -> NanobotResult<usize> {
         Ok(self.inner.cancel_by_session(session_key).await)
     }
 }
@@ -309,7 +309,7 @@ async fn run_subagent_loop_impl(
     temperature: f32,
     max_tokens: i32,
     reasoning_effort: Option<&str>,
-) -> Result<String> {
+) -> NanobotResult<String> {
     let tool_defs = tools.definitions();
 
     let runtime = chrono::Local::now()
@@ -443,7 +443,7 @@ fn announce_result_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ProviderError;
+    use crate::provider::ProviderError;
     use crate::provider::{ChatRequest, LLMResponse, UsageStats};
     use async_trait::async_trait;
 

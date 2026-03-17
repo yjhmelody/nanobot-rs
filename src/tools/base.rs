@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 pub use crate::types::tools::{
     JsonSchema, JsonSchemaType, ToolContext, ToolDefinition, ToolFunction,
 };
@@ -19,32 +19,32 @@ pub trait Tool: Send + Sync {
     fn definition(&self) -> std::sync::Arc<ToolDefinition>;
 
     /// Execute tool using raw JSON args with runtime context.
-    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Result<String>;
+    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> ToolResult<String>;
 
     /// Optional hook called at the start of each agent turn.
-    async fn start_turn(&self) -> Result<()> {
+    async fn start_turn(&self) -> ToolResult<()> {
         Ok(())
     }
 
     /// Optional signal used by tools like `message`.
     /// Returns true if the tool sent a message in the current turn.
-    async fn sent_in_turn(&self) -> Result<bool> {
+    async fn sent_in_turn(&self) -> ToolResult<bool> {
         Ok(false)
     }
 
     /// Optional cancellation hook for session-scoped background tasks.
-    async fn cancel_by_session(&self, _session_key: &str) -> Result<usize> {
+    async fn cancel_by_session(&self, _session_key: &str) -> ToolResult<usize> {
         Ok(0)
     }
 }
 
 /// Parse raw JSON arguments into a strong-typed argument struct.
-pub fn parse_args<T>(args_json: &str) -> Result<T>
+pub fn parse_args<T>(args_json: &str) -> ToolResult<T>
 where
     T: DeserializeOwned,
 {
     serde_json::from_str::<T>(args_json).map_err(|e| {
-        NanobotError::invalid_tool_args("unknown", format!("invalid tool arguments: {}", e))
+        ToolError::invalid_args("unknown", format!("invalid tool arguments: {}", e))
     })
 }
 

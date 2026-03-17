@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::session::SessionResult;
 use async_trait::async_trait;
 
 use super::traits::HistoryTransformer;
@@ -11,7 +11,7 @@ pub struct SensitiveDataFilter {
 }
 
 impl SensitiveDataFilter {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> SessionResult<Self> {
         Ok(Self {
             patterns: vec![
                 regex::Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")?, // Email
@@ -39,7 +39,7 @@ impl HistoryTransformer for SensitiveDataFilter {
         &self,
         messages: Vec<ChatMessage>,
         _session: &Session,
-    ) -> Result<Vec<ChatMessage>> {
+    ) -> SessionResult<Vec<ChatMessage>> {
         let mut transformed = Vec::with_capacity(messages.len());
 
         for mut msg in messages {
@@ -77,7 +77,7 @@ impl HistoryTransformer for MetadataAnnotator {
         &self,
         mut messages: Vec<ChatMessage>,
         session: &Session,
-    ) -> Result<Vec<ChatMessage>> {
+    ) -> SessionResult<Vec<ChatMessage>> {
         // Add a system message at the beginning with metadata
         let metadata_msg = ChatMessage {
             role: crate::provider::MessageRole::System,

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::bus::OutboundMessage;
 use crate::channels::base::{ChannelAdapter, SendOutcome};
-use crate::error::Result;
+use crate::channels::ChannelResult;
 
 pub struct CliChannel {
     running: AtomicBool,
@@ -24,17 +24,17 @@ impl ChannelAdapter for CliChannel {
         "cli"
     }
 
-    async fn start(&self) -> Result<()> {
+    async fn start(&self) -> ChannelResult<()> {
         self.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> ChannelResult<()> {
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome> {
+    async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome> {
         if msg.content.trim().is_empty() {
             return Ok(SendOutcome::default());
         }

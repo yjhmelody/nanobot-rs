@@ -10,11 +10,11 @@ use tracing::{error, info, warn};
 use crate::bus::{InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage};
 use crate::channels::base::{ChannelAdapter, SendOutcome, is_sender_allowed};
 use crate::config::schema::GenericChannelConfig;
-use crate::error::{NanobotError, Result};
+use crate::channels::{ChannelError, ChannelResult};
 use crate::observability::TARGET_CHANNELS;
 use crate::types::channels::{
-    TelegramEditMessageText, TelegramSendMessage, TelegramSendMessageResponse,
-    TelegramUpdatesResponse,
+    TelegramEditMessageText, TelegramSendChatAction, TelegramSendMessage,
+    TelegramSendMessageResponse, TelegramUpdatesResponse,
 };
 
 const TELEGRAM_API_DEFAULT: &str = "https://api.telegram.org";
@@ -26,27 +26,30 @@ pub struct TelegramChannel {
     client: Client,
     token: String,
     api_base: String,
+    receive_ack: bool,
     running: Arc<AtomicBool>,
     offset: Arc<AtomicI64>,
     poll_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl TelegramChannel {
-    pub fn new(config: GenericChannelConfig, bus: MessageBus) -> Result<Self> {
+    pub fn new(config: GenericChannelConfig, bus: MessageBus) -> ChannelResult<Self> {
         let token = extra_string(&config, &["token", "botToken"])
-            .ok_or_else(|| NanobotError::config("telegram.token is required"))?;
+            .ok_or_else(|| ChannelError::config("telegram.token is required"))?;
         if token.trim().is_empty() {
-            return Err(NanobotError::config("telegram.token is empty"));
+            return Err(ChannelError::config("telegram.token is empty"));
         }
 
         let api_base =
             extra_string(&config, &["apiBase"]).unwrap_or_else(|| TELEGRAM_API_DEFAULT.to_string());
+        let receive_ack = extra_bool(&config, &["receiveAck"]).unwrap_or(false);
         Ok(Self {
             config,
             bus,
             client: Client::new(),
             token,
             api_base,
+            receive_ack,
             running: Arc::new(AtomicBool::new(false)),
             offset: Arc::new(AtomicI64::new(0)),
             poll_task: Mutex::new(None),
@@ -69,7 +72,7 @@ impl ChannelAdapter for TelegramChannel {
         "telegram"
     }
 
-    async fn start(&self) -> Result<()> {
+    async fn start(&self) -> ChannelResult<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -80,6 +83,8 @@ impl ChannelAdapter for TelegramChannel {
         let bus = self.bus.clone();
         let allow_from = self.config.allow_from.clone();
         let get_updates_url = self.endpoint("getUpdates");
+        let send_action_url = self.endpoint("sendChatAction");
+        let receive_ack = self.receive_ack;
 
         let handle = tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
@@ -137,6 +142,21 @@ impl ChannelAdapter for TelegramChannel {
                         continue;
                     }
 
+                    if receive_ack {
+                        // Telegram sendChatAction (typing) limitations:
+                        // - The status is shown for ~5 seconds or less and is cleared when the bot sends a message.
+                        // - Not supported in channel chats and channel direct messages chats.
+                        // - Recommended only for long-running responses.
+                        let _ = client
+                            .post(&send_action_url)
+                            .json(&TelegramSendChatAction {
+                                chat_id: message.chat.id,
+                                action: "typing".to_string(),
+                            })
+                            .send()
+                            .await;
+                    }
+
                     let inbound = InboundMessage {
                         channel: "telegram".to_string(),
                         sender_id: sender,
@@ -166,7 +186,7 @@ impl ChannelAdapter for TelegramChannel {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> ChannelResult<()> {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.poll_task.lock().await.take() {
             handle.abort();
@@ -174,9 +194,9 @@ impl ChannelAdapter for TelegramChannel {
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome> {
+    async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome> {
         let chat_id = msg.chat_id.parse::<i64>().map_err(|_| {
-            NanobotError::channel("telegram", format!("invalid chat_id '{}'", msg.chat_id))
+            ChannelError::adapter("telegram", format!("invalid chat_id '{}'", msg.chat_id))
         })?;
 
         let mut last_message_id = None;
@@ -191,7 +211,7 @@ impl ChannelAdapter for TelegramChannel {
                 .send()
                 .await
                 .map_err(|err| {
-                    NanobotError::channel("telegram", format!("sendMessage failed: {}", err))
+                    ChannelError::adapter("telegram", format!("sendMessage failed: {}", err))
                 })?;
             if let Ok(payload) = response.json::<TelegramSendMessageResponse>().await {
                 if payload.ok {
@@ -204,12 +224,12 @@ impl ChannelAdapter for TelegramChannel {
         })
     }
 
-    async fn update(&self, message_id: &str, msg: OutboundMessage) -> Result<()> {
+    async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
         let chat_id = msg.chat_id.parse::<i64>().map_err(|_| {
-            NanobotError::channel("telegram", format!("invalid chat_id '{}'", msg.chat_id))
+            ChannelError::adapter("telegram", format!("invalid chat_id '{}'", msg.chat_id))
         })?;
         let message_id = message_id.parse::<i64>().map_err(|_| {
-            NanobotError::channel("telegram", format!("invalid message_id '{}'", message_id))
+            ChannelError::adapter("telegram", format!("invalid message_id '{}'", message_id))
         })?;
         let text = truncate_text(&msg.content, TELEGRAM_TEXT_LIMIT);
 
@@ -223,7 +243,7 @@ impl ChannelAdapter for TelegramChannel {
             .send()
             .await
             .map_err(|err| {
-                NanobotError::channel("telegram", format!("editMessageText failed: {}", err))
+                ChannelError::adapter("telegram", format!("editMessageText failed: {}", err))
             })?;
 
         Ok(())
@@ -273,6 +293,25 @@ fn extra_string(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Some(v) = cfg.extra.get(*key).and_then(|v| v.as_str()) {
             return Some(v.to_string());
+        }
+    }
+    None
+}
+
+fn extra_bool(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        if let Some(v) = cfg.extra.get(*key) {
+            if let Some(value) = v.as_bool() {
+                return Some(value);
+            }
+            if let Some(value) = v.as_str() {
+                let normalized = value.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "true" | "1" | "yes" | "y" | "on" => return Some(true),
+                    "false" | "0" | "no" | "n" | "off" => return Some(false),
+                    _ => {}
+                }
+            }
         }
     }
     None

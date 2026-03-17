@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Result, bail};
+use crate::heartbeat::{HeartbeatError, HeartbeatResult};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
@@ -20,7 +20,7 @@ const HEARTBEAT_USER_PROMPT_PREFIX: &str =
 
 #[async_trait]
 pub trait HeartbeatExecuteHandler: Send + Sync {
-    async fn on_execute(&self, tasks: String) -> Result<String>;
+    async fn on_execute(&self, tasks: String) -> HeartbeatResult<String>;
 }
 
 #[async_trait]
@@ -139,7 +139,7 @@ impl HeartbeatService {
         }
     }
 
-    async fn tick(&self) -> anyhow::Result<()> {
+    async fn tick(&self) -> HeartbeatResult<()> {
         // Background loop path; same decision pipeline with optional notify callback.
         let Some(content) = self.read_heartbeat_file() else {
             return Ok(());
@@ -179,7 +179,7 @@ impl HeartbeatService {
             .filter(|s| !s.is_empty())
     }
 
-    async fn decide(&self, content: &str) -> Result<(String, String)> {
+    async fn decide(&self, content: &str) -> HeartbeatResult<(String, String)> {
         let response = self
             .provider
             .chat(ChatRequest {
@@ -194,8 +194,7 @@ impl HeartbeatService {
                 temperature: 0.0,
                 reasoning_effort: None,
             })
-            .await
-            .map_err(|e| anyhow::anyhow!("Heartbeat LLM provider error: {}", e))?;
+            .await?;
 
         let Some(content) = response.content.as_deref() else {
             return Ok(("skip".to_string(), String::new()));
@@ -205,10 +204,10 @@ impl HeartbeatService {
         Ok((parsed.action.trim().to_lowercase(), parsed.tasks))
     }
 
-    fn parse_decision_response(content: &str) -> Result<HeartbeatDecisionArgs> {
+    fn parse_decision_response(content: &str) -> HeartbeatResult<HeartbeatDecisionArgs> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
-            bail!("heartbeat response was empty");
+            return Err(HeartbeatError::response("heartbeat response was empty"));
         }
 
         if let Ok(parsed) = serde_json::from_str::<HeartbeatDecisionArgs>(trimmed) {
@@ -227,7 +226,9 @@ impl HeartbeatService {
             }
         }
 
-        bail!("heartbeat response did not contain valid JSON")
+        Err(HeartbeatError::response(
+            "heartbeat response did not contain valid JSON",
+        ))
     }
 
     fn extract_json_block(content: &str) -> Option<String> {
@@ -263,7 +264,7 @@ impl HeartbeatService {
 mod tests {
     use super::*;
 
-    use crate::error::ProviderError;
+    use crate::provider::ProviderError;
     use crate::types::provider::{LLMResponse, UsageStats};
 
     struct StubProvider {
@@ -308,7 +309,7 @@ mod tests {
 
     #[async_trait]
     impl HeartbeatExecuteHandler for ExecRecorder {
-        async fn on_execute(&self, tasks: String) -> Result<String> {
+        async fn on_execute(&self, tasks: String) -> HeartbeatResult<String> {
             self.seen.lock().await.push(tasks);
             Ok(self.response.clone())
         }

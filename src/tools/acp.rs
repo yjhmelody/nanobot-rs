@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::acp::client::ACPClient;
 use crate::acp::config::{ACPConfig, AgentConfig};
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -32,10 +32,10 @@ impl ACPTool {
         Self { config }
     }
 
-    fn parse_execute_args(&self, args_json: &str) -> Result<ACPExecuteArgs> {
+    fn parse_execute_args(&self, args_json: &str) -> ToolResult<ACPExecuteArgs> {
         parse_args::<ACPExecuteArgs>(args_json).map_err(|err| match err {
-            NanobotError::InvalidToolArgs { message, .. } => {
-                NanobotError::invalid_tool_args(self.name(), message)
+            ToolError::InvalidArgs { message, .. } => {
+                ToolError::invalid_args(self.name(), message)
             }
             other => other,
         })
@@ -86,16 +86,16 @@ impl ACPTool {
         }
     }
 
-    fn resolve_agent_config(&self, agent_id: &str) -> Result<&AgentConfig> {
+    fn resolve_agent_config(&self, agent_id: &str) -> ToolResult<&AgentConfig> {
         let allowed_agents = self.allowed_agents();
         if allowed_agents.is_empty() {
-            return Err(NanobotError::invalid_tool_args(
+            return Err(ToolError::invalid_args(
                 self.name(),
                 "No ACP agents are allowed. Configure `acp.allowed_agents` first.",
             ));
         }
         if !allowed_agents.iter().any(|allowed| allowed == agent_id) {
-            return Err(NanobotError::invalid_tool_args(
+            return Err(ToolError::invalid_args(
                 self.name(),
                 format!(
                     "Agent '{}' is not allowed. Allowed agents: {}",
@@ -112,7 +112,7 @@ impl ACPTool {
             } else {
                 configured.join(", ")
             };
-            NanobotError::invalid_tool_args(
+            ToolError::invalid_args(
                 self.name(),
                 format!(
                     "Agent '{}' is not configured. Configured agents: {}",
@@ -122,7 +122,7 @@ impl ACPTool {
         })?;
 
         if agent_config.command.trim().is_empty() {
-            return Err(NanobotError::invalid_tool_args(
+            return Err(ToolError::invalid_args(
                 self.name(),
                 format!("Agent '{}' is configured with an empty command", agent_id),
             ));
@@ -131,7 +131,7 @@ impl ACPTool {
         Ok(agent_config)
     }
 
-    async fn execute_request(&self, request: ACPExecuteArgs) -> Result<String> {
+    async fn execute_request(&self, request: ACPExecuteArgs) -> ToolResult<String> {
         let ACPExecuteArgs {
             agent_id,
             task,
@@ -145,26 +145,26 @@ impl ACPTool {
             cwd,
             &agent_config.env,
         )
-        .map_err(|err| NanobotError::tool_execution(self.name(), err))?;
+        .map_err(|err| ToolError::execution(self.name(), err))?;
 
         let mut client = ACPClient::spawn(agent_id, command, session_cwd)
             .await
-            .map_err(|err| NanobotError::tool_execution(self.name(), err))?;
+            .map_err(|err| ToolError::execution(self.name(), err))?;
 
         let execution_result = client.execute(&task).await;
         let close_result = client.close().await;
 
         match (execution_result, close_result) {
             (Ok(output), Ok(())) => Ok(output),
-            (Ok(_), Err(close_err)) => Err(NanobotError::tool_execution(
+            (Ok(_), Err(close_err)) => Err(ToolError::execution(
                 self.name(),
                 anyhow::anyhow!(
                     "ACP execution finished but failed to close process: {}",
                     close_err
                 ),
             )),
-            (Err(exec_err), Ok(())) => Err(NanobotError::tool_execution(self.name(), exec_err)),
-            (Err(exec_err), Err(close_err)) => Err(NanobotError::tool_execution(
+            (Err(exec_err), Ok(())) => Err(ToolError::execution(self.name(), exec_err)),
+            (Err(exec_err), Err(close_err)) => Err(ToolError::execution(
                 self.name(),
                 anyhow::anyhow!(
                     "ACP execution failed: {}; additionally failed to close process: {}",
@@ -211,7 +211,7 @@ impl Tool for ACPTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _context: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _context: &ToolContext) -> ToolResult<String> {
         let request = self.parse_execute_args(args_json)?;
         self.execute_request(request).await
     }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::{debug, warn};
 
-use crate::error::ProviderError;
+use crate::provider::{ProviderError, ProviderResult};
 use crate::observability::TARGET_PROVIDER;
 use crate::provider::streaming::{StreamError, StreamResponse};
 use crate::provider::traits::{ChatRequest, LLMProvider};
@@ -55,7 +55,7 @@ impl LLMProvider for FallbackProvider {
         &self.default_model
     }
 
-    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError> {
+    async fn chat(&self, req: ChatRequest) -> ProviderResult<LLMResponse> {
         let mut last_error = None;
 
         for (index, provider) in self.providers.iter().enumerate() {

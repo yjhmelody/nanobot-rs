@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -14,6 +14,7 @@ use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::traits::SessionStore;
+use super::SessionResult;
 use super::types::{Session, SessionEntry, SessionMetadata, SessionMetadataLine, SessionSummary};
 use crate::utils::helpers::{ensure_dir_async, safe_filename};
 
@@ -40,7 +41,7 @@ impl JsonlSessionStore {
     /// # Errors
     ///
     /// Returns an error if the sessions directory cannot be created.
-    pub async fn new(workspace: &Path) -> Result<Self> {
+    pub async fn new(workspace: &Path) -> SessionResult<Self> {
         let sessions_dir = ensure_dir_async(&workspace.join("sessions")).await?;
         Ok(Self {
             sessions_dir,
@@ -49,7 +50,7 @@ impl JsonlSessionStore {
     }
 
     /// Gets or creates a session by key.
-    pub async fn get_or_create(&self, key: &str) -> Result<Session> {
+    pub async fn get_or_create(&self, key: &str) -> SessionResult<Session> {
         if let Some(hit) = self.cache.get(key) {
             return Ok(hit.value().clone());
         }
@@ -61,7 +62,7 @@ impl JsonlSessionStore {
     }
 
     /// Saves a session to disk.
-    pub async fn save(&self, session: &Session) -> Result<()> {
+    pub async fn save(&self, session: &Session) -> SessionResult<()> {
         let path = self.session_path(&session.key);
         let mut file = fs::File::create(&path)
             .await
@@ -96,7 +97,7 @@ impl JsonlSessionStore {
     }
 
     /// Lists all sessions.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+    pub async fn list_sessions(&self) -> SessionResult<Vec<SessionSummary>> {
         let mut items = Vec::new();
         let mut entries = fs::read_dir(&self.sessions_dir)
             .await
@@ -138,7 +139,7 @@ impl JsonlSessionStore {
     }
 
     /// Deletes a session.
-    pub async fn delete(&self, key: &str) -> Result<()> {
+    pub async fn delete(&self, key: &str) -> SessionResult<()> {
         let path = self.session_path(key);
         if path.exists() {
             tokio::fs::remove_file(path).await?;
@@ -152,7 +153,7 @@ impl JsonlSessionStore {
         self.sessions_dir.join(format!("{}.jsonl", safe))
     }
 
-    async fn load_session(&self, key: &str) -> Result<Option<Session>> {
+    async fn load_session(&self, key: &str) -> SessionResult<Option<Session>> {
         let path = self.session_path(key);
         if !fs::try_exists(&path).await? {
             return Ok(None);
@@ -203,11 +204,11 @@ impl JsonlSessionStore {
 
 #[async_trait]
 impl SessionStore for JsonlSessionStore {
-    async fn get_or_create(&self, key: &str) -> Result<Session> {
+    async fn get_or_create(&self, key: &str) -> SessionResult<Session> {
         JsonlSessionStore::get_or_create(self, key).await
     }
 
-    async fn save(&self, session: &Session) -> Result<()> {
+    async fn save(&self, session: &Session) -> SessionResult<()> {
         JsonlSessionStore::save(self, session).await
     }
 
@@ -215,11 +216,11 @@ impl SessionStore for JsonlSessionStore {
         JsonlSessionStore::invalidate(self, key).await
     }
 
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+    async fn list_sessions(&self) -> SessionResult<Vec<SessionSummary>> {
         JsonlSessionStore::list_sessions(self).await
     }
 
-    async fn delete(&self, key: &str) -> Result<()> {
+    async fn delete(&self, key: &str) -> SessionResult<()> {
         JsonlSessionStore::delete(self, key).await
     }
 }
@@ -247,7 +248,7 @@ impl Default for InMemorySessionStore {
 
 #[async_trait]
 impl SessionStore for InMemorySessionStore {
-    async fn get_or_create(&self, key: &str) -> Result<Session> {
+    async fn get_or_create(&self, key: &str) -> SessionResult<Session> {
         Ok(self
             .sessions
             .entry(key.to_string())
@@ -255,7 +256,7 @@ impl SessionStore for InMemorySessionStore {
             .clone())
     }
 
-    async fn save(&self, session: &Session) -> Result<()> {
+    async fn save(&self, session: &Session) -> SessionResult<()> {
         self.sessions.insert(session.key.clone(), session.clone());
         Ok(())
     }
@@ -264,7 +265,7 @@ impl SessionStore for InMemorySessionStore {
         self.sessions.remove(key);
     }
 
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+    async fn list_sessions(&self) -> SessionResult<Vec<SessionSummary>> {
         Ok(self
             .sessions
             .iter()
@@ -276,7 +277,7 @@ impl SessionStore for InMemorySessionStore {
             .collect())
     }
 
-    async fn delete(&self, key: &str) -> Result<()> {
+    async fn delete(&self, key: &str) -> SessionResult<()> {
         self.sessions.remove(key);
         Ok(())
     }

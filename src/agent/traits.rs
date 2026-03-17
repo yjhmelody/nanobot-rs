@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::agent::skills::SkillInfo;
-use crate::error::Result;
+use crate::error::NanobotResult;
 use crate::session::SessionManager;
 use crate::types::SessionKey;
 use crate::types::provider::ChatMessage;
@@ -121,7 +121,7 @@ pub trait Agent: Send + Sync {
         session_key: &SessionKey,
         channel: &str,
         chat_id: &str,
-    ) -> Result<String>;
+    ) -> NanobotResult<String>;
 
     /// Checks if a session has active tasks.
     ///
@@ -281,5 +281,5 @@ pub trait SpawnService: Send + Sync {
     /// # Returns
     ///
     /// The number of tasks cancelled.
-    async fn cancel_by_session(&self, session_key: &SessionKey) -> Result<usize>;
+    async fn cancel_by_session(&self, session_key: &SessionKey) -> NanobotResult<usize>;
 }

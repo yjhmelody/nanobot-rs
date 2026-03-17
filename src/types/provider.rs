@@ -191,6 +191,27 @@ pub struct UsageStats {
     pub total_tokens: Option<u64>,
 }
 
+impl UsageStats {
+    /// Formats a human-readable summary of the usage statistics.
+    pub fn format_summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(v) = self.prompt_tokens {
+            parts.push(format!("prompt={}", v));
+        }
+        if let Some(v) = self.completion_tokens {
+            parts.push(format!("completion={}", v));
+        }
+        if let Some(v) = self.total_tokens {
+            parts.push(format!("total={}", v));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(format!("Usage: {}", parts.join(", ")))
+        }
+    }
+}
+
 /// Unified LLM response with optional tool calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMResponse {

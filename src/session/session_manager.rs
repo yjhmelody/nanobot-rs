@@ -1,7 +1,6 @@
-use anyhow::Result;
-
 use super::traits::*;
 use super::types::{ConsolidationOutcome, Session, SessionSummary};
+use super::SessionResult;
 use crate::provider::ChatMessage;
 
 /// Composite session manager that orchestrates multiple components.
@@ -65,7 +64,7 @@ impl SessionManager {
     }
 
     /// Gets or creates a session.
-    pub async fn get_or_create(&self, key: &str) -> Result<Session> {
+    pub async fn get_or_create(&self, key: &str) -> SessionResult<Session> {
         let session = self.store.get_or_create(key).await?;
 
         if session.messages.is_empty() {
@@ -78,7 +77,7 @@ impl SessionManager {
     }
 
     /// Saves a session with consolidation and hooks.
-    pub async fn save(&self, session: &mut Session) -> Result<()> {
+    pub async fn save(&self, session: &mut Session) -> SessionResult<()> {
         // Run before-save hooks
         for hook in &self.hooks {
             hook.on_before_save(session).await?;
@@ -113,7 +112,10 @@ impl SessionManager {
     }
 
     /// Forces a consolidation pass for the given session.
-    pub async fn consolidate_now(&self, session: &mut Session) -> Result<ConsolidationOutcome> {
+    pub async fn consolidate_now(
+        &self,
+        session: &mut Session,
+    ) -> SessionResult<ConsolidationOutcome> {
         let Some(strategy) = &self.consolidation else {
             return Ok(ConsolidationOutcome::Disabled);
         };
@@ -147,7 +149,11 @@ impl SessionManager {
     }
 
     /// Gets enriched context from all memory providers.
-    pub async fn get_memory_context(&self, query: &str, session_key: &str) -> Result<String> {
+    pub async fn get_memory_context(
+        &self,
+        query: &str,
+        session_key: &str,
+    ) -> SessionResult<String> {
         let mut contexts = Vec::new();
 
         for provider in &self.memory_providers {
@@ -166,7 +172,7 @@ impl SessionManager {
         &self,
         session: &Session,
         max_messages: usize,
-    ) -> Result<Vec<ChatMessage>> {
+    ) -> SessionResult<Vec<ChatMessage>> {
         let mut history = session.get_history(max_messages);
 
         for transformer in &self.transformers {
@@ -182,12 +188,12 @@ impl SessionManager {
     }
 
     /// Lists all sessions.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+    pub async fn list_sessions(&self) -> SessionResult<Vec<SessionSummary>> {
         self.store.list_sessions().await
     }
 
     /// Deletes a session.
-    pub async fn delete(&self, key: &str) -> Result<()> {
+    pub async fn delete(&self, key: &str) -> SessionResult<()> {
         for hook in &self.hooks {
             hook.on_delete(key).await?;
         }

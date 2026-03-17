@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::bus::OutboundMessage;
 use crate::channels::base::{ChannelAdapter, SendOutcome};
-use crate::error::Result;
+use crate::channels::ChannelResult;
 use crate::observability::TARGET_CHANNELS;
 
 pub struct PlaceholderChannel {
@@ -28,7 +28,7 @@ impl ChannelAdapter for PlaceholderChannel {
         self.name
     }
 
-    async fn start(&self) -> Result<()> {
+    async fn start(&self) -> ChannelResult<()> {
         self.running.store(true, Ordering::SeqCst);
         warn!(
             target: TARGET_CHANNELS,
@@ -38,12 +38,12 @@ impl ChannelAdapter for PlaceholderChannel {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> ChannelResult<()> {
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome> {
+    async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome> {
         warn!(
             target: TARGET_CHANNELS,
             "dropping outbound for unimplemented channel '{}': {}",

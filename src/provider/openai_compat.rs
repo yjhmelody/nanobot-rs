@@ -5,7 +5,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::error::ProviderError;
+use crate::provider::{ProviderError, ProviderResult};
 use crate::observability::TARGET_PROVIDER;
 use crate::provider::openai_types::{
     OpenAIResponsesResponse, ResponseFunctionCallItem, ResponseFunctionCallOutputItem,
@@ -258,7 +258,7 @@ impl OpenAICompatProvider {
 
 #[async_trait]
 impl LLMProvider for OpenAICompatProvider {
-    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError> {
+    async fn chat(&self, req: ChatRequest) -> ProviderResult<LLMResponse> {
         let model = self.resolve_model(req.model.as_deref().unwrap_or(&self.default_model));
         let endpoint = self.endpoint();
         let payload =

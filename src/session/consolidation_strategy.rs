@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::session::SessionResult;
 use async_trait::async_trait;
 use tracing::{debug, info};
 
@@ -34,7 +34,7 @@ impl ConsolidationStrategy for LlmConsolidationStrategy {
         unconsolidated_count >= self.config.min_messages
     }
 
-    async fn consolidate(&self, session: &mut Session) -> Result<bool> {
+    async fn consolidate(&self, session: &mut Session) -> SessionResult<bool> {
         consolidate_session(session, self.provider.as_ref(), &self.model, &self.config).await
     }
 }
@@ -85,7 +85,7 @@ pub async fn consolidate_session(
     provider: &dyn LLMProvider,
     model: &str,
     config: &ConsolidationConfig,
-) -> Result<bool> {
+) -> SessionResult<bool> {
     let total_messages = session.messages.len();
     let unconsolidated_count = total_messages.saturating_sub(session.last_consolidated);
 
@@ -166,7 +166,7 @@ async fn generate_summary(
     model: &str,
     messages: &[SessionEntry],
     config: &ConsolidationConfig,
-) -> Result<String> {
+) -> SessionResult<String> {
     let conversation_text = format_messages_for_summary(messages);
 
     let summary_prompt = format!(

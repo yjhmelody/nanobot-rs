@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 
 use crate::agent::{AgentLoop, ContextBuilder, ContextProvider, SubagentManager};
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, MCPServerConfig, WebToolsConfig};
 use crate::cron::CronService;
+use crate::prompt::PromptProvider;
 use crate::provider::LLMProvider;
 use crate::session::{
     ConsolidationConfig, FileMemoryProvider, JsonlSessionStore, LlmConsolidationStrategy,
@@ -16,6 +17,8 @@ use crate::session::{
 use crate::tools::acp::ACPTool;
 use crate::tools::mcp::MCPManager;
 use crate::tools::{ToolRegistry, ToolRegistryBuilder};
+use crate::types::config::PromptConfig;
+use crate::error::NanobotResult;
 
 /// Configuration for AgentLoop that groups related parameters.
 #[derive(Debug, Clone)]
@@ -55,7 +58,7 @@ impl Default for AgentConfig {
 /// use nanobot_rs::provider::LLMProvider;
 /// use std::path::PathBuf;
 ///
-/// # async fn example(provider: Arc<dyn LLMProvider>) -> anyhow::Result<()> {
+/// # async fn example(provider: Arc<dyn LLMProvider>) -> nanobot_rs::error::NanobotResult<()> {
 /// let bus = MessageBus::new();
 /// let workspace = PathBuf::from("/workspace");
 ///
@@ -89,6 +92,10 @@ pub struct AgentLoopBuilder {
 
     // Optional dependencies
     cron_service: Option<Arc<CronService>>,
+
+    // Prompt configuration
+    prompt_provider: Option<Arc<dyn PromptProvider>>,
+    prompt_config: Option<PromptConfig>,
 }
 
 impl AgentLoopBuilder {
@@ -114,6 +121,8 @@ impl AgentLoopBuilder {
             restrict_to_workspace: false,
             send_usage_summary: false,
             cron_service: None,
+            prompt_provider: None,
+            prompt_config: None,
         }
     }
 
@@ -177,6 +186,18 @@ impl AgentLoopBuilder {
         self
     }
 
+    /// Sets the prompt provider for loading custom prompts.
+    pub fn with_prompt_provider(mut self, provider: Arc<dyn PromptProvider>) -> Self {
+        self.prompt_provider = Some(provider);
+        self
+    }
+
+    /// Sets the prompt configuration.
+    pub fn with_prompt_config(mut self, config: PromptConfig) -> Self {
+        self.prompt_config = Some(config);
+        self
+    }
+
     /// Builds the AgentLoop instance.
     ///
     /// # Errors
@@ -184,7 +205,7 @@ impl AgentLoopBuilder {
     /// Returns an error if:
     /// - Context builder initialization fails
     /// - Session manager initialization fails
-    pub async fn build(self) -> Result<AgentLoop> {
+    pub async fn build(self) -> NanobotResult<AgentLoop> {
         let context: Arc<dyn ContextProvider> =
             Arc::new(ContextBuilder::new(self.workspace.clone())?);
         let store = JsonlSessionStore::new(&self.workspace).await?;
@@ -251,7 +272,7 @@ impl AgentLoopBuilder {
         })
     }
 
-    fn build_tool_registry(&self) -> Result<Arc<ToolRegistry>> {
+    fn build_tool_registry(&self) -> NanobotResult<Arc<ToolRegistry>> {
         let mut builder = ToolRegistryBuilder::new(self.workspace.clone())
             .with_restrict_to_workspace(self.restrict_to_workspace)
             .with_exec_config(self.exec_config.clone())
@@ -275,7 +296,7 @@ impl AgentLoopBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ProviderError;
+    use crate::provider::ProviderError;
     use crate::provider::{ChatRequest, LLMResponse, UsageStats};
     use async_trait::async_trait;
 

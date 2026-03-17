@@ -73,9 +73,9 @@ pub enum StreamError {
     Interrupted,
 }
 
-impl From<crate::error::ProviderError> for StreamError {
-    fn from(err: crate::error::ProviderError) -> Self {
-        use crate::error::ProviderError;
+impl From<crate::provider::ProviderError> for StreamError {
+    fn from(err: crate::provider::ProviderError) -> Self {
+        use crate::provider::ProviderError;
         match err {
             ProviderError::ApiRequest(e) => {
                 if e.is_timeout() {

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use url::Url;
 
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -65,7 +65,7 @@ impl Tool for WebSearchTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         execute_search(
             args_json,
@@ -121,7 +121,7 @@ impl Tool for WebFetchTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         const DEFAULT_FETCH_MAX_CHARS: usize = 50_000;
         execute_fetch(
@@ -138,12 +138,12 @@ pub async fn execute_search(
     api_key: &str,
     max_results: usize,
     proxy: Option<&str>,
-) -> Result<String> {
+) -> ToolResult<String> {
     let typed = parse_args::<WebSearchArgs>(args_json)?;
     let query = typed.query;
 
     if api_key.trim().is_empty() {
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "web_search",
             anyhow::anyhow!(
                 "Brave Search API key not configured. Set tools.web.search.apiKey in ~/.nanobot/config.json"
@@ -165,7 +165,7 @@ pub async fn execute_search(
         .await;
 
     let resp = res.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "web_search",
             anyhow::anyhow!("requesting Brave Search API: {}", e),
         )
@@ -173,14 +173,14 @@ pub async fn execute_search(
     if !resp.status().is_success() {
         let code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "web_search",
             anyhow::anyhow!("HTTP {}: {}", code, text),
         ));
     }
 
     let parsed: BraveSearchResponse = resp.json().await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "web_search",
             anyhow::anyhow!("failed to parse search response: {}", e),
         )
@@ -206,7 +206,7 @@ pub async fn execute_fetch(
     args_json: &str,
     max_chars_default: usize,
     proxy: Option<&str>,
-) -> Result<String> {
+) -> ToolResult<String> {
     let typed = parse_args::<WebFetchArgs>(args_json)?;
     let url = typed.url;
     let max_chars = typed
@@ -215,13 +215,13 @@ pub async fn execute_fetch(
         .unwrap_or(max_chars_default);
 
     let parsed = Url::parse(&url).map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "web_fetch",
             anyhow::anyhow!("URL validation failed: {}: {}", url, e),
         )
     })?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "web_fetch",
             anyhow::anyhow!("URL validation failed: only http/https allowed"),
         ));
@@ -237,7 +237,7 @@ pub async fn execute_fetch(
         .await;
 
     let resp = res.map_err(|e| {
-        NanobotError::tool_execution("web_fetch", anyhow::anyhow!("fetching web content: {}", e))
+        ToolError::execution("web_fetch", anyhow::anyhow!("fetching web content: {}", e))
     })?;
 
     let status = resp.status().as_u16();
@@ -250,7 +250,7 @@ pub async fn execute_fetch(
         .to_string();
 
     let body = resp.text().await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "web_fetch",
             anyhow::anyhow!("reading web response body: {}", e),
         )
@@ -283,19 +283,19 @@ pub async fn execute_fetch(
         text,
     })
     .map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "web_fetch",
             anyhow::anyhow!("serializing web_fetch response: {}", e),
         )
     })
 }
 
-fn build_client(proxy: Option<&str>) -> Result<reqwest::Client> {
+fn build_client(proxy: Option<&str>) -> ToolResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder();
     if let Some(proxy_url) = proxy {
         if !proxy_url.trim().is_empty() {
             let proxy = reqwest::Proxy::all(proxy_url).map_err(|e| {
-                NanobotError::tool_execution(
+                ToolError::execution(
                     "web",
                     anyhow::anyhow!("invalid proxy: {}: {}", proxy_url, e),
                 )
@@ -304,7 +304,7 @@ fn build_client(proxy: Option<&str>) -> Result<reqwest::Client> {
         }
     }
     builder.build().map_err(|e| {
-        NanobotError::tool_execution("web", anyhow::anyhow!("building web client: {}", e))
+        ToolError::execution("web", anyhow::anyhow!("building web client: {}", e))
     })
 }
 

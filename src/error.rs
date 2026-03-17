@@ -2,84 +2,67 @@ use std::io;
 
 use thiserror::Error;
 
-/// Result type alias using NanobotError.
-pub type Result<T> = std::result::Result<T, NanobotError>;
+use crate::agent::AgentError;
+use crate::bus::BusError;
+use crate::channels::ChannelError;
+use crate::config::ConfigError;
+use crate::cron::CronError;
+use crate::heartbeat::HeartbeatError;
+use crate::prompt::PromptError;
+use crate::provider::ProviderError;
+use crate::runtime::RuntimeError;
+use crate::session::SessionError;
+use crate::tools::ToolError;
 
-/// Macro to create a tool execution error with automatic tool name capture.
-///
-/// This macro simplifies creating tool execution errors by reducing boilerplate.
-///
-/// # Examples
-///
-/// ```
-/// use nanobot_rs::tool_error;
-///
-/// // Simple error message
-/// let err = tool_error!("read_file", "file not found");
-///
-/// // Formatted error message
-/// let path = "/tmp/test.txt";
-/// let err = tool_error!("read_file", "failed to read {}", path);
-///
-/// // Use with Result::map_err
-/// # use std::io;
-/// # fn example() -> Result<(), nanobot_rs::error::NanobotError> {
-/// std::fs::read_to_string("/tmp/test.txt")
-///     .map_err(|e| tool_error!("read_file", "failed to read: {}", e))?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// # Comparison
-///
-/// Before:
-/// ```ignore
-/// NanobotError::tool_execution("read_file", anyhow::anyhow!("file not found"))
-/// ```
-///
-/// After:
-/// ```ignore
-/// tool_error!("read_file", "file not found")
-/// ```
-#[macro_export]
-macro_rules! tool_error {
-    ($tool:expr, $msg:expr) => {
-        $crate::error::NanobotError::tool_execution($tool, anyhow::anyhow!($msg))
-    };
-    ($tool:expr, $fmt:expr, $($arg:tt)*) => {
-        $crate::error::NanobotError::tool_execution($tool, anyhow::anyhow!($fmt, $($arg)*))
-    };
-}
+/// Result type alias using NanobotError.
+pub type NanobotResult<T> = std::result::Result<T, NanobotError>;
 
 /// Core error types for nanobot-rs.
-///
-/// This provides type-safe error handling with specific error variants
-/// that can be matched and handled differently.
 #[derive(Debug, Error)]
 pub enum NanobotError {
-    /// Tool execution failed.
-    #[error("Tool '{tool_name}' execution failed: {source}")]
-    ToolExecution {
-        tool_name: String,
-        #[source]
-        source: anyhow::Error,
-    },
-
     /// LLM provider error.
-    #[error("LLM provider error: {0}")]
+    #[error(transparent)]
     Provider(#[from] ProviderError),
 
+    /// Tool error.
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+
+    /// Channel error.
+    #[error(transparent)]
+    Channel(#[from] ChannelError),
+
+    /// Message bus error.
+    #[error(transparent)]
+    Bus(#[from] BusError),
+
+    /// Session error.
+    #[error(transparent)]
+    Session(#[from] SessionError),
+
     /// Configuration error.
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
 
-    /// Session not found.
-    #[error("Session not found: {0}")]
-    SessionNotFound(String),
+    /// Cron subsystem error.
+    #[error(transparent)]
+    Cron(#[from] CronError),
 
-    /// Session operation failed.
-    #[error("Session operation failed: {0}")]
-    SessionOperation(#[source] anyhow::Error),
+    /// Prompt system error.
+    #[error(transparent)]
+    Prompt(#[from] PromptError),
+
+    /// Heartbeat subsystem error.
+    #[error(transparent)]
+    Heartbeat(#[from] HeartbeatError),
+
+    /// Agent error.
+    #[error(transparent)]
+    Agent(#[from] AgentError),
+
+    /// Runtime error.
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
 
     /// I/O error.
     #[error("I/O error: {0}")]
@@ -89,181 +72,12 @@ pub enum NanobotError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Invalid tool arguments.
-    #[error("Invalid tool arguments for '{tool_name}': {message}")]
-    InvalidToolArgs { tool_name: String, message: String },
-
-    /// Tool not found.
-    #[error("Tool not found: {0}")]
-    ToolNotFound(String),
-
-    /// MCP server error.
-    #[error("MCP server '{server_name}' error: {message}")]
-    McpServer {
-        server_name: String,
-        message: String,
-    },
-
-    /// Context builder error.
-    #[error("Context builder error: {0}")]
-    ContextBuilder(String),
-
-    /// Runtime error.
-    #[error("Runtime error: {0}")]
-    Runtime(String),
-
-    /// Agent loop error.
-    #[error("Agent loop error: {0}")]
-    AgentLoop(String),
-
-    /// Subagent error.
-    #[error("Subagent error: {0}")]
-    Subagent(String),
-
-    /// Channel adapter error.
-    #[error("Channel '{channel}' error: {message}")]
-    Channel { channel: String, message: String },
-
     /// Generic error for cases not covered by specific variants.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-/// LLM provider specific errors.
-#[derive(Debug, Error)]
-pub enum ProviderError {
-    /// API request failed.
-    #[error("API request failed: {0}")]
-    ApiRequest(#[from] reqwest::Error),
-
-    /// Invalid API response.
-    #[error("Invalid API response: {0}")]
-    InvalidResponse(String),
-
-    /// Authentication failed.
-    #[error("Authentication failed: {0}")]
-    Authentication(String),
-
-    /// Rate limit exceeded.
-    #[error("Rate limit exceeded: {0}")]
-    RateLimit(String),
-
-    /// Model not found or not available.
-    #[error("Model not available: {0}")]
-    ModelNotAvailable(String),
-
-    /// Invalid model configuration.
-    #[error("Invalid model configuration: {0}")]
-    InvalidConfig(String),
-
-    /// Request timeout.
-    #[error("Request timeout after {0}s")]
-    Timeout(u64),
-
-    /// Generic provider error.
-    #[error("Provider error: {0}")]
-    Other(String),
-}
-
-impl ProviderError {
-    /// Check if this error is retryable (network issues, timeouts, rate limits).
-    ///
-    /// Returns true for transient errors that might succeed on retry:
-    /// - Network connection failures
-    /// - Request timeouts
-    /// - Rate limit errors (should retry with backoff)
-    /// - Server errors (5xx)
-    ///
-    /// Returns false for permanent errors:
-    /// - Authentication failures
-    /// - Invalid configuration
-    /// - Model not available
-    /// - Invalid responses (4xx client errors)
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            // Network errors are usually retryable
-            ProviderError::ApiRequest(e) => {
-                e.is_timeout()
-                    || e.is_connect()
-                    || e.status().map_or(false, |s| s.is_server_error())
-            }
-            // Timeouts are retryable
-            ProviderError::Timeout(_) => true,
-            // Rate limits are retryable (with backoff)
-            ProviderError::RateLimit(_) => true,
-            // These are permanent errors
-            ProviderError::Authentication(_) => false,
-            ProviderError::InvalidConfig(_) => false,
-            ProviderError::ModelNotAvailable(_) => false,
-            ProviderError::InvalidResponse(_) => false,
-            // Generic errors are not retryable by default
-            ProviderError::Other(_) => false,
-        }
-    }
-}
-
 impl NanobotError {
-    /// Creates a tool execution error.
-    pub fn tool_execution(tool_name: impl Into<String>, source: anyhow::Error) -> Self {
-        Self::ToolExecution {
-            tool_name: tool_name.into(),
-            source,
-        }
-    }
-
-    /// Creates a tool execution error with context.
-    ///
-    /// This is a convenience method that wraps the error with additional context.
-    pub fn tool_exec<T>(tool_name: impl Into<String>) -> impl FnOnce(T) -> Self
-    where
-        T: Into<anyhow::Error>,
-    {
-        let name = tool_name.into();
-        move |err| Self::ToolExecution {
-            tool_name: name,
-            source: err.into(),
-        }
-    }
-
-    /// Creates an invalid tool arguments error.
-    pub fn invalid_tool_args(tool_name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::InvalidToolArgs {
-            tool_name: tool_name.into(),
-            message: message.into(),
-        }
-    }
-
-    /// Creates a channel adapter error.
-    pub fn channel(channel: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Channel {
-            channel: channel.into(),
-            message: message.into(),
-        }
-    }
-
-    /// Creates an MCP server error.
-    pub fn mcp_server(server_name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::McpServer {
-            server_name: server_name.into(),
-            message: message.into(),
-        }
-    }
-
-    /// Creates a configuration error.
-    pub fn config(message: impl Into<String>) -> Self {
-        Self::Config(message.into())
-    }
-
-    /// Creates an agent loop error.
-    pub fn agent_loop(message: impl Into<String>) -> Self {
-        Self::AgentLoop(message.into())
-    }
-
-    /// Creates a subagent error.
-    pub fn subagent(message: impl Into<String>) -> Self {
-        Self::Subagent(message.into())
-    }
-
     /// Checks if this error is retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -277,19 +91,13 @@ impl NanobotError {
 
     /// Checks if this error is a tool error.
     pub fn is_tool_error(&self) -> bool {
-        matches!(
-            self,
-            Self::ToolExecution { .. } | Self::InvalidToolArgs { .. } | Self::ToolNotFound(_)
-        )
+        matches!(self, Self::Tool(_))
     }
 
     /// Returns the error chain as a vector of error messages.
-    ///
-    /// This is useful for debugging and logging the full context of an error.
     pub fn error_chain(&self) -> Vec<String> {
         let mut chain = vec![self.to_string()];
 
-        // Add source errors
         let mut current: &dyn std::error::Error = self;
         while let Some(source) = current.source() {
             chain.push(source.to_string());
@@ -300,8 +108,6 @@ impl NanobotError {
     }
 
     /// Returns a formatted error message with full context.
-    ///
-    /// This includes the error chain and any additional context.
     pub fn detailed_message(&self) -> String {
         let chain = self.error_chain();
         if chain.len() == 1 {
@@ -319,75 +125,22 @@ impl NanobotError {
             )
         }
     }
-
-    /// Returns the error category for metrics and logging.
-    pub fn category(&self) -> &'static str {
-        match self {
-            Self::ToolExecution { .. } | Self::InvalidToolArgs { .. } | Self::ToolNotFound(_) => {
-                "tool"
-            }
-            Self::Provider(_) => "provider",
-            Self::Config(_) => "config",
-            Self::SessionNotFound(_) | Self::SessionOperation(_) => "session",
-            Self::Io(_) => "io",
-            Self::Json(_) => "json",
-            Self::McpServer { .. } => "mcp",
-            Self::ContextBuilder(_) => "context",
-            Self::Runtime(_) => "runtime",
-            Self::AgentLoop(_) => "agent_loop",
-            Self::Subagent(_) => "subagent",
-            Self::Channel { .. } => "channel",
-            Self::Other(_) => "other",
-        }
-    }
-}
-
-impl ProviderError {
-    /// Creates a rate limit error.
-    pub fn rate_limit(message: impl Into<String>) -> Self {
-        Self::RateLimit(message.into())
-    }
-
-    /// Creates a timeout error.
-    pub fn timeout(seconds: u64) -> Self {
-        Self::Timeout(seconds)
-    }
-
-    /// Creates an authentication error.
-    pub fn authentication(message: impl Into<String>) -> Self {
-        Self::Authentication(message.into())
-    }
-
-    /// Creates an invalid response error.
-    pub fn invalid_response(message: impl Into<String>) -> Self {
-        Self::InvalidResponse(message.into())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolError;
 
     #[test]
     fn tool_execution_error_displays_correctly() {
-        let err = NanobotError::tool_execution("read_file", anyhow::anyhow!("file not found"));
+        let err = NanobotError::from(ToolError::execution(
+            "read_file",
+            anyhow::anyhow!("file not found"),
+        ));
         let msg = err.to_string();
         assert!(msg.contains("read_file"));
         assert!(msg.contains("file not found"));
-    }
-
-    #[test]
-    fn tool_error_macro_works() {
-        let err = tool_error!("read_file", "file not found");
-        let msg = err.to_string();
-        assert!(msg.contains("read_file"));
-        assert!(msg.contains("file not found"));
-
-        let path = "/tmp/test.txt";
-        let err = tool_error!("read_file", "failed to read {}", path);
-        let msg = err.to_string();
-        assert!(msg.contains("read_file"));
-        assert!(msg.contains("/tmp/test.txt"));
     }
 
     #[test]
@@ -405,29 +158,29 @@ mod tests {
         let timeout = NanobotError::Provider(ProviderError::timeout(30));
         assert!(timeout.is_retryable());
 
-        let config = NanobotError::Config("test".to_string());
+        let config = NanobotError::Config(ConfigError::invalid("test"));
         assert!(!config.is_retryable());
     }
 
     #[test]
     fn tool_errors_are_identified() {
-        let tool_exec = NanobotError::tool_execution("exec", anyhow::anyhow!("failed"));
+        let tool_exec = NanobotError::from(ToolError::execution("exec", anyhow::anyhow!("failed")));
         assert!(tool_exec.is_tool_error());
 
-        let invalid_args = NanobotError::invalid_tool_args("exec", "bad json");
+        let invalid_args = NanobotError::from(ToolError::invalid_args("exec", "bad json"));
         assert!(invalid_args.is_tool_error());
 
-        let not_found = NanobotError::ToolNotFound("unknown".to_string());
+        let not_found = NanobotError::from(ToolError::not_found("unknown"));
         assert!(not_found.is_tool_error());
 
-        let config = NanobotError::Config("test".to_string());
+        let config = NanobotError::Config(ConfigError::invalid("test"));
         assert!(!config.is_tool_error());
     }
 
     #[test]
     fn error_chain_captures_nested_errors() {
         let inner = anyhow::anyhow!("inner error");
-        let err = NanobotError::tool_execution("test_tool", inner);
+        let err = NanobotError::from(ToolError::execution("test_tool", inner));
 
         let chain = err.error_chain();
         assert!(chain.len() >= 1);
@@ -437,45 +190,9 @@ mod tests {
     #[test]
     fn detailed_message_includes_context() {
         let inner = anyhow::anyhow!("root cause");
-        let err = NanobotError::tool_execution("test_tool", inner);
+        let err = NanobotError::from(ToolError::execution("test_tool", inner));
 
         let detailed = err.detailed_message();
         assert!(detailed.contains("test_tool"));
-    }
-
-    #[test]
-    fn error_category_is_correct() {
-        let tool_err = NanobotError::ToolNotFound("test".to_string());
-        assert_eq!(tool_err.category(), "tool");
-
-        let provider_err = NanobotError::Provider(ProviderError::timeout(30));
-        assert_eq!(provider_err.category(), "provider");
-
-        let config_err = NanobotError::config("test");
-        assert_eq!(config_err.category(), "config");
-
-        let session_err = NanobotError::SessionNotFound("test".to_string());
-        assert_eq!(session_err.category(), "session");
-
-        let agent_err = NanobotError::agent_loop("test");
-        assert_eq!(agent_err.category(), "agent_loop");
-
-        let subagent_err = NanobotError::subagent("test");
-        assert_eq!(subagent_err.category(), "subagent");
-    }
-
-    #[test]
-    fn helper_constructors_work() {
-        let config_err = NanobotError::config("invalid config");
-        assert!(matches!(config_err, NanobotError::Config(_)));
-
-        let agent_err = NanobotError::agent_loop("loop failed");
-        assert!(matches!(agent_err, NanobotError::AgentLoop(_)));
-
-        let subagent_err = NanobotError::subagent("subagent failed");
-        assert!(matches!(subagent_err, NanobotError::Subagent(_)));
-
-        let provider_err = ProviderError::invalid_response("bad json");
-        assert!(matches!(provider_err, ProviderError::InvalidResponse(_)));
     }
 }

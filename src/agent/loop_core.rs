@@ -18,7 +18,7 @@ use crate::agent::traits::Agent;
 use crate::bus::{
     InboundCommand, InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage,
 };
-use crate::error::Result;
+use crate::error::NanobotResult;
 use crate::observability::TARGET_AGENT;
 use crate::provider::LLMProvider;
 use crate::session::{ConsolidationOutcome, Session, SessionEntry, SessionManager};
@@ -27,6 +27,7 @@ use crate::tools::{ToolContext, ToolRegistry};
 use crate::types::SessionKey;
 use crate::types::provider::{ChatMessage, MessageContent, MessageRole, UsageStats};
 use crate::types::task::TaskId;
+use crate::utils::helpers::preview_text;
 
 pub struct AgentLoop {
     pub(crate) bus: MessageBus,
@@ -184,7 +185,7 @@ impl AgentLoop {
         session_key: &SessionKey,
         channel: &str,
         chat_id: &str,
-    ) -> Result<String> {
+    ) -> NanobotResult<String> {
         debug!(
             target: TARGET_AGENT,
             session_key = %session_key,
@@ -214,7 +215,7 @@ impl AgentLoop {
             if let Some(usage_text) = out
                 .as_ref()
                 .and_then(|m| m.usage.as_ref())
-                .and_then(format_usage_summary)
+                .and_then(|usage| usage.format_summary())
             {
                 if !content.is_empty() {
                     content.push_str("\n\n");
@@ -355,7 +356,9 @@ impl AgentLoop {
                     );
                 }
                 if self.send_usage_summary {
-                    if let Some(usage_text) = out.usage.as_ref().and_then(format_usage_summary) {
+                    if let Some(usage_text) =
+                        out.usage.as_ref().and_then(|usage| usage.format_summary())
+                    {
                         let usage_msg = OutboundMessage {
                             channel: out.message.channel.clone(),
                             chat_id: out.message.chat_id.clone(),
@@ -436,7 +439,10 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
-    async fn process_message(&self, msg: InboundMessage) -> Result<Option<OutboundEnvelope>> {
+    async fn process_message(
+        &self,
+        msg: InboundMessage,
+    ) -> NanobotResult<Option<OutboundEnvelope>> {
         trace!(
             target: TARGET_AGENT,
             session_key = %msg.session_key(),
@@ -612,7 +618,7 @@ impl AgentLoop {
         &self,
         msg: InboundMessage,
         command: InboundCommand,
-    ) -> Result<Option<OutboundMessage>> {
+    ) -> NanobotResult<Option<OutboundMessage>> {
         debug!(
             target: TARGET_AGENT,
             session_key = %msg.session_key(),
@@ -682,7 +688,7 @@ impl AgentLoop {
     async fn process_system_message(
         &self,
         _msg: InboundMessage,
-    ) -> Result<Option<OutboundMessage>> {
+    ) -> NanobotResult<Option<OutboundMessage>> {
         // TODO:
         // System messages are handled separately (e.g., spawn results)
         Ok(None)
@@ -695,7 +701,7 @@ impl AgentLoop {
         tool_context: &ToolContext,
         session_key: &SessionKey,
         progress: Option<ProgressEmitter>,
-    ) -> Result<LoopOutcome> {
+    ) -> NanobotResult<LoopOutcome> {
         debug!(
             target: TARGET_AGENT,
             session_key = %session_key,
@@ -829,7 +835,7 @@ impl Agent for AgentLoop {
         session_key: &SessionKey,
         channel: &str,
         chat_id: &str,
-    ) -> Result<String> {
+    ) -> NanobotResult<String> {
         AgentLoop::process_direct(self, content, session_key, channel, chat_id).await
     }
 
@@ -843,31 +849,5 @@ impl Agent for AgentLoop {
 
     async fn close_provider(&self) {
         AgentLoop::close_provider(self).await
-    }
-}
-
-fn preview_text(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        format!("{}...", &text.chars().take(max_chars).collect::<String>())
-    }
-}
-
-fn format_usage_summary(usage: &UsageStats) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(v) = usage.prompt_tokens {
-        parts.push(format!("prompt={}", v));
-    }
-    if let Some(v) = usage.completion_tokens {
-        parts.push(format!("completion={}", v));
-    }
-    if let Some(v) = usage.total_tokens {
-        parts.push(format!("total={}", v));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(format!("Usage: {}", parts.join(", ")))
     }
 }

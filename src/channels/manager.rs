@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::{NanobotError, Result};
+use crate::channels::{ChannelError, ChannelResult};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -22,7 +22,7 @@ pub struct ChannelManager {
 }
 
 impl ChannelManager {
-    pub fn new(config: ChannelsConfig, bus: MessageBus) -> Result<Self> {
+    pub fn new(config: ChannelsConfig, bus: MessageBus) -> ChannelResult<Self> {
         let mut channels: HashMap<String, Arc<dyn ChannelAdapter>> = HashMap::new();
         channels.insert("cli".to_string(), Arc::new(CliChannel::new()));
 
@@ -47,7 +47,7 @@ impl ChannelManager {
         })
     }
 
-    pub async fn start_all(&self) -> Result<()> {
+    pub async fn start_all(&self) -> ChannelResult<()> {
         for (name, ch) in &self.channels {
             if let Err(err) = ch.start().await {
                 error!(
@@ -125,9 +125,9 @@ impl ChannelManager {
     }
 }
 
-fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> Result<()> {
+fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> ChannelResult<()> {
     if cfg.allow_from.is_empty() {
-        return Err(NanobotError::config(format!(
+        return Err(ChannelError::config(format!(
             "\"{}\" has empty allowFrom (denies all). set [\"*\"] or explicit ids",
             name
         )));
@@ -136,13 +136,13 @@ fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> Result<()> {
     let mut has_wildcard = false;
     for entry in &cfg.allow_from {
         if entry.trim().is_empty() {
-            return Err(NanobotError::config(format!(
+            return Err(ChannelError::config(format!(
                 "\"{}\" has empty allowFrom entry. remove empty strings",
                 name
             )));
         }
         if entry.trim() != entry {
-            return Err(NanobotError::config(format!(
+            return Err(ChannelError::config(format!(
                 "\"{}\" has allowFrom entry with leading/trailing whitespace: '{}'",
                 name, entry
             )));
@@ -153,13 +153,13 @@ fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> Result<()> {
         has_valid = true;
     }
     if has_wildcard && cfg.allow_from.len() > 1 {
-        return Err(NanobotError::config(format!(
+        return Err(ChannelError::config(format!(
             "\"{}\" has allowFrom '*' alongside explicit ids. keep only '*' or explicit ids",
             name
         )));
     }
     if !has_valid {
-        return Err(NanobotError::config(format!(
+        return Err(ChannelError::config(format!(
             "\"{}\" has no valid allowFrom entries",
             name
         )));
@@ -187,7 +187,7 @@ async fn dispatch_outbound(
     stream_registry: &mut HashMap<String, String>,
     msg: OutboundMessage,
     stream_mode: StreamMode,
-) -> crate::error::Result<()> {
+) -> ChannelResult<()> {
     let is_tool_hint = msg
         .metadata
         .message_id

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use crate::session::SessionResult;
 use tokio::fs;
 
 use crate::utils::helpers::ensure_dir;
@@ -78,7 +78,7 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error if the memory directory cannot be created.
-    pub fn new(workspace: &Path) -> Result<Self> {
+    pub fn new(workspace: &Path) -> SessionResult<Self> {
         let memory_dir = ensure_dir(&workspace.join("memory"))?;
         let memory_file = memory_dir.join("MEMORY.md");
         let history_file = memory_dir.join("HISTORY.md");
@@ -107,7 +107,7 @@ impl MemoryStore {
     /// # Arguments
     ///
     /// * `content` - The new memory content to write
-    pub async fn write_long_term(&self, content: &str) -> Result<()> {
+    pub async fn write_long_term(&self, content: &str) -> SessionResult<()> {
         fs::write(&self.memory_file, content).await?;
         Ok(())
     }
@@ -120,7 +120,7 @@ impl MemoryStore {
     /// # Arguments
     ///
     /// * `entry` - The history entry to append (will be trimmed and formatted)
-    pub async fn append_history(&self, entry: &str) -> Result<()> {
+    pub async fn append_history(&self, entry: &str) -> SessionResult<()> {
         let mut current = fs::read_to_string(&self.history_file)
             .await
             .unwrap_or_default();

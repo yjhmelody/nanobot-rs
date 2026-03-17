@@ -57,6 +57,38 @@ pub fn safe_filename(name: &str) -> String {
     re.replace_all(name, "_").trim().to_string()
 }
 
+/// Previews text by truncating it to a maximum character count.
+///
+/// If the text is longer than `max_chars`, it will be truncated and "..." will be appended.
+/// This function properly handles Unicode characters by using character boundaries.
+///
+/// # Arguments
+///
+/// * `text` - The text to preview
+/// * `max_chars` - Maximum number of characters to include in the preview
+///
+/// # Returns
+///
+/// A string containing the preview text, possibly truncated with "..." appended
+///
+/// # Examples
+///
+/// ```
+/// use nanobot_rs::utils::helpers::preview_text;
+///
+/// assert_eq!(preview_text("Hello", 10), "Hello");
+/// assert_eq!(preview_text("Hello, World!", 8), "Hello, W...");
+/// assert_eq!(preview_text("你好世界", 2), "你好...");
+/// ```
+pub fn preview_text(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        text.to_string()
+    } else {
+        format!("{}...", &text.chars().take(max_chars).collect::<String>())
+    }
+}
+
 pub async fn sync_workspace_templates(workspace: &Path, silent: bool) -> Result<Vec<String>> {
     ensure_dir_async(workspace).await?;
     let mut added = Vec::new();
@@ -123,6 +155,25 @@ mod tests {
     fn safe_filename_replaces_invalid_characters() {
         let sanitized = safe_filename(r#"a<b>c:d"e/f\g|h?i*"#);
         assert_eq!(sanitized, "a_b_c_d_e_f_g_h_i_");
+    }
+
+    #[test]
+    fn preview_text_preserves_short_strings() {
+        assert_eq!(preview_text("Hello", 10), "Hello");
+        assert_eq!(preview_text("Test", 100), "Test");
+    }
+
+    #[test]
+    fn preview_text_truncates_long_strings() {
+        assert_eq!(preview_text("Hello, World!", 8), "Hello, W...");
+        assert_eq!(preview_text("1234567890", 5), "12345...");
+    }
+
+    #[test]
+    fn preview_text_handles_unicode() {
+        assert_eq!(preview_text("你好世界", 2), "你好...");
+        assert_eq!(preview_text("🎉🎊🎈", 2), "🎉🎊...");
+        assert_eq!(preview_text("Hello 世界", 8), "Hello 世界");
     }
 
     #[tokio::test]

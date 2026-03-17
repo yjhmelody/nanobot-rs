@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -16,8 +15,10 @@ use crate::bus::MessageBus;
 use crate::bus::{InboundMessage, MessageMetadata, OutboundMessage};
 use crate::channels::ChannelManager;
 use crate::config::{Config, get_config_path, load_config, normalize_provider_name, save_config};
-use crate::cron::{CronJob, CronJobHandler};
-use crate::heartbeat::{HeartbeatExecuteHandler, HeartbeatNotifyHandler};
+use crate::error::{NanobotError, NanobotResult};
+use crate::cron::{CronJob, CronJobHandler, CronResult};
+use crate::heartbeat::{HeartbeatError, HeartbeatExecuteHandler, HeartbeatNotifyHandler, HeartbeatResult};
+use crate::runtime::RuntimeError;
 use crate::runtime::build_runtime;
 use crate::types::SessionKey;
 use crate::utils::helpers::{get_workspace_path, sync_workspace_templates};
@@ -124,7 +125,7 @@ pub struct ProviderStatusArgs {
     pub config_dir: Option<PathBuf>,
 }
 
-pub async fn run(cli: Cli) -> Result<()> {
+pub async fn run(cli: Cli) -> NanobotResult<()> {
     match cli.command {
         Commands::Onboard(args) => onboard(args).await,
         Commands::Agent(args) => agent(args).await,
@@ -134,7 +135,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-async fn onboard(args: OnboardArgs) -> Result<()> {
+async fn onboard(args: OnboardArgs) -> NanobotResult<()> {
     let config_path = get_config_path()?;
 
     if config_path.exists() {
@@ -169,7 +170,7 @@ async fn onboard(args: OnboardArgs) -> Result<()> {
     Ok(())
 }
 
-async fn agent(args: AgentArgs) -> Result<()> {
+async fn agent(args: AgentArgs) -> NanobotResult<()> {
     let config = load_config(None)?;
     tracing::trace!("load config: {:#?}", config);
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
@@ -274,7 +275,7 @@ async fn agent(args: AgentArgs) -> Result<()> {
     Ok(())
 }
 
-async fn gateway(args: GatewayArgs) -> Result<()> {
+async fn gateway(args: GatewayArgs) -> NanobotResult<()> {
     let config = load_config(None)?;
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
     sync_workspace_templates(&workspace, true).await?;
@@ -380,7 +381,7 @@ async fn gateway(args: GatewayArgs) -> Result<()> {
     Ok(())
 }
 
-async fn status() -> Result<()> {
+async fn status() -> NanobotResult<()> {
     let config_path = get_config_path()?;
     let config = load_config(Some(&config_path))?;
     let workspace = PathBuf::from(config.workspace_path());
@@ -405,20 +406,25 @@ async fn status() -> Result<()> {
     Ok(())
 }
 
-async fn provider(args: ProviderArgs) -> Result<()> {
+async fn provider(args: ProviderArgs) -> NanobotResult<()> {
     match args.command {
         ProviderCommands::Login(args) => provider_login(args).await,
         ProviderCommands::Status(args) => provider_status(args).await,
     }
 }
 
-async fn provider_login(args: ProviderLoginArgs) -> Result<()> {
+async fn provider_login(args: ProviderLoginArgs) -> NanobotResult<()> {
     let provider = normalize_provider_name(&args.provider);
     if provider.is_empty() {
-        bail!("provider name cannot be empty");
+        return Err(NanobotError::Runtime(RuntimeError::message(
+            "provider name cannot be empty",
+        )));
     }
     if provider != "github_copilot" {
-        bail!("provider '{}' is not supported by this command", provider);
+        return Err(NanobotError::Runtime(RuntimeError::message(format!(
+            "provider '{}' is not supported by this command",
+            provider
+        ))));
     }
 
     let config = load_config(None)?;
@@ -439,25 +445,35 @@ async fn provider_login(args: ProviderLoginArgs) -> Result<()> {
     let status = command
         .status()
         .await
-        .map_err(|err| anyhow!("failed to launch '{}': {}", command_name, err))?;
+        .map_err(|err| {
+            NanobotError::Runtime(RuntimeError::message(format!(
+                "failed to launch '{}': {}",
+                command_name, err
+            )))
+        })?;
 
     if !status.success() {
-        bail!(
+        return Err(NanobotError::Runtime(RuntimeError::message(format!(
             "GitHub Copilot login exited with status {}",
             status.code().unwrap_or(-1)
-        );
+        ))));
     }
 
     Ok(())
 }
 
-async fn provider_status(args: ProviderStatusArgs) -> Result<()> {
+async fn provider_status(args: ProviderStatusArgs) -> NanobotResult<()> {
     let provider = normalize_provider_name(&args.provider);
     if provider.is_empty() {
-        bail!("provider name cannot be empty");
+        return Err(NanobotError::Runtime(RuntimeError::message(
+            "provider name cannot be empty",
+        )));
     }
     if provider != "github_copilot" {
-        bail!("provider '{}' is not supported by this command", provider);
+        return Err(NanobotError::Runtime(RuntimeError::message(format!(
+            "provider '{}' is not supported by this command",
+            provider
+        ))));
     }
 
     let config = load_config(None)?;
@@ -577,7 +593,7 @@ struct GatewayCronJobHandler {
 
 #[async_trait]
 impl CronJobHandler for GatewayCronJobHandler {
-    async fn on_job(&self, job: CronJob) -> Result<Option<String>> {
+    async fn on_job(&self, job: CronJob) -> CronResult<Option<String>> {
         let reminder_note = format!(
             "[Scheduled Task] Timer finished.\n\nTask '{}' has been triggered.\nScheduled instruction: {}",
             job.name, job.payload.message
@@ -622,13 +638,13 @@ struct GatewayHeartbeatExecuteHandler {
 
 #[async_trait]
 impl HeartbeatExecuteHandler for GatewayHeartbeatExecuteHandler {
-    async fn on_execute(&self, tasks: String) -> Result<String> {
+    async fn on_execute(&self, tasks: String) -> HeartbeatResult<String> {
         let (channel, chat_id) = self.picker.pick_target().await;
         let session_key = SessionKey::from("heartbeat");
         self.agent
             .process_direct(&tasks, &session_key, &channel, &chat_id)
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| HeartbeatError::execution(e.to_string()))
     }
 }
 

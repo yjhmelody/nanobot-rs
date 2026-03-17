@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
 
 use super::skills::SkillsLoader;
 use super::traits::{ContextProvider, SkillsProvider};
+use crate::agent::AgentResult;
 use crate::session::SessionManager;
 use crate::types::provider::{
     AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole,
@@ -50,7 +50,7 @@ impl ContextBuilder {
     /// # Errors
     ///
     /// Returns an error if initialization fails.
-    pub fn new(workspace: PathBuf) -> Result<Self> {
+    pub fn new(workspace: PathBuf) -> AgentResult<Self> {
         let skills = Box::new(SkillsLoader::new(&workspace));
         Ok(Self { workspace, skills })
     }

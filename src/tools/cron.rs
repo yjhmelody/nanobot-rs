@@ -6,7 +6,7 @@ use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde_json::json;
 
 use crate::cron::{AddJobParams, CronSchedule, CronScheduleKind, CronService};
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -80,19 +80,23 @@ impl CronTool {
         .clone()
     }
 
-    pub(crate) async fn execute_typed(&self, args: CronArgs, ctx: &ToolContext) -> Result<String> {
+    pub(crate) async fn execute_typed(
+        &self,
+        args: CronArgs,
+        ctx: &ToolContext,
+    ) -> ToolResult<String> {
         match args.action {
             CronAction::Add => {
                 let message = args.message.unwrap_or_default();
                 if message.trim().is_empty() {
-                    return Err(NanobotError::invalid_tool_args(
+                    return Err(ToolError::invalid_args(
                         "cron",
                         "message is required for add",
                     ));
                 }
 
                 if ctx.channel.trim().is_empty() || ctx.chat_id.trim().is_empty() {
-                    return Err(NanobotError::tool_execution(
+                    return Err(ToolError::execution(
                         "cron",
                         anyhow::anyhow!("no session context (channel/chat_id)"),
                     ));
@@ -104,7 +108,7 @@ impl CronTool {
                 let at = args.at;
 
                 if tz.is_some() && cron_expr.is_none() {
-                    return Err(NanobotError::invalid_tool_args(
+                    return Err(ToolError::invalid_args(
                         "cron",
                         "tz can only be used with cron_expr",
                     ));
@@ -113,7 +117,7 @@ impl CronTool {
                 let mut delete_after = false;
                 let schedule = if let Some(sec) = every_seconds {
                     if sec <= 0 {
-                        return Err(NanobotError::invalid_tool_args(
+                        return Err(ToolError::invalid_args(
                             "cron",
                             "every_seconds must be > 0",
                         ));
@@ -139,7 +143,7 @@ impl CronTool {
                         ..CronSchedule::default()
                     }
                 } else {
-                    return Err(NanobotError::invalid_tool_args(
+                    return Err(ToolError::invalid_args(
                         "cron",
                         "either every_seconds, cron_expr, or at is required",
                     ));
@@ -163,27 +167,27 @@ impl CronTool {
                     .await
                 {
                     Ok(job) => Ok(format!("Created job '{}' (id: {})", job.name, job.id)),
-                    Err(err) => Err(NanobotError::tool_execution("cron", err)),
+                    Err(err) => Err(ToolError::execution("cron", err.into())),
                 }
             }
             CronAction::Once => {
                 let message = args.message.unwrap_or_default();
                 if message.trim().is_empty() {
-                    return Err(NanobotError::invalid_tool_args(
+                    return Err(ToolError::invalid_args(
                         "cron",
                         "message is required for once",
                     ));
                 }
 
                 if ctx.channel.trim().is_empty() || ctx.chat_id.trim().is_empty() {
-                    return Err(NanobotError::tool_execution(
+                    return Err(ToolError::execution(
                         "cron",
                         anyhow::anyhow!("no session context (channel/chat_id)"),
                     ));
                 }
 
                 if args.every_seconds.is_some() || args.cron_expr.is_some() || args.tz.is_some() {
-                    return Err(NanobotError::invalid_tool_args(
+                    return Err(ToolError::invalid_args(
                         "cron",
                         "once only supports optional at",
                     ));
@@ -217,7 +221,7 @@ impl CronTool {
                     .await
                 {
                     Ok(job) => Ok(format!("Created job '{}' (id: {})", job.name, job.id)),
-                    Err(err) => Err(NanobotError::tool_execution("cron", err)),
+                    Err(err) => Err(ToolError::execution("cron", err.into())),
                 }
             }
             CronAction::List => match self.service.list_jobs(false).await {
@@ -239,11 +243,11 @@ impl CronTool {
                         Ok(format!("Scheduled jobs:\n{}", lines.join("\n")))
                     }
                 }
-                Err(err) => Err(NanobotError::tool_execution("cron", err)),
+                Err(err) => Err(ToolError::execution("cron", err.into())),
             },
             CronAction::Remove => {
                 let Some(job_id) = args.job_id else {
-                    return Err(NanobotError::invalid_tool_args(
+                    return Err(ToolError::invalid_args(
                         "cron",
                         "job_id is required for remove",
                     ));
@@ -252,7 +256,7 @@ impl CronTool {
                 match self.service.remove_job(&job_id).await {
                     Ok(true) => Ok(format!("Removed job {}", job_id)),
                     Ok(false) => Ok(format!("Job {} not found", job_id)),
-                    Err(err) => Err(NanobotError::tool_execution("cron", err)),
+                    Err(err) => Err(ToolError::execution("cron", err.into())),
                 }
             }
         }
@@ -269,13 +273,13 @@ impl Tool for CronTool {
         Self::definition()
     }
 
-    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> ToolResult<String> {
         let parsed = parse_args::<CronArgs>(args_json)?;
         self.execute_typed(parsed, ctx).await
     }
 }
 
-fn parse_at_to_ms(input: &str) -> Result<i64> {
+fn parse_at_to_ms(input: &str) -> ToolResult<i64> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
         return Ok(dt.timestamp_millis());
     }
@@ -288,7 +292,7 @@ fn parse_at_to_ms(input: &str) -> Result<i64> {
         }
     }
 
-    Err(NanobotError::invalid_tool_args(
+    Err(ToolError::invalid_args(
         "cron",
         "invalid at datetime, expected ISO format like 2026-02-12T10:30:00",
     ))

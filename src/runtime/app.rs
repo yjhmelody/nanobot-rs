@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::error::NanobotResult;
 
 use crate::agent::{AgentConfig, AgentLoop, AgentLoopBuilder};
 use crate::bus::MessageBus;
@@ -19,7 +19,7 @@ pub struct RuntimeBundle {
     pub heartbeat: Arc<HeartbeatService>,
 }
 
-pub async fn build_runtime(config: Config) -> Result<RuntimeBundle> {
+pub async fn build_runtime(config: Config) -> NanobotResult<RuntimeBundle> {
     let bus = MessageBus::new();
     let provider = make_provider(&config)?;
     let workspace = config.workspace_path();

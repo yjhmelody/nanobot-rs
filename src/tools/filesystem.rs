@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs as async_fs;
 
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tool_error;
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
@@ -72,7 +72,7 @@ impl Tool for ReadFileTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         read_file(
             args_json,
@@ -127,7 +127,7 @@ impl Tool for WriteFileTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         write_file(
             args_json,
@@ -186,7 +186,7 @@ impl Tool for EditFileTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         edit_file(
             args_json,
@@ -237,7 +237,7 @@ impl Tool for ListDirTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         list_dir(
             args_json,
@@ -248,7 +248,7 @@ impl Tool for ListDirTool {
     }
 }
 
-async fn resolve_path(path: &str, workspace: &Path, allowed_dir: Option<&Path>) -> Result<PathBuf> {
+async fn resolve_path(path: &str, workspace: &Path, allowed_dir: Option<&Path>) -> ToolResult<PathBuf> {
     let raw = if let Some(rest) = path.strip_prefix("~/") {
         dirs::home_dir()
             .map(|h| h.join(rest))
@@ -298,7 +298,7 @@ async fn read_file(
     args_json: &str,
     workspace: &Path,
     allowed_dir: Option<&Path>,
-) -> Result<String> {
+) -> ToolResult<String> {
     let typed = parse_args::<ReadFileArgs>(args_json)?;
     let path = typed.path;
 
@@ -306,27 +306,27 @@ async fn read_file(
     let metadata = match async_fs::metadata(&resolved).await {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "read_file",
                 anyhow::anyhow!("file not found: {}", path),
             ));
         }
         Err(err) => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "read_file",
                 anyhow::anyhow!("reading metadata {}: {}", resolved.display(), err),
             ));
         }
     };
     if !metadata.is_file() {
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "read_file",
             anyhow::anyhow!("not a file: {}", path),
         ));
     }
 
     async_fs::read_to_string(&resolved).await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "read_file",
             anyhow::anyhow!("reading file {}: {}", resolved.display(), e),
         )
@@ -337,7 +337,7 @@ async fn write_file(
     args_json: &str,
     workspace: &Path,
     allowed_dir: Option<&Path>,
-) -> Result<String> {
+) -> ToolResult<String> {
     let typed = parse_args::<WriteFileArgs>(args_json)?;
     let path = typed.path;
     let content = typed.content;
@@ -346,7 +346,7 @@ async fn write_file(
 
     if let Some(parent) = resolved.parent() {
         async_fs::create_dir_all(parent).await.map_err(|e| {
-            NanobotError::tool_execution(
+            ToolError::execution(
                 "write_file",
                 anyhow::anyhow!("creating directory {}: {}", parent.display(), e),
             )
@@ -354,7 +354,7 @@ async fn write_file(
     }
 
     async_fs::write(&resolved, &content).await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "write_file",
             anyhow::anyhow!("writing file {}: {}", resolved.display(), e),
         )
@@ -370,7 +370,7 @@ async fn edit_file(
     args_json: &str,
     workspace: &Path,
     allowed_dir: Option<&Path>,
-) -> Result<String> {
+) -> ToolResult<String> {
     let typed = parse_args::<EditFileArgs>(args_json)?;
     let path = typed.path;
     let old_text = typed.old_text;
@@ -381,34 +381,34 @@ async fn edit_file(
     let metadata = match async_fs::metadata(&resolved).await {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "edit_file",
                 anyhow::anyhow!("file not found: {}", path),
             ));
         }
         Err(err) => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "edit_file",
                 anyhow::anyhow!("reading metadata {}: {}", resolved.display(), err),
             ));
         }
     };
     if !metadata.is_file() {
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "edit_file",
             anyhow::anyhow!("not a file: {}", path),
         ));
     }
 
     let content = async_fs::read_to_string(&resolved).await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "edit_file",
             anyhow::anyhow!("reading file {}: {}", resolved.display(), e),
         )
     })?;
 
     if !content.contains(&old_text) {
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "edit_file",
             anyhow::anyhow!("old_text not found in {}", path),
         ));
@@ -422,7 +422,7 @@ async fn edit_file(
 
     let new_content = content.replacen(&old_text, &new_text, 1);
     async_fs::write(&resolved, new_content).await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "edit_file",
             anyhow::anyhow!("writing file {}: {}", resolved.display(), e),
         )
@@ -430,7 +430,7 @@ async fn edit_file(
     Ok(format!("Successfully edited {}", resolved.display()))
 }
 
-async fn list_dir(args_json: &str, workspace: &Path, allowed_dir: Option<&Path>) -> Result<String> {
+async fn list_dir(args_json: &str, workspace: &Path, allowed_dir: Option<&Path>) -> ToolResult<String> {
     let typed = parse_args::<ListDirArgs>(args_json)?;
     let path = typed.path;
 
@@ -438,20 +438,20 @@ async fn list_dir(args_json: &str, workspace: &Path, allowed_dir: Option<&Path>)
     let metadata = match async_fs::metadata(&resolved).await {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "list_dir",
                 anyhow::anyhow!("directory not found: {}", path),
             ));
         }
         Err(err) => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "list_dir",
                 anyhow::anyhow!("reading metadata {}: {}", resolved.display(), err),
             ));
         }
     };
     if !metadata.is_dir() {
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "list_dir",
             anyhow::anyhow!("not a directory: {}", path),
         ));
@@ -459,19 +459,19 @@ async fn list_dir(args_json: &str, workspace: &Path, allowed_dir: Option<&Path>)
 
     let mut items = Vec::new();
     let mut read_dir = async_fs::read_dir(&resolved).await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "list_dir",
             anyhow::anyhow!("listing directory {}: {}", resolved.display(), e),
         )
     })?;
     while let Some(ent) = read_dir.next_entry().await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "list_dir",
             anyhow::anyhow!("reading directory entry: {}", e),
         )
     })? {
         let file_type = ent.file_type().await.map_err(|e| {
-            NanobotError::tool_execution(
+            ToolError::execution(
                 "list_dir",
                 anyhow::anyhow!("reading entry type in {}: {}", resolved.display(), e),
             )

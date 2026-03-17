@@ -7,7 +7,7 @@ use regex::Regex;
 use serde_json::json;
 use tokio::process::Command;
 
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tool_error;
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
@@ -67,7 +67,7 @@ impl Tool for ShellTool {
         definition()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let snapshot = self.config.snapshot().await;
         execute(
             args_json,
@@ -88,7 +88,7 @@ pub async fn execute(
     timeout_secs: u64,
     restrict_to_workspace: bool,
     path_append: &str,
-) -> Result<String> {
+) -> ToolResult<String> {
     let typed = parse_args::<ExecArgs>(args_json)?;
     let command = typed.command;
     let cwd = resolve_working_dir(
@@ -130,14 +130,14 @@ pub async fn execute(
         Ok(res) => match res {
             Ok(o) => o,
             Err(e) => {
-                return Err(NanobotError::tool_execution(
+                return Err(ToolError::execution(
                     "exec",
                     anyhow::anyhow!("waiting command output: {}", e),
                 ));
             }
         },
         Err(_) => {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "exec",
                 anyhow::anyhow!("command timed out after {} seconds", timeout_secs),
             ));
@@ -182,7 +182,7 @@ fn guard_command(
     cwd: &Path,
     allowed_dir: Option<&Path>,
     restrict_to_workspace: bool,
-) -> Result<()> {
+) -> ToolResult<()> {
     let deny_patterns = [
         r"\brm\s+-[rf]{1,2}\b",
         r"\bdel\s+/[fq]\b",
@@ -203,7 +203,7 @@ fn guard_command(
             .map(|r| r.is_match(&lower))
             .unwrap_or(false)
         {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "exec",
                 anyhow::anyhow!("command blocked by safety guard (dangerous pattern detected)"),
             ));
@@ -212,33 +212,33 @@ fn guard_command(
 
     if restrict_to_workspace {
         if command.contains("../") || command.contains("..\\") {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "exec",
                 anyhow::anyhow!("command blocked by safety guard (path traversal detected)"),
             ));
         }
         if command.contains("~/") || command.contains("~\\") {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "exec",
                 anyhow::anyhow!("command blocked by safety guard (home path detected)"),
             ));
         }
 
         let cwd = cwd.canonicalize().map_err(|e| {
-            NanobotError::tool_execution(
+            ToolError::execution(
                 "exec",
                 anyhow::anyhow!("canonicalizing cwd {}: {}", cwd.display(), e),
             )
         })?;
         if let Some(allowed_dir) = allowed_dir {
             let allowed_dir = allowed_dir.canonicalize().map_err(|e| {
-                NanobotError::tool_execution(
+                ToolError::execution(
                     "exec",
                     anyhow::anyhow!("canonicalizing workspace {}: {}", allowed_dir.display(), e),
                 )
             })?;
             if cwd != allowed_dir && !cwd.starts_with(&allowed_dir) {
-                return Err(NanobotError::tool_execution(
+                return Err(ToolError::execution(
                     "exec",
                     anyhow::anyhow!("working_dir outside workspace"),
                 ));
@@ -255,7 +255,7 @@ fn guard_command(
                         &cwd
                     };
                     if resolved != base && !resolved.starts_with(base) {
-                        return Err(NanobotError::tool_execution(
+                        return Err(ToolError::execution(
                             "exec",
                             anyhow::anyhow!(
                                 "command blocked by safety guard (path outside working dir)"
@@ -294,7 +294,7 @@ fn resolve_working_dir(
     working_dir: Option<&str>,
     workspace: &Path,
     allowed_dir: Option<&Path>,
-) -> Result<std::path::PathBuf> {
+) -> ToolResult<std::path::PathBuf> {
     let raw_path = match working_dir {
         Some(value) => std::path::PathBuf::from(value),
         None => workspace.to_path_buf(),
@@ -306,7 +306,7 @@ fn resolve_working_dir(
     };
 
     let resolved = candidate.canonicalize().map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "exec",
             anyhow::anyhow!("canonicalizing working_dir {}: {}", candidate.display(), e),
         )
@@ -314,13 +314,13 @@ fn resolve_working_dir(
 
     if let Some(allowed_dir) = allowed_dir {
         let allowed_dir = allowed_dir.canonicalize().map_err(|e| {
-            NanobotError::tool_execution(
+            ToolError::execution(
                 "exec",
                 anyhow::anyhow!("canonicalizing workspace {}: {}", allowed_dir.display(), e),
             )
         })?;
         if resolved != allowed_dir && !resolved.starts_with(&allowed_dir) {
-            return Err(NanobotError::tool_execution(
+            return Err(ToolError::execution(
                 "exec",
                 anyhow::anyhow!("working_dir outside workspace"),
             ));

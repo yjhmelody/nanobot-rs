@@ -43,6 +43,13 @@ pub(crate) struct TelegramSendMessage {
     pub(crate) text: String,
 }
 
+/// Telegram sendChatAction request body.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TelegramSendChatAction {
+    pub(crate) chat_id: i64,
+    pub(crate) action: String,
+}
+
 /// Telegram editMessageText request body.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct TelegramEditMessageText {

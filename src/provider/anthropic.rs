@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use tracing::trace;
 
-use crate::error::ProviderError;
+use crate::provider::{ProviderError, ProviderResult};
 use crate::observability::TARGET_PROVIDER;
 use crate::provider::anthropic_types::{
     AnthropicContentBlock, AnthropicErrorResponse, AnthropicInputContentBlock,
@@ -220,7 +220,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LLMProvider for AnthropicProvider {
-    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError> {
+    async fn chat(&self, req: ChatRequest) -> ProviderResult<LLMResponse> {
         let model = req
             .model
             .clone()

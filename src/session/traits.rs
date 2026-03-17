@@ -1,5 +1,5 @@
 //! Trait definitions for session and memory management.
-use anyhow::Result;
+use crate::session::SessionResult;
 use async_trait::async_trait;
 
 use super::types::{Session, SessionEntry, SessionSummary};
@@ -12,19 +12,19 @@ use crate::provider::ChatMessage;
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Retrieves a session by key, creating a new one if it doesn't exist.
-    async fn get_or_create(&self, key: &str) -> Result<Session>;
+    async fn get_or_create(&self, key: &str) -> SessionResult<Session>;
 
     /// Saves a session to the underlying storage.
-    async fn save(&self, session: &Session) -> Result<()>;
+    async fn save(&self, session: &Session) -> SessionResult<()>;
 
     /// Invalidates the cached version of a session (if caching is used).
     async fn invalidate(&self, key: &str);
 
     /// Lists all available sessions.
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>>;
+    async fn list_sessions(&self) -> SessionResult<Vec<SessionSummary>>;
 
     /// Deletes a session permanently.
-    async fn delete(&self, key: &str) -> Result<()>;
+    async fn delete(&self, key: &str) -> SessionResult<()>;
 }
 
 /// Trait for session consolidation (compression) strategies.
@@ -46,7 +46,7 @@ pub trait ConsolidationStrategy: Send + Sync {
     /// 2. Generate a summary or compressed representation
     /// 3. Replace old messages with the summary
     /// 4. Update the last_consolidated pointer
-    async fn consolidate(&self, session: &mut Session) -> Result<bool>;
+    async fn consolidate(&self, session: &mut Session) -> SessionResult<bool>;
 }
 
 /// Trait for memory retrieval and context enrichment.
@@ -69,7 +69,7 @@ pub trait MemoryProvider: Send + Sync {
     ///
     /// Returns a string containing relevant memory context to be injected
     /// into the system prompt.
-    async fn get_context(&self, query: &str, session_key: &str) -> Result<String>;
+    async fn get_context(&self, query: &str, session_key: &str) -> SessionResult<String>;
 
     /// Stores new information into long-term memory.
     ///
@@ -83,10 +83,10 @@ pub trait MemoryProvider: Send + Sync {
         content: &str,
         session_key: &str,
         metadata: Option<&serde_json::Value>,
-    ) -> Result<()>;
+    ) -> SessionResult<()>;
 
     /// Appends an entry to the history log.
-    async fn append_history(&self, entry: &str) -> Result<()>;
+    async fn append_history(&self, entry: &str) -> SessionResult<()>;
 }
 
 /// Trait for session history transformation.
@@ -112,7 +112,7 @@ pub trait HistoryTransformer: Send + Sync {
         &self,
         messages: Vec<ChatMessage>,
         session: &Session,
-    ) -> Result<Vec<ChatMessage>>;
+    ) -> SessionResult<Vec<ChatMessage>>;
 }
 
 /// Trait for session lifecycle hooks.
@@ -125,19 +125,19 @@ pub trait HistoryTransformer: Send + Sync {
 #[async_trait]
 pub trait SessionHook: Send + Sync {
     /// Called when a new session is created.
-    async fn on_create(&self, session: &Session) -> Result<()> {
+    async fn on_create(&self, session: &Session) -> SessionResult<()> {
         let _ = session;
         Ok(())
     }
 
     /// Called before a session is saved.
-    async fn on_before_save(&self, session: &mut Session) -> Result<()> {
+    async fn on_before_save(&self, session: &mut Session) -> SessionResult<()> {
         let _ = session;
         Ok(())
     }
 
     /// Called after a session is saved.
-    async fn on_after_save(&self, session: &Session) -> Result<()> {
+    async fn on_after_save(&self, session: &Session) -> SessionResult<()> {
         let _ = session;
         Ok(())
     }
@@ -147,19 +147,23 @@ pub trait SessionHook: Send + Sync {
         &self,
         session: &Session,
         new_messages: &[SessionEntry],
-    ) -> Result<()> {
+    ) -> SessionResult<()> {
         let _ = (session, new_messages);
         Ok(())
     }
 
     /// Called when a session is consolidated.
-    async fn on_consolidate(&self, session: &Session, messages_consolidated: usize) -> Result<()> {
+    async fn on_consolidate(
+        &self,
+        session: &Session,
+        messages_consolidated: usize,
+    ) -> SessionResult<()> {
         let _ = (session, messages_consolidated);
         Ok(())
     }
 
     /// Called when a session is deleted.
-    async fn on_delete(&self, key: &str) -> Result<()> {
+    async fn on_delete(&self, key: &str) -> SessionResult<()> {
         let _ = key;
         Ok(())
     }

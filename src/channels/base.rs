@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::bus::OutboundMessage;
-use crate::error::Result;
+use crate::channels::ChannelResult;
 
 #[derive(Debug, Clone, Default)]
 pub struct SendOutcome {
@@ -15,16 +15,16 @@ pub trait ChannelAdapter: Send + Sync {
     fn name(&self) -> &str;
 
     /// Start inbound listening / connection lifecycle.
-    async fn start(&self) -> Result<()>;
+    async fn start(&self) -> ChannelResult<()>;
 
     /// Stop background tasks and clean up resources.
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&self) -> ChannelResult<()>;
 
     /// Deliver an outbound message to the external platform.
-    async fn send(&self, msg: OutboundMessage) -> Result<SendOutcome>;
+    async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome>;
 
     /// Update an existing message on platforms that support edits.
-    async fn update(&self, message_id: &str, msg: OutboundMessage) -> Result<()> {
+    async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
         let _ = message_id;
         let _ = self.send(msg).await?;
         Ok(())

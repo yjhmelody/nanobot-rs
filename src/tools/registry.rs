@@ -6,7 +6,7 @@ use crate::agent::SpawnService;
 use crate::bus::MessageBus;
 use crate::config::schema::{ExecToolConfig, WebToolsConfig};
 use crate::cron::CronService;
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{Tool, ToolContext, ToolDefinition};
 use crate::tools::config::SharedToolConfig;
 use crate::tools::cron::CronTool;
@@ -84,17 +84,17 @@ impl ToolRegistry {
         defs
     }
 
-    pub fn register_dynamic_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
+    pub fn register_dynamic_tool(&self, tool: Arc<dyn Tool>) -> ToolResult<()> {
         let name = tool.name().to_string();
         if self.builtin_names.contains(&name) {
-            return Err(NanobotError::config(format!(
+            return Err(ToolError::config(format!(
                 "tool '{}' conflicts with builtin tool name",
                 name
             )));
         }
         let mut guard = self.tools.write();
         if guard.contains_key(&name) {
-            return Err(NanobotError::config(format!(
+            return Err(ToolError::config(format!(
                 "tool '{}' already registered",
                 name
             )));
@@ -121,7 +121,7 @@ impl ToolRegistry {
             .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
-    pub async fn start_turn(&self) -> Result<()> {
+    pub async fn start_turn(&self) -> ToolResult<()> {
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
             tool.start_turn().await?;
@@ -177,7 +177,7 @@ impl ToolRegistry {
     /// # use nanobot_rs::tools::registry::ToolRegistry;
     /// # use nanobot_rs::tools::base::ToolContext;
     /// # use nanobot_rs::types::SessionKey;
-    /// # async fn example(registry: &ToolRegistry) -> nanobot_rs::error::Result<()> {
+    /// # async fn example(registry: &ToolRegistry) -> nanobot_rs::tools::ToolResult<()> {
     /// let ctx = ToolContext {
     ///     channel: "cli".to_string(),
     ///     chat_id: "direct".to_string(),
@@ -188,12 +188,17 @@ impl ToolRegistry {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn execute(&self, name: &str, args_json: &str, ctx: &ToolContext) -> Result<String> {
+    pub async fn execute(
+        &self,
+        name: &str,
+        args_json: &str,
+        ctx: &ToolContext,
+    ) -> ToolResult<String> {
         let tool = self.tools.read().get(name).cloned();
         if let Some(tool) = tool {
             tool.execute(args_json, ctx).await
         } else {
-            Err(NanobotError::ToolNotFound(name.to_string()))
+            Err(ToolError::not_found(name.to_string()))
         }
     }
 
@@ -247,7 +252,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::error::ProviderError;
+    use crate::provider::ProviderError;
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
     use crate::tools::base::{JsonSchema, ToolDefinition};
     use crate::types::SessionKey;
@@ -375,7 +380,7 @@ mod tests {
             ))
         }
 
-        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> Result<String> {
+        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
             Ok(self.value.clone())
         }
     }
@@ -432,7 +437,7 @@ mod tests {
             ))
         }
 
-        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> Result<String> {
+        async fn execute(&self, _args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
             Ok(String::new())
         }
     }

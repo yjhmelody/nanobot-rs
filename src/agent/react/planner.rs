@@ -7,8 +7,8 @@ use std::time::Duration;
 use tracing::{debug, trace};
 
 use crate::bus::{MessageBus, MessageId, MessageMetadata, OutboundMessage};
-use crate::error::Result;
-use crate::error::{NanobotError, ProviderError};
+use crate::error::{NanobotError, NanobotResult};
+use crate::provider::ProviderError;
 use crate::observability::TARGET_REACT;
 use crate::provider::streaming::{StreamAccumulator, StreamError, StreamEvent};
 use crate::provider::{ChatRequest, LLMProvider};
@@ -39,7 +39,7 @@ impl Planner {
         tools: &[Arc<ToolDefinition>],
         config: &ModelConfig,
         progress: Option<&ProgressEmitter>,
-    ) -> Result<PlannerResponse> {
+    ) -> NanobotResult<PlannerResponse> {
         debug!(
             target: TARGET_REACT,
             iteration = config.iteration,

@@ -1,6 +1,7 @@
 pub mod anthropic;
 mod anthropic_types;
 pub mod base;
+pub mod error;
 pub mod fallback;
 pub mod openai_compat;
 mod openai_types;
@@ -12,29 +13,28 @@ pub mod traits;
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-
 use crate::config::schema::Config;
 
 pub use crate::provider::base::*;
 pub use crate::types::provider::*;
+pub use error::{ProviderError, ProviderResult};
 
 use anthropic::AnthropicProvider;
 use fallback::FallbackProvider;
 use openai_compat::OpenAICompatProvider;
 pub use tool_name::ToolName;
 
-pub fn make_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
+pub fn make_provider(config: &Config) -> ProviderResult<Arc<dyn LLMProvider>> {
     let model = config.agents.defaults.model.clone();
     let provider_name = config
         .get_provider_name(Some(&model))
-        .ok_or_else(|| anyhow!("no provider matched for model {}", model))?;
+        .ok_or_else(|| ProviderError::InvalidConfig(format!("no provider matched for model {}", model)))?;
 
     if provider_name == "openai_codex" || provider_name == "github_copilot" {
-        return Err(anyhow!(
+        return Err(ProviderError::InvalidConfig(format!(
             "OAuth provider '{}' is not supported as LLM provider. Use ACP as a tool instead.",
             provider_name
-        ));
+        )));
     }
 
     // Check if fallback providers are configured
@@ -63,7 +63,7 @@ fn create_single_provider(
     config: &Config,
     provider_name: &str,
     model: &str,
-) -> Result<Arc<dyn LLMProvider>> {
+) -> ProviderResult<Arc<dyn LLMProvider>> {
     let provider_cfg = config
         .provider_config(provider_name)
         .cloned()
@@ -74,11 +74,10 @@ fn create_single_provider(
         // TODO: what's this model
         && !model.starts_with("bedrock/")
     {
-        return Err(anyhow!(
+        return Err(ProviderError::InvalidConfig(format!(
             "no API key configured for provider '{}' (model: {})",
-            provider_name,
-            model
-        ));
+            provider_name, model
+        )));
     }
 
     let api_base = if provider_name == "custom" {

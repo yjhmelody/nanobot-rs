@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info, warn};
 
-use crate::error::Result;
+use crate::error::NanobotResult;
 use crate::observability::TARGET_REACT;
 use crate::provider::LLMProvider;
 use crate::tools::{ToolContext, ToolRegistry};
@@ -44,7 +44,7 @@ impl ReActExecutor {
         config: ModelConfig,
         context: ExecutionContext,
         progress: Option<ProgressEmitter>,
-    ) -> Result<LoopOutcome> {
+    ) -> NanobotResult<LoopOutcome> {
         let mut state = LoopState::QueryModel { iteration: 0 };
         let mut iterations = 0;
         let mut last_usage: Option<UsageStats> = None;

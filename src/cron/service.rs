@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::fs as async_fs;
@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use super::add_job_params::AddJobParams;
+use super::error::{CronError, CronResult};
 use crate::observability::TARGET_CRON;
 
 use crate::types::cron::{
@@ -20,7 +21,7 @@ use crate::types::cron::{
 
 #[async_trait]
 pub trait CronJobHandler: Send + Sync {
-    async fn on_job(&self, job: CronJob) -> Result<Option<String>>;
+    async fn on_job(&self, job: CronJob) -> CronResult<Option<String>>;
 }
 
 pub struct CronService {
@@ -49,7 +50,7 @@ impl CronService {
         *self.on_job.write().await = Some(handler);
     }
 
-    pub async fn start(self: &Arc<Self>) -> Result<()> {
+    pub async fn start(self: &Arc<Self>) -> CronResult<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -89,7 +90,7 @@ impl CronService {
         }
     }
 
-    pub async fn status(&self) -> Result<CronStatus> {
+    pub async fn status(&self) -> CronResult<CronStatus> {
         let mut store = self.write_store().await;
         self.reload_if_modified_locked(&mut store).await?;
         Ok(CronStatus {
@@ -99,7 +100,7 @@ impl CronService {
         })
     }
 
-    pub async fn list_jobs(&self, include_disabled: bool) -> Result<Vec<CronJob>> {
+    pub async fn list_jobs(&self, include_disabled: bool) -> CronResult<Vec<CronJob>> {
         let mut store = self.write_store().await;
         self.reload_if_modified_locked(&mut store).await?;
 
@@ -118,7 +119,7 @@ impl CronService {
         Ok(jobs)
     }
 
-    pub async fn add_job(&self, params: AddJobParams) -> Result<CronJob> {
+    pub async fn add_job(&self, params: AddJobParams) -> CronResult<CronJob> {
         params.schedule.validate_for_add()?;
         let now = now_ms();
 
@@ -152,7 +153,7 @@ impl CronService {
         Ok(job)
     }
 
-    pub async fn remove_job(&self, job_id: &str) -> Result<bool> {
+    pub async fn remove_job(&self, job_id: &str) -> CronResult<bool> {
         let mut store = self.write_store().await;
         self.reload_if_modified_locked(&mut store).await?;
 
@@ -167,7 +168,7 @@ impl CronService {
         Ok(removed)
     }
 
-    async fn on_timer(&self) -> Result<()> {
+    async fn on_timer(&self) -> CronResult<()> {
         // Collect due ids first to avoid holding the store lock while executing callbacks.
         let due_ids = {
             let mut store = self.write_store().await;
@@ -190,7 +191,7 @@ impl CronService {
         Ok(())
     }
 
-    async fn execute_job(&self, job_id: &str) -> Result<()> {
+    async fn execute_job(&self, job_id: &str) -> CronResult<()> {
         let job_snapshot = {
             let mut store = self.write_store().await;
             self.reload_if_modified_locked(&mut store).await?;
@@ -260,13 +261,16 @@ impl CronService {
         self.store.write().await
     }
 
-    async fn reload_if_modified_locked(&self, store: &mut CronStore) -> Result<()> {
+    async fn reload_if_modified_locked(&self, store: &mut CronStore) -> CronResult<()> {
         let metadata = match async_fs::metadata(&self.store_path).await {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to stat {}", self.store_path.display()));
+                return Err(CronError::message(format!(
+                    "failed to stat {}: {}",
+                    self.store_path.display(),
+                    err
+                )));
             }
         };
         let modified = metadata.modified().ok();
@@ -284,7 +288,7 @@ impl CronService {
         Ok(())
     }
 
-    async fn save_store_locked(&self, store: &CronStore) -> Result<()> {
+    async fn save_store_locked(&self, store: &CronStore) -> CronResult<()> {
         if let Some(parent) = self.store_path.parent() {
             async_fs::create_dir_all(parent)
                 .await
@@ -345,7 +349,7 @@ fn load_store_sync(path: &Path) -> (CronStore, Option<SystemTime>) {
     }
 }
 
-fn read_store_file(path: &Path) -> Result<CronStore> {
+fn read_store_file(path: &Path) -> CronResult<CronStore> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read cron store {}", path.display()))?;
     let mut store: CronStore = serde_json::from_str(&raw)
@@ -356,7 +360,7 @@ fn read_store_file(path: &Path) -> Result<CronStore> {
     Ok(store)
 }
 
-async fn read_store_file_async(path: &Path) -> Result<CronStore> {
+async fn read_store_file_async(path: &Path) -> CronResult<CronStore> {
     let raw = async_fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read cron store {}", path.display()))?;
@@ -388,7 +392,7 @@ mod tests {
 
     #[async_trait]
     impl CronJobHandler for TestCronJobHandler {
-        async fn on_job(&self, _job: CronJob) -> Result<Option<String>> {
+        async fn on_job(&self, _job: CronJob) -> CronResult<Option<String>> {
             self.called.fetch_add(1, Ordering::SeqCst);
             Ok(Some("ok".to_string()))
         }

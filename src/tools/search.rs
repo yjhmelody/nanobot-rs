@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::error::{NanobotError, Result};
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -159,7 +159,7 @@ impl Tool for SearchFilesTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let args: SearchFilesArgs = parse_args(args_json)?;
         let snapshot = self.config.snapshot().await;
 
@@ -238,7 +238,7 @@ impl Tool for GrepCodeTool {
         .clone()
     }
 
-    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, _ctx: &ToolContext) -> ToolResult<String> {
         let args: GrepCodeArgs = parse_args(args_json)?;
         let snapshot = self.config.snapshot().await;
 
@@ -267,7 +267,7 @@ async fn search_with_ripgrep(
     limit: usize,
     context_lines: usize,
     workspace: &Path,
-) -> Result<String> {
+) -> ToolResult<String> {
     let search_path = if let Some(p) = path {
         workspace.join(p)
     } else {
@@ -275,7 +275,7 @@ async fn search_with_ripgrep(
     };
 
     if !search_path.exists() {
-        return Err(NanobotError::invalid_tool_args(
+        return Err(ToolError::invalid_args(
             "search_files",
             format!("Path does not exist: {}", search_path.display()),
         ));
@@ -317,7 +317,7 @@ async fn search_with_ripgrep(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "search_files",
             anyhow::anyhow!(
                 "Failed to spawn ripgrep: {}. Make sure 'rg' is installed.",
@@ -327,11 +327,11 @@ async fn search_with_ripgrep(
     })?;
 
     let stdout = child.stdout.take().ok_or_else(|| {
-        NanobotError::tool_execution("search_files", anyhow::anyhow!("Failed to capture stdout"))
+        ToolError::execution("search_files", anyhow::anyhow!("Failed to capture stdout"))
     })?;
 
     let stderr = child.stderr.take().ok_or_else(|| {
-        NanobotError::tool_execution("search_files", anyhow::anyhow!("Failed to capture stderr"))
+        ToolError::execution("search_files", anyhow::anyhow!("Failed to capture stderr"))
     })?;
 
     let mut stdout_data = Vec::new();
@@ -354,30 +354,46 @@ async fn search_with_ripgrep(
     });
 
     let status = child.wait().await.map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "search_files",
             anyhow::anyhow!("Failed to wait for ripgrep: {}", e),
         )
     })?;
 
-    let stdout_data = stdout_task.await.map_err(|e| {
-        NanobotError::tool_execution(
-            "search_files",
-            anyhow::anyhow!("Failed to read stdout: {}", e),
-        )
-    })??;
+    let stdout_data = stdout_task
+        .await
+        .map_err(|e| {
+            ToolError::execution(
+                "search_files",
+                anyhow::anyhow!("Failed to read stdout: {}", e),
+            )
+        })?
+        .map_err(|e| {
+            ToolError::execution(
+                "search_files",
+                anyhow::anyhow!("Failed to read stdout: {}", e),
+            )
+        })?;
 
-    let stderr_data = stderr_task.await.map_err(|e| {
-        NanobotError::tool_execution(
-            "search_files",
-            anyhow::anyhow!("Failed to read stderr: {}", e),
-        )
-    })??;
+    let stderr_data = stderr_task
+        .await
+        .map_err(|e| {
+            ToolError::execution(
+                "search_files",
+                anyhow::anyhow!("Failed to read stderr: {}", e),
+            )
+        })?
+        .map_err(|e| {
+            ToolError::execution(
+                "search_files",
+                anyhow::anyhow!("Failed to read stderr: {}", e),
+            )
+        })?;
 
     // ripgrep returns exit code 1 when no matches found, which is not an error
     if !status.success() && status.code() != Some(1) {
         let stderr_text = String::from_utf8_lossy(&stderr_data);
-        return Err(NanobotError::tool_execution(
+        return Err(ToolError::execution(
             "search_files",
             anyhow::anyhow!("ripgrep failed: {}", stderr_text),
         ));
@@ -391,7 +407,7 @@ async fn search_with_ripgrep(
     };
 
     serde_json::to_string_pretty(&response).map_err(|e| {
-        NanobotError::tool_execution(
+        ToolError::execution(
             "search_files",
             anyhow::anyhow!("Failed to serialize results: {}", e),
         )
@@ -447,7 +463,7 @@ struct RipgrepMatchText {
     text: String,
 }
 
-fn parse_ripgrep_json(data: &[u8], limit: usize) -> Result<Vec<SearchResult>> {
+fn parse_ripgrep_json(data: &[u8], limit: usize) -> ToolResult<Vec<SearchResult>> {
     let text = String::from_utf8_lossy(data);
     let mut results = Vec::new();
     let mut current_match: Option<(String, usize, usize, String)> = None;

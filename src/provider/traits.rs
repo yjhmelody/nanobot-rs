@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::ProviderError;
+use crate::provider::ProviderResult;
 use crate::provider::streaming::{StreamError, StreamEvent, StreamResponse};
 use crate::tools::base::ToolDefinition;
 use crate::types::SessionKey;
@@ -45,7 +45,7 @@ pub trait LLMProvider: Send + Sync {
     /// # Errors
     ///
     /// Returns `ProviderError` for network issues, authentication failures, rate limits, etc.
-    async fn chat(&self, req: ChatRequest) -> Result<LLMResponse, ProviderError>;
+    async fn chat(&self, req: ChatRequest) -> ProviderResult<LLMResponse>;
 
     /// Streaming chat completion (unified interface).
     ///

@@ -1,6 +1,6 @@
 use tokio::sync::broadcast;
 
-use super::{InboundMessage, OutboundMessage};
+use super::{BusError, BusResult, InboundMessage, OutboundMessage};
 
 /// Multi-subscriber message bus using broadcast channels.
 ///
@@ -78,11 +78,11 @@ impl MessageBus {
     ///
     /// Returns an error if there are no active subscribers.
     /// This is usually not a problem as the error can be safely ignored.
-    pub fn publish_inbound(&self, msg: InboundMessage) -> anyhow::Result<()> {
+    pub fn publish_inbound(&self, msg: InboundMessage) -> BusResult<()> {
         self.inbound_tx
             .send(msg)
             .map(|_| ())
-            .map_err(|_| anyhow::anyhow!("failed to publish inbound: no subscribers"))
+            .map_err(|_| BusError::no_subscribers("inbound"))
     }
 
     /// Subscribes to inbound messages.
@@ -112,11 +112,11 @@ impl MessageBus {
     /// # Errors
     ///
     /// Returns an error if there are no active subscribers.
-    pub fn publish_outbound(&self, msg: OutboundMessage) -> anyhow::Result<()> {
+    pub fn publish_outbound(&self, msg: OutboundMessage) -> BusResult<()> {
         self.outbound_tx
             .send(msg)
             .map(|_| ())
-            .map_err(|_| anyhow::anyhow!("failed to publish outbound: no subscribers"))
+            .map_err(|_| BusError::no_subscribers("outbound"))
     }
 
     /// Subscribes to outbound messages.

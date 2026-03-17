@@ -193,6 +193,11 @@ nanobot-rs gateway
 }
 ```
 
+Telegram 额外字段（可选）：
+
+- `apiBase`：自定义 Telegram API 地址（默认 `https://api.telegram.org`）。
+- `receiveAck`：是否在收到消息后发送 `sendChatAction` 的 `typing` 作为“已收到”提示。`typing` 状态会持续约 5 秒或更短，并会在机器人发送消息后被清除；且在频道聊天与频道私聊中不支持，仅建议在响应需要较长时间时开启。
+
 ## 工作区与数据
 
 默认工作区：

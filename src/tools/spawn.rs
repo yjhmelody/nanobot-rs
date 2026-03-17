@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agent::SpawnService;
-use crate::error::Result;
+use crate::tools::{ToolError, ToolResult};
 use crate::tools::base::{
     Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json,
 };
@@ -54,7 +54,11 @@ impl SpawnTool {
         .clone()
     }
 
-    pub(crate) async fn execute_typed(&self, args: SpawnArgs, ctx: &ToolContext) -> Result<String> {
+    pub(crate) async fn execute_typed(
+        &self,
+        args: SpawnArgs,
+        ctx: &ToolContext,
+    ) -> ToolResult<String> {
         Ok(self
             .service
             .spawn(
@@ -90,15 +94,16 @@ impl Tool for SpawnTool {
         Self::definition()
     }
 
-    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> Result<String> {
+    async fn execute(&self, args_json: &str, ctx: &ToolContext) -> ToolResult<String> {
         let parsed = parse_args::<SpawnArgs>(args_json)?;
         self.execute_typed(parsed, ctx).await
     }
 
-    async fn cancel_by_session(&self, session_key: &str) -> Result<usize> {
+    async fn cancel_by_session(&self, session_key: &str) -> ToolResult<usize> {
         self.service
             .cancel_by_session(&SessionKey::from(session_key))
             .await
+            .map_err(|err| ToolError::execution(self.name(), err.into()))
     }
 }
 
@@ -109,7 +114,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::agent::SpawnService;
-    use crate::error::ProviderError;
+    use crate::provider::ProviderError;
     use crate::provider::{ChatRequest, LLMProvider, LLMResponse, UsageStats};
 
     #[allow(unused)]
@@ -151,7 +156,7 @@ mod tests {
         async fn cancel_by_session(
             &self,
             _session_key: &crate::types::SessionKey,
-        ) -> Result<usize> {
+        ) -> crate::error::NanobotResult<usize> {
             Ok(1)
         }
     }

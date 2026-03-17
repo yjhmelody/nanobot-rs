@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use crate::tools::ToolResult;
 
 use crate::agent::SpawnService;
 use crate::bus::MessageBus;
@@ -85,7 +85,7 @@ impl ToolRegistryBuilder {
     }
 
     /// Builds the ToolRegistry.
-    pub fn build(self) -> Result<ToolRegistry> {
+    pub fn build(self) -> ToolResult<ToolRegistry> {
         let registry = ToolRegistry::new(
             self.workspace,
             self.restrict_to_workspace,
@@ -169,7 +169,7 @@ mod tests {
         async fn cancel_by_session(
             &self,
             _session_key: &SessionKey,
-        ) -> crate::error::Result<usize> {
+        ) -> crate::error::NanobotResult<usize> {
             Ok(0)
         }
     }
@@ -225,7 +225,7 @@ mod tests {
             &self,
             _args_json: &str,
             _ctx: &ToolContext,
-        ) -> crate::error::Result<String> {
+        ) -> crate::tools::ToolResult<String> {
             Ok("builder-ok".to_string())
         }
     }
@@ -281,7 +281,7 @@ mod tests {
             &self,
             _args_json: &str,
             _ctx: &ToolContext,
-        ) -> crate::error::Result<String> {
+        ) -> crate::tools::ToolResult<String> {
             Ok(String::new())
         }
     }

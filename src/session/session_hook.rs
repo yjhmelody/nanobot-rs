@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::session::SessionResult;
 use async_trait::async_trait;
 use tracing::{debug, info};
 
@@ -22,7 +22,7 @@ impl LoggingHook {
 
 #[async_trait]
 impl SessionHook for LoggingHook {
-    async fn on_create(&self, session: &Session) -> Result<()> {
+    async fn on_create(&self, session: &Session) -> SessionResult<()> {
         info!(
             target: LOG_TARGET,
             prefix = %self.prefix,
@@ -32,7 +32,7 @@ impl SessionHook for LoggingHook {
         Ok(())
     }
 
-    async fn on_before_save(&self, session: &mut Session) -> Result<()> {
+    async fn on_before_save(&self, session: &mut Session) -> SessionResult<()> {
         debug!(
             target: LOG_TARGET,
             prefix = %self.prefix,
@@ -43,7 +43,7 @@ impl SessionHook for LoggingHook {
         Ok(())
     }
 
-    async fn on_after_save(&self, session: &Session) -> Result<()> {
+    async fn on_after_save(&self, session: &Session) -> SessionResult<()> {
         debug!(
             target: LOG_TARGET,
             prefix = %self.prefix,
@@ -53,7 +53,11 @@ impl SessionHook for LoggingHook {
         Ok(())
     }
 
-    async fn on_consolidate(&self, session: &Session, messages_consolidated: usize) -> Result<()> {
+    async fn on_consolidate(
+        &self,
+        session: &Session,
+        messages_consolidated: usize,
+    ) -> SessionResult<()> {
         info!(
             target: LOG_TARGET,
             prefix = %self.prefix,
@@ -64,7 +68,7 @@ impl SessionHook for LoggingHook {
         Ok(())
     }
 
-    async fn on_delete(&self, key: &str) -> Result<()> {
+    async fn on_delete(&self, key: &str) -> SessionResult<()> {
         info!(
             target: LOG_TARGET,
             prefix = %self.prefix,
