@@ -1,60 +1,87 @@
-[package]
-name = "nanobot-rs"
+[workspace]
+members = [
+    "crates/nanobot-types",
+    "crates/nanobot-config",
+    "crates/nanobot-bus",
+    "crates/nanobot-session",
+    "crates/nanobot-provider",
+    "crates/nanobot-prompt",
+    "crates/nanobot-tools",
+    "crates/nanobot-cron",
+    "crates/nanobot-agent",
+    "crates/nanobot-channels",
+    "crates/nanobot",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Rust reimplementation of nanobot"
 license = "MIT"
 
-[dependencies]
-anyhow = "1.0"
+[workspace.dependencies]
+# Async
+tokio = { version = "1.44", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = "0.1"
-bytes = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
-clap = { version = "4.5", features = ["derive"] }
-cron = "0.15"
-dashmap = "6.1"
-dirs = "6.0"
 futures = "0.3"
-regex = "1.11"
-notify = "6.1"
-reqwest = { version = "0.13", default-features = false, features = [
-  "json",
-  "query",
-  "rustls",
-  "stream",
-  "multipart",
-] }
-http = "1.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 toml = "0.8"
-thiserror = "2.0"
-tokio = { version = "1.44", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+
+# Networking
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "stream", "multipart"] }
+http = "1.3"
+url = "2.5"
+
+# Concurrency
+dashmap = "6.1"
+parking_lot = "0.12"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-# tracing-opentelemetry = "0.32"
-# opentelemetry = "0.31"
-# opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace"] }
-# opentelemetry-otlp = { version = "0.31", features = ["http-proto", "reqwest-client", "trace"] }
-url = "2.5"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+cron = "0.15"
+
+# Utils
 uuid = { version = "1.11", features = ["v4", "serde"] }
 walkdir = "2.5"
-which = "8.0"
+regex = "1.11"
+notify = "6.1"
 html2text = "0.16"
-rmcp = { version = "1.1.0", default-features = false, features = [
-  "client",
-  "transport-child-process",
-  "transport-streamable-http-client-reqwest",
-] }
-parking_lot = "0.12"
+bytes = "1.0"
+which = "8.0"
+dirs = "6.0"
+tempfile = "3"
+
+# MCP / ACP
+rmcp = { version = "1.1.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 agent-client-protocol = "0.10.0"
 
-[dev-dependencies]
-mockall = "0.13"
-tempfile = "3.10"
-tokio-test = "0.4"
+# Internal crates
+nanobot-types = { path = "crates/nanobot-types" }
+nanobot-config = { path = "crates/nanobot-config" }
+nanobot-bus = { path = "crates/nanobot-bus" }
+nanobot-session = { path = "crates/nanobot-session" }
+nanobot-provider = { path = "crates/nanobot-provider" }
+nanobot-prompt = { path = "crates/nanobot-prompt" }
+nanobot-tools = { path = "crates/nanobot-tools" }
+nanobot-cron = { path = "crates/nanobot-cron" }
+nanobot-agent = { path = "crates/nanobot-agent" }
+nanobot-channels = { path = "crates/nanobot-channels" }
 
 [profile.release]
 codegen-units = 1

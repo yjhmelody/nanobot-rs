@@ -37,7 +37,8 @@
       "Bash(find . -name \"*.jsonl\" -type f 2>/dev/null | head -5)",
       "Bash(find src:*)",
       "Bash(grep -rn \"async fn chat.*ChatRequest.*LLMResponse\" src/provider/*.rs | head -10)",
-      "Bash(git mv:*)"
+      "Bash(git mv:*)",
+      "Bash(grep -n '^use ' /Users/yjhmelody/code/github/nanobot/nanobot-rs/src/types/*.rs)"
     ]
   }
 }

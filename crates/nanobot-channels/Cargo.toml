@@ -1,0 +1,21 @@
+[package]
+name = "nanobot-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nanobot-bus = { workspace = true }
+nanobot-config = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+nanobot-bus = { workspace = true }

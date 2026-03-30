@@ -1,0 +1,21 @@
+[package]
+name = "nanobot-cron"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nanobot-types.workspace = true
+nanobot-bus.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "fs", "rt"] }
+cron.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+chrono-tz.workspace = true
+uuid = { workspace = true, features = ["v4"] }

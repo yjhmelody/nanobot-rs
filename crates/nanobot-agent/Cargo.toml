@@ -1,0 +1,34 @@
+[package]
+name = "nanobot-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[dependencies]
+nanobot-types.workspace = true
+nanobot-config.workspace = true
+nanobot-bus.workspace = true
+nanobot-session.workspace = true
+nanobot-provider.workspace = true
+nanobot-prompt.workspace = true
+nanobot-tools.workspace = true
+nanobot-cron.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+regex.workspace = true
+notify.workspace = true
+uuid.workspace = true
+which.workspace = true

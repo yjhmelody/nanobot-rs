@@ -1,0 +1,23 @@
+[package]
+name = "nanobot-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[dependencies]
+nanobot-types.workspace = true
+nanobot-provider.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+async-trait.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+regex.workspace = true
+chrono.workspace = true

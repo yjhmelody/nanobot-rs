@@ -1,0 +1,21 @@
+[package]
+name = "nanobot-prompt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+dashmap.workspace = true
+serde_json.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+tracing.workspace = true

@@ -1,0 +1,58 @@
+[package]
+name = "nanobot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nanobot"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+nanobot-types = { workspace = true }
+nanobot-config = { workspace = true }
+nanobot-bus = { workspace = true }
+nanobot-session = { workspace = true }
+nanobot-provider = { workspace = true }
+nanobot-prompt = { workspace = true }
+nanobot-tools = { workspace = true }
+nanobot-cron = { workspace = true }
+nanobot-agent = { workspace = true }
+nanobot-channels = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Networking
+reqwest = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Utils
+chrono = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+dirs = { workspace = true }
+parking_lot = { workspace = true }
+
+# Path resolution
+which = { workspace = true }
+
+# ACP
+agent-client-protocol = { workspace = true }
