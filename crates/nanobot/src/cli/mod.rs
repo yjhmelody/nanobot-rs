@@ -10,7 +10,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 use crate::acp::ACPConfig;
-use crate::channels::ChannelManager;
 use crate::error::{NanobotError, NanobotResult};
 use crate::heartbeat::{
     HeartbeatError, HeartbeatExecuteHandler, HeartbeatNotifyHandler, HeartbeatResult,
@@ -21,6 +20,7 @@ use crate::utils::helpers::{get_workspace_path, sync_workspace_templates};
 use nanobot_agent::AgentLoop;
 use nanobot_bus::MessageBus;
 use nanobot_bus::{InboundMessage, MessageMetadata, OutboundMessage};
+use nanobot_channels::ChannelManager;
 use nanobot_config::{Config, get_config_path, load_config, normalize_provider_name, save_config};
 use nanobot_cron::{CronJob, CronJobHandler, CronResult};
 use nanobot_types::SessionKey;
@@ -439,10 +439,10 @@ async fn gateway(args: GatewayArgs) -> NanobotResult<()> {
             .into_iter()
             .collect::<HashSet<_>>(),
     );
-    let picker = Arc::new(SessionTargetPicker {
+    let picker = SessionTargetPicker {
         agent: agent.clone(),
         enabled_channels: enabled,
-    });
+    };
 
     cron.register_on_job_handler(Arc::new(GatewayCronJobHandler {
         agent: agent.clone(),
@@ -554,6 +554,7 @@ fn resolve_copilot_config_dir(explicit: Option<PathBuf>) -> PathBuf {
         .join(".copilot")
 }
 
+#[derive(Clone)]
 struct SessionTargetPicker {
     agent: Arc<AgentLoop>,
     enabled_channels: Arc<HashSet<String>>,
@@ -629,7 +630,7 @@ impl CronJobHandler for GatewayCronJobHandler {
 #[derive(Clone)]
 struct GatewayHeartbeatExecuteHandler {
     agent: Arc<AgentLoop>,
-    picker: Arc<SessionTargetPicker>,
+    picker: SessionTargetPicker,
 }
 
 #[async_trait]
@@ -647,7 +648,7 @@ impl HeartbeatExecuteHandler for GatewayHeartbeatExecuteHandler {
 #[derive(Clone)]
 struct GatewayHeartbeatNotifyHandler {
     bus: MessageBus,
-    picker: Arc<SessionTargetPicker>,
+    picker: SessionTargetPicker,
 }
 
 #[async_trait]

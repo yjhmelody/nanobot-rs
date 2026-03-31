@@ -9,10 +9,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use crate::observability::TARGET_HEARTBEAT;
 use nanobot_provider::{ChatMessage, ChatRequest, LLMProvider};
 use nanobot_types::SessionKey;
 use nanobot_types::heartbeat::HeartbeatDecisionArgs;
+
+pub(crate) const LOG_TARGET: &str = "nanobot.heartbeat";
 
 const HEARTBEAT_SYSTEM_PROMPT: &str = "You are a heartbeat agent. Review HEARTBEAT.md and reply with JSON only: {\"action\":\"run|skip\",\"tasks\":\"...\"}. Use action=skip and empty tasks when no active tasks exist.";
 const HEARTBEAT_USER_PROMPT_PREFIX: &str =
@@ -71,7 +72,7 @@ impl HeartbeatService {
 
     pub async fn start(self: &Arc<Self>) {
         if !self.enabled {
-            info!(target: TARGET_HEARTBEAT, "heartbeat disabled");
+            info!(target: LOG_TARGET, "heartbeat disabled");
             return;
         }
         if self.running.swap(true, Ordering::SeqCst) {
@@ -86,14 +87,14 @@ impl HeartbeatService {
                     break;
                 }
                 if let Err(err) = this.tick().await {
-                    error!(target: TARGET_HEARTBEAT, "heartbeat tick failed: {}", err);
+                    error!(target: LOG_TARGET, "heartbeat tick failed: {}", err);
                 }
             }
         });
 
         *self.task.lock().await = Some(handle);
         info!(
-            target: TARGET_HEARTBEAT,
+            target: LOG_TARGET,
             "heartbeat started (every {}s)",
             self.interval_s
         );
@@ -112,7 +113,7 @@ impl HeartbeatService {
         let (action, tasks) = match self.decide(&content).await {
             Ok(v) => v,
             Err(err) => {
-                error!(target: TARGET_HEARTBEAT, "heartbeat decide failed: {}", err);
+                error!(target: LOG_TARGET, "heartbeat decide failed: {}", err);
                 return None;
             }
         };
@@ -124,7 +125,7 @@ impl HeartbeatService {
         let response = match handler.on_execute(tasks).await {
             Ok(v) => v,
             Err(err) => {
-                error!(target: TARGET_HEARTBEAT, "heartbeat execute failed: {}", err);
+                error!(target: LOG_TARGET, "heartbeat execute failed: {}", err);
                 return None;
             }
         };

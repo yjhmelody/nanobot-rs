@@ -8,11 +8,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use nanobot_bus::{InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage};
-use nanobot_config::schema::GenericChannelConfig;
+use crate::LOG_TARGET;
 use crate::base::{ChannelAdapter, SendOutcome, is_sender_allowed};
 use crate::error::{ChannelError, ChannelResult};
-use crate::TARGET_CHANNELS;
+use nanobot_bus::{InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage};
+use nanobot_config::schema::GenericChannelConfig;
 
 const TELEGRAM_API_DEFAULT: &str = "https://api.telegram.org";
 const TELEGRAM_TEXT_LIMIT: usize = 4000;
@@ -150,7 +150,7 @@ impl ChannelAdapter for TelegramChannel {
                     Ok(v) => v,
                     Err(err) => {
                         warn!(
-                            target: TARGET_CHANNELS,
+                            target: LOG_TARGET,
                             "telegram getUpdates request failed: {}",
                             err
                         );
@@ -163,7 +163,7 @@ impl ChannelAdapter for TelegramChannel {
                     Ok(v) => v,
                     Err(err) => {
                         warn!(
-                            target: TARGET_CHANNELS,
+                            target: LOG_TARGET,
                             "telegram getUpdates parse failed: {}",
                             err
                         );
@@ -173,12 +173,20 @@ impl ChannelAdapter for TelegramChannel {
 
                 for update in payload.result {
                     offset.store(update.update_id, Ordering::SeqCst);
-                    let Some(message) = update.message else { continue; };
-                    let Some(text) = message.text else { continue; };
-                    let Some(from) = message.from else { continue; };
+                    let Some(message) = update.message else {
+                        continue;
+                    };
+                    let Some(text) = message.text else {
+                        continue;
+                    };
+                    let Some(from) = message.from else {
+                        continue;
+                    };
 
                     let sender = from.id.to_string();
-                    if !is_sender_allowed(&allow_from, &sender) { continue; }
+                    if !is_sender_allowed(&allow_from, &sender) {
+                        continue;
+                    }
 
                     if receive_ack {
                         let _ = client
@@ -206,7 +214,7 @@ impl ChannelAdapter for TelegramChannel {
                     };
                     if let Err(err) = bus.publish_inbound(inbound) {
                         error!(
-                            target: TARGET_CHANNELS,
+                            target: LOG_TARGET,
                             "telegram publish inbound failed: {}",
                             err
                         );
@@ -216,7 +224,7 @@ impl ChannelAdapter for TelegramChannel {
         });
 
         *self.poll_task.lock().await = Some(handle);
-        info!(target: TARGET_CHANNELS, "telegram channel started");
+        info!(target: LOG_TARGET, "telegram channel started");
         Ok(())
     }
 
@@ -238,7 +246,10 @@ impl ChannelAdapter for TelegramChannel {
             let response = self
                 .client
                 .post(self.endpoint("sendMessage"))
-                .json(&TelegramSendMessage { chat_id, text: chunk })
+                .json(&TelegramSendMessage {
+                    chat_id,
+                    text: chunk,
+                })
                 .send()
                 .await
                 .map_err(|err| {
@@ -250,7 +261,9 @@ impl ChannelAdapter for TelegramChannel {
                 }
             }
         }
-        Ok(SendOutcome { message_id: last_message_id.map(|id| id.to_string()) })
+        Ok(SendOutcome {
+            message_id: last_message_id.map(|id| id.to_string()),
+        })
     }
 
     async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
@@ -263,7 +276,11 @@ impl ChannelAdapter for TelegramChannel {
         let text = truncate_text(&msg.content, TELEGRAM_TEXT_LIMIT);
         self.client
             .post(self.endpoint("editMessageText"))
-            .json(&TelegramEditMessageText { chat_id, message_id, text })
+            .json(&TelegramEditMessageText {
+                chat_id,
+                message_id,
+                text,
+            })
             .send()
             .await
             .map_err(|err| {
@@ -272,7 +289,9 @@ impl ChannelAdapter for TelegramChannel {
         Ok(())
     }
 
-    fn supports_stream_updates(&self) -> bool { true }
+    fn supports_stream_updates(&self) -> bool {
+        true
+    }
 
     fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
@@ -292,7 +311,9 @@ fn split_text(text: &str, max_len: usize) -> Vec<String> {
         }
         let cut = &content[..max_len];
         let mut pos = cut.rfind('\n').unwrap_or(0);
-        if pos == 0 { pos = cut.rfind(' ').unwrap_or(max_len); }
+        if pos == 0 {
+            pos = cut.rfind(' ').unwrap_or(max_len);
+        }
         chunks.push(content[..pos].to_string());
         content = content[pos..].trim_start().to_string();
     }
@@ -300,7 +321,9 @@ fn split_text(text: &str, max_len: usize) -> Vec<String> {
 }
 
 fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len { return text.to_string(); }
+    if text.len() <= max_len {
+        return text.to_string();
+    }
     let mut out = text.to_string();
     out.truncate(max_len);
     out
@@ -318,7 +341,9 @@ fn extra_string(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<String> {
 fn extra_bool(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<bool> {
     for key in keys {
         if let Some(v) = cfg.extra.get(*key) {
-            if let Some(value) = v.as_bool() { return Some(value); }
+            if let Some(value) = v.as_bool() {
+                return Some(value);
+            }
             if let Some(value) = v.as_str() {
                 let normalized = value.trim().to_ascii_lowercase();
                 match normalized.as_str() {
@@ -331,4 +356,3 @@ fn extra_bool(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<bool> {
     }
     None
 }
-

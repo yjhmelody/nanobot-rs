@@ -10,9 +10,9 @@ use nanobot_provider::ProviderError;
 use nanobot_session::SessionError;
 use nanobot_tools::ToolError;
 
-use crate::channels::ChannelError;
 use crate::heartbeat::HeartbeatError;
 use crate::runtime::error::RuntimeError;
+use nanobot_channels::ChannelError;
 
 /// Result type alias using NanobotError.
 pub type NanobotResult<T> = std::result::Result<T, NanobotError>;

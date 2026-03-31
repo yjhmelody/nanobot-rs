@@ -4,7 +4,6 @@ use crate::cli::Cli;
 use crate::error::NanobotResult;
 
 mod acp;
-mod channels;
 mod cli;
 mod error;
 mod heartbeat;

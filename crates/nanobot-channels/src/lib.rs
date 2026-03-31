@@ -12,4 +12,4 @@ pub use error::{ChannelError, ChannelResult};
 pub use manager::ChannelManager;
 
 /// Tracing target for channel-related log events.
-pub const TARGET_CHANNELS: &str = "nanobot.channels";
+pub(crate) const LOG_TARGET: &str = "nanobot.channels";

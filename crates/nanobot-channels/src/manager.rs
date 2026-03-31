@@ -5,14 +5,14 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use nanobot_bus::{MessageBus, OutboundMessage};
-use nanobot_config::schema::{ChannelsConfig, GenericChannelConfig, StreamMode};
-use crate::error::{ChannelError, ChannelResult};
+use crate::LOG_TARGET;
 use crate::base::ChannelAdapter;
 use crate::cli::CliChannel;
+use crate::error::{ChannelError, ChannelResult};
 use crate::placeholder::PlaceholderChannel;
 use crate::telegram::TelegramChannel;
-use crate::TARGET_CHANNELS;
+use nanobot_bus::{MessageBus, OutboundMessage};
+use nanobot_config::schema::{ChannelsConfig, GenericChannelConfig, StreamMode};
 
 pub struct ChannelManager {
     config: ChannelsConfig,
@@ -51,7 +51,7 @@ impl ChannelManager {
         for (name, ch) in &self.channels {
             if let Err(err) = ch.start().await {
                 error!(
-                    target: TARGET_CHANNELS,
+                    target: LOG_TARGET,
                     "failed to start channel '{}': {}",
                     name,
                     err
@@ -66,7 +66,7 @@ impl ChannelManager {
         let stream_mode = self.config.stream_mode;
 
         let handle = tokio::spawn(async move {
-            info!(target: TARGET_CHANNELS, "outbound dispatcher started");
+            info!(target: LOG_TARGET, "outbound dispatcher started");
             let mut outbound_rx = bus.subscribe_outbound();
             let mut stream_registry: HashMap<String, String> = HashMap::new();
             loop {
@@ -82,14 +82,14 @@ impl ChannelManager {
                             .await
                     {
                         error!(
-                            target: TARGET_CHANNELS,
+                            target: LOG_TARGET,
                             "failed to send outbound via '{}': {}",
                             channel.name(),
                             err
                         );
                     }
                 } else {
-                    warn!(target: TARGET_CHANNELS, "unknown channel '{}'", msg.channel);
+                    warn!(target: LOG_TARGET, "unknown channel '{}'", msg.channel);
                 }
             }
         });
@@ -104,7 +104,7 @@ impl ChannelManager {
         for (name, ch) in &self.channels {
             if let Err(err) = ch.stop().await {
                 error!(
-                    target: TARGET_CHANNELS,
+                    target: LOG_TARGET,
                     "failed to stop channel '{}': {}",
                     name,
                     err
