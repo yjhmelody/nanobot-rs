@@ -1,37 +1,48 @@
-# LLM Provider Fallback Strategy
+# Provider Fallback 实现说明
 
-The fallback provider feature allows you to configure multiple LLM providers that will be tried in sequence when network issues or other retryable errors occur. This improves reliability by automatically switching to backup providers when the primary provider fails.
+本文档描述 `nanobot-rs` 中 **当前已经实现** 的 provider fallback 行为，不再保留面向未来的设计讨论或过长的使用示例。
 
-## How It Works
+## 作用
 
-When a request fails with a retryable error (network issues, timeouts, rate limits), the system automatically tries the next provider in the configured list. Non-retryable errors (authentication failures, invalid configuration) immediately abort the fallback chain.
+fallback 的目标是提升 provider 调用可靠性：
 
-### Retryable Errors
+- 当主 provider 返回可重试错误时，自动尝试下一个 provider
+- 当错误不可重试时，立即终止，不继续 fallback
+- 对上层保持统一的 `LLMProvider` 接口
 
-The following errors trigger fallback to the next provider:
-- Network connection failures
-- Request timeouts
-- Rate limit errors (429)
-- Server errors (5xx)
+当前实现同时支持：
 
-### Non-Retryable Errors
+- 非流式 `chat()`
+- 流式 `chat_stream()`
 
-The following errors stop the fallback chain immediately:
-- Authentication failures (401, 403)
-- Invalid configuration
-- Model not available (404)
-- Invalid API responses
+## 当前接入方式
 
-## Configuration
+fallback 由 provider 工厂自动装配。
 
-Add the `fallbackProviders` field to your configuration file to enable fallback:
+当配置中存在：
+
+- `agents.defaults.provider`
+- `agents.defaults.model`
+- `agents.defaults.fallbackProviders`
+
+运行时会：
+
+1. 先创建主 provider
+2. 再按顺序创建 fallback provider 列表
+3. 最后包装成一个 `FallbackProvider`
+
+如果没有配置 `fallbackProviders`，则直接使用单个 provider。
+
+## 配置方式
+
+示例：
 
 ```json
 {
   "agents": {
     "defaults": {
       "model": "anthropic/claude-sonnet-4-5",
-      "provider": "anthropic",
+      "provider": "auto",
       "fallbackProviders": ["openai", "custom"]
     }
   },
@@ -43,172 +54,159 @@ Add the `fallbackProviders` field to your configuration file to enable fallback:
       "apiKey": "sk-..."
     },
     "custom": {
-      "apiKey": "...",
-      "apiBase": "https://api.example.com/v1"
+      "apiBase": "https://your-endpoint.example.com/v1",
+      "apiKey": "token"
     }
   }
 }
 ```
 
-In this example:
-1. Primary provider: `anthropic` (from `provider` field)
-2. First fallback: `openai`
-3. Second fallback: `custom`
+含义是：
 
-## Behavior
+- 主 provider：根据 `model` 和 `provider` 推断
+- fallback 顺序：`openai` -> `custom`
 
-### Successful Primary Provider
+## 当前行为
 
-If the primary provider succeeds, no fallback occurs:
+### 非流式调用
 
-```
-Request → Anthropic → Success ✓
-```
+`FallbackProvider::chat()` 会按顺序尝试 provider：
 
-### Primary Fails with Retryable Error
+- 成功则立即返回结果
+- 遇到可重试错误则尝试下一个
+- 遇到不可重试错误则立即返回该错误
+- 如果全部失败，则返回最后一个错误
 
-If the primary provider fails with a retryable error (e.g., timeout), the system tries the first fallback:
+### 流式调用
 
-```
-Request → Anthropic (timeout) → OpenAI → Success ✓
-```
+`FallbackProvider::chat_stream()` 也采用同样的顺序尝试：
 
-### Multiple Fallbacks
+- 成功创建流后立即返回
+- 如果创建流阶段失败，且错误可重试，则尝试下一个 provider
+- 如果错误不可重试，则立即停止 fallback
+- 如果全部失败，则返回最后一个流式错误
 
-If multiple providers fail with retryable errors, all configured providers are tried:
+需要注意：
 
-```
-Request → Anthropic (timeout) → OpenAI (rate limit) → Custom → Success ✓
-```
+- fallback 发生在“创建流”阶段
+- 一旦某个 provider 的流已经成功建立，后续流中断不会再自动切换到另一个 provider
 
-### Non-Retryable Error
+## 可重试与不可重试错误
 
-If any provider fails with a non-retryable error (e.g., authentication), the fallback chain stops immediately:
+### 对 `chat()`
 
-```
-Request → Anthropic (auth error) → Error ✗
-(OpenAI and Custom are not tried)
-```
+当前实现依赖 provider error 自身的 `is_retryable()` 判定。
 
-### All Providers Fail
+因此：
 
-If all providers fail with retryable errors, the last error is returned:
+- 网络问题
+- 超时
+- 限流
+- 某些服务端临时错误
 
-```
-Request → Anthropic (timeout) → OpenAI (rate limit) → Custom (timeout) → Error ✗
-(Returns the Custom provider's timeout error)
-```
+通常会触发 fallback。
 
-## Logging
+而：
 
-The fallback provider logs detailed information about provider attempts:
+- 认证失败
+- 明显配置错误
+- 其他不可恢复错误
 
-```
-DEBUG Attempting provider (provider_index=0, total_providers=3)
-WARN  Provider failed with retryable error, trying next provider (provider_index=0, error="Request timeout after 30s")
-DEBUG Attempting provider (provider_index=1, total_providers=3)
-DEBUG Fallback provider succeeded (provider_index=1)
-```
+通常不会继续 fallback。
 
-## Use Cases
+### 对 `chat_stream()`
 
-### High Availability
+当前流式 fallback 使用的是较简单的规则：
 
-Configure multiple providers to ensure your application continues working even when one provider has an outage:
+以下错误会被视为可重试：
 
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-sonnet-4-5",
-      "fallbackProviders": ["openai"]
-    }
-  }
-}
-```
+- `StreamError::Network`
+- `StreamError::Provider` 且错误消息中包含：
+  - `rate limit`
+  - `timeout`
 
-### Rate Limit Mitigation
+其他流式错误默认不会继续 fallback。
 
-Distribute load across multiple providers to avoid hitting rate limits:
+这意味着当前流式判定是“实用型实现”，不是完整的统一错误分类系统。
 
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "openai/gpt-4",
-      "fallbackProviders": ["anthropic", "custom"]
-    }
-  }
-}
-```
+## 与当前 provider 体系的关系
 
-### Cost Optimization
+当前 provider 工厂会创建：
 
-Use a cheaper provider as fallback when the primary provider is unavailable:
+- `AnthropicProvider`
+- `OpenAICompatProvider`
+- 或由它们组成的 `FallbackProvider`
 
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-opus-4",
-      "fallbackProviders": ["openai/gpt-4o-mini"]
-    }
-  }
-}
-```
+其中：
 
-## Best Practices
+- `anthropic` 使用原生 Messages 协议
+- `openai` / `custom` 走 `OpenAICompatProvider`
+- `custom` 要求兼容 Responses API
 
-1. **Configure API Keys for All Providers**: Ensure all providers in the fallback chain have valid API keys configured.
+fallback 只负责“失败后换下一个 provider”，不会改变各 provider 的协议适配逻辑。
 
-2. **Test Your Configuration**: Verify that all providers work correctly before deploying to production.
+## 边界与限制
 
-3. **Monitor Fallback Usage**: Check logs to see how often fallbacks are triggered. Frequent fallbacks may indicate issues with your primary provider.
+当前实现有几个重要边界：
 
-4. **Consider Model Compatibility**: Different providers may have different capabilities. Ensure your fallback providers support the features you need (e.g., tool calling, streaming).
+### 1. 不支持中途流切换
 
-5. **Set Appropriate Timeouts**: Configure reasonable timeout values to avoid waiting too long before trying the next provider.
+如果流已经开始输出，之后即使连接中断，也不会自动迁移到下一个 provider 继续同一条流。
 
-## Limitations
+### 2. 不做多次重试
 
-- **Model Differences**: Different providers may produce different responses for the same prompt. The fallback provider uses the same model name, but behavior may vary.
+每个 provider 只尝试一次。  
+当前实现是“按 provider 顺序切换”，不是“对单 provider 做重试退避”。
 
-- **No Automatic Retry**: The system tries each provider once. If all providers fail, the request fails. Consider implementing retry logic at a higher level if needed.
+### 3. 不保证输出一致
 
-- **Streaming**: Fallback works for both streaming and non-streaming requests, but once a stream starts, it cannot fall back to another provider.
+不同 provider 即使用相同输入，也可能返回不同结果。  
+fallback 只保证可用性，不保证响应完全一致。
 
-## Example Configuration
+### 4. 依赖配置正确
 
-Complete example with fallback configuration:
+fallback 链中的每个 provider 都必须能独立创建成功。  
+如果某个 provider 缺少必要配置，运行时可能在构建阶段就失败，而不是等到真正 fallback 时才发现。
 
-```json
-{
-  "agents": {
-    "defaults": {
-      "workspace": "~/.nanobot/workspace",
-      "model": "anthropic/claude-sonnet-4-5",
-      "provider": "anthropic",
-      "fallbackProviders": ["openai", "custom"],
-      "maxTokens": 8192,
-      "temperature": 0.1,
-      "maxToolIterations": 40
-    }
-  },
-  "providers": {
-    "anthropic": {
-      "apiKey": "${ANTHROPIC_API_KEY}"
-    },
-    "openai": {
-      "apiKey": "${OPENAI_API_KEY}"
-    },
-    "custom": {
-      "apiKey": "${CUSTOM_API_KEY}",
-      "apiBase": "https://api.example.com/v1"
-    }
-  }
-}
-```
+## 使用建议
 
-## Implementation Details
+- 给 fallback 链中的每个 provider 都配置有效凭证
+- 尽量选择都支持你当前能力边界的 provider
+  - 例如工具调用
+  - 流式输出
+  - Responses / Messages 协议兼容性
+- 把 fallback 当作“高可用补偿”，不要当作“结果一致性保障”
+- 如果你需要更复杂的重试策略，应在更高层增加重试、超时和观测能力
 
-The fallback provider is implemented in `src/provider/fallback.rs` and automatically wraps configured providers when `fallbackProviders` is set in the configuration. The `make_provider()` function in `src/provider/mod.rs` handles the creation of the fallback provider chain.
+## 何时更新本文档
+
+仅在以下变化时更新：
+
+- fallback 判定规则发生变化
+- fallback 支持范围变化（例如新增中途续流）
+- provider 工厂装配方式变化
+- 配置字段语义变化
+
+如果只是内部实现重构、日志调整或测试补充，不必扩写本文档。
+
+## 相关文档
+
+- `docs/QUICK_START.md`
+  - provider 配置与基础使用
+- `docs/ARCHITECTURE.md`
+  - runtime 与 provider 总体结构
+- `docs/DEVELOPMENT.md`
+  - 开发与调试流程
+
+## 结论
+
+当前 fallback 机制的定位很明确：
+
+- 用统一接口封装多个 provider
+- 在可重试失败时自动切换
+- 同时覆盖非流式与流式入口
+- 以较低复杂度换取更高可用性
+
+因此，这份文档的重点不是介绍“所有可能策略”，而是说明：
+
+**当前代码里 fallback 实际会怎样工作，以及它不会做什么。**
