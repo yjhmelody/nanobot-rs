@@ -107,19 +107,27 @@ impl Session {
         } else {
             &[]
         };
+        if unconsolidated.is_empty() || max_messages == 0 {
+            return Vec::new();
+        }
 
-        let start = unconsolidated.len().saturating_sub(max_messages);
-        let mut sliced: Vec<&SessionEntry> = unconsolidated[start..].iter().collect();
-
-        if let Some(idx) = sliced
+        let window_start = unconsolidated.len().saturating_sub(max_messages);
+        let start = if let Some(rel_idx) = unconsolidated[window_start..]
             .iter()
             .position(|m| matches!(m.role, MessageRole::User))
         {
-            sliced = sliced[idx..].to_vec();
-        }
+            window_start + rel_idx
+        } else if let Some(prev_user_idx) = unconsolidated[..window_start]
+            .iter()
+            .rposition(|m| matches!(m.role, MessageRole::User))
+        {
+            prev_user_idx
+        } else {
+            return Vec::new();
+        };
 
-        sliced
-            .into_iter()
+        unconsolidated[start..]
+            .iter()
             .map(|m| ChatMessage {
                 role: m.role,
                 content: m.content.clone(),
@@ -166,4 +174,50 @@ pub(crate) struct SessionMetadataLine {
     pub(crate) metadata: SessionMetadata,
     #[serde(default)]
     pub(crate) last_consolidated: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(role: MessageRole, text: &str) -> SessionEntry {
+        SessionEntry {
+            role,
+            content: Some(MessageContent::Text(text.to_string())),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+            thinking_blocks: None,
+        }
+    }
+
+    #[test]
+    fn get_history_backtracks_to_previous_user_when_window_has_no_user() {
+        let mut session = Session::new("cli:test");
+        session.messages = vec![
+            entry(MessageRole::User, "u1"),
+            entry(MessageRole::Assistant, "a1"),
+            entry(MessageRole::Tool, "t1"),
+            entry(MessageRole::Assistant, "a2"),
+        ];
+
+        let history = session.get_history(2);
+        assert!(!history.is_empty());
+        assert!(matches!(history[0].role, MessageRole::User));
+        assert_eq!(history.len(), 4);
+    }
+
+    #[test]
+    fn get_history_returns_empty_when_no_user_exists() {
+        let mut session = Session::new("cli:test");
+        session.messages = vec![
+            entry(MessageRole::Assistant, "a1"),
+            entry(MessageRole::Tool, "t1"),
+        ];
+
+        let history = session.get_history(10);
+        assert!(history.is_empty());
+    }
 }
