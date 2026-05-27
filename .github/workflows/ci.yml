@@ -76,6 +76,11 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets --all-features
+        if: matrix.os != 'windows-latest'
+
+      - name: Test (skip e2e)
+        run: cargo test --all-targets --all-features -- --skip e2e_
+        if: matrix.os == 'windows-latest'
 
   e2e:
     name: Offline E2E (Linux)
