@@ -141,12 +141,9 @@ pub async fn execute_search(
     let query = typed.query;
 
     if api_key.trim().is_empty() {
-        return Err(ToolError::execution(
-            "web_search",
-            anyhow::anyhow!(
-                "Brave Search API key not configured. Set tools.web.search.apiKey in ~/.nanobot/config.json"
-            ),
-        ));
+        return Ok(
+            "web_search unavailable: Brave Search API key not configured. Set tools.web.search.apiKey in ~/.nanobot/config.json".to_string(),
+        );
     }
 
     let count = typed.count.unwrap_or(max_results as i64).clamp(1, 10) as usize;
@@ -266,10 +263,7 @@ pub async fn execute_fetch(
         ("raw", body)
     };
 
-    let truncated = text.len() > max_chars;
-    if truncated {
-        text.truncate(max_chars);
-    }
+    let truncated = truncate_utf8_to_max_bytes(&mut text, max_chars);
 
     serde_json::to_string(&WebFetchResponse {
         url: parsed.to_string(),
@@ -286,6 +280,20 @@ pub async fn execute_fetch(
             anyhow::anyhow!("serializing web_fetch response: {}", e),
         )
     })
+}
+
+fn truncate_utf8_to_max_bytes(text: &mut String, max_bytes: usize) -> bool {
+    if text.len() <= max_bytes {
+        return false;
+    }
+
+    let mut new_len = max_bytes.min(text.len());
+    while new_len > 0 && !text.is_char_boundary(new_len) {
+        new_len -= 1;
+    }
+
+    text.truncate(new_len);
+    true
 }
 
 fn build_client(proxy: Option<&str>) -> ToolResult<reqwest::Client> {
@@ -311,13 +319,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn execute_search_requires_api_key() {
-        let err = execute_search(r#"{"query":"rust"}"#, "", 5, None)
+    async fn execute_search_without_api_key_returns_guidance() {
+        let output = execute_search(r#"{"query":"rust"}"#, "", 5, None)
             .await
-            .expect_err("missing api key should fail");
+            .expect("missing api key should return guidance");
         assert!(
-            err.to_string()
-                .contains("Brave Search API key not configured")
+            output.contains("Brave Search API key not configured")
         );
     }
 
@@ -344,5 +351,21 @@ mod tests {
     fn build_client_rejects_invalid_proxy() {
         let err = build_client(Some("://bad proxy")).expect_err("invalid proxy should fail");
         assert!(err.to_string().contains("invalid proxy"));
+    }
+
+    #[test]
+    fn truncate_utf8_to_max_bytes_respects_char_boundaries() {
+        let mut value = "中文ab".to_string();
+        let truncated = truncate_utf8_to_max_bytes(&mut value, 5);
+        assert!(truncated);
+        assert_eq!(value, "中");
+    }
+
+    #[test]
+    fn truncate_utf8_to_max_bytes_noop_when_within_limit() {
+        let mut value = "hello".to_string();
+        let truncated = truncate_utf8_to_max_bytes(&mut value, 5);
+        assert!(!truncated);
+        assert_eq!(value, "hello");
     }
 }
