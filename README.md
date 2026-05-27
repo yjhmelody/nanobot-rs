@@ -125,9 +125,3 @@ just agent -m "hi"   # 启动 agent
 - Issue：提交 bug / 功能请求
 - PR：欢迎改进代码与文档
 - 详细开发说明见 `docs/DEVELOPMENT.md`
-
-## 开源发布前建议
-
-- 增加 `LICENSE` 文件（开源平台必备）
-- 增加 `CONTRIBUTING.md`（贡献流程）
-- 增加 `SECURITY.md`（漏洞披露方式）

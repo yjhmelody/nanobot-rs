@@ -125,9 +125,3 @@ just agent -m "hi"   # start agent
 - Issues: bug reports and feature requests
 - PRs: code and documentation improvements are welcome
 - See `docs/DEVELOPMENT.md` for contributor workflow
-
-## Recommended Before Open Sourcing
-
-- Add `LICENSE` (required for open source distribution)
-- Add `CONTRIBUTING.md` (contribution workflow)
-- Add `SECURITY.md` (vulnerability disclosure policy)
