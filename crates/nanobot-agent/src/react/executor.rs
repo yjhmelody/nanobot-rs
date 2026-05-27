@@ -212,7 +212,10 @@ impl ReActExecutor {
                     }
 
                     let tool_context = context.to_tool_context();
-                    let observation = self.tool_runner.execute_one(current_call, &tool_context).await;
+                    let observation = self
+                        .tool_runner
+                        .execute_one(current_call, &tool_context)
+                        .await;
                     let obs_content = observation.content;
                     let obs_content_for_hint = obs_content.clone();
                     messages.push(ChatMessage::tool_result(

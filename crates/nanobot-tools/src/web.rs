@@ -323,9 +323,7 @@ mod tests {
         let output = execute_search(r#"{"query":"rust"}"#, "", 5, None)
             .await
             .expect("missing api key should return guidance");
-        assert!(
-            output.contains("Brave Search API key not configured")
-        );
+        assert!(output.contains("Brave Search API key not configured"));
     }
 
     #[tokio::test]
