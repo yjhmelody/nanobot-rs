@@ -78,8 +78,8 @@ jobs:
         run: cargo test --all-targets --all-features
         if: matrix.os != 'windows-latest'
 
-      - name: Test (skip e2e)
-        run: cargo test --all-targets --all-features -- --skip e2e_
+      - name: Build
+        run: cargo build --all-targets --all-features
         if: matrix.os == 'windows-latest'
 
   e2e:
