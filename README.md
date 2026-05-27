@@ -15,6 +15,13 @@
 
 > ⚠️ 项目定位：`nanobot` 当前主要用于学习与研究，不建议直接用于生产场景。
 
+## 致谢与参考
+
+本项目的早期实现参考了以下开源项目：
+
+- OpenClaw：<https://github.com/openclaw/openclaw>
+- Python 版 Nanobot：<https://github.com/HKUDS/nanobot>
+
 ## 适用场景
 
 - 在本地快速搭建可扩展的 AI Agent

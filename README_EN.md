@@ -15,6 +15,13 @@
 
 > ⚠️ Project positioning: `nanobot` is currently intended for learning and research, and is not recommended for production use.
 
+## Acknowledgements
+
+The early implementation of this project referenced:
+
+- OpenClaw: <https://github.com/openclaw/openclaw>
+- Python nanobot: <https://github.com/HKUDS/nanobot>
+
 ## Use Cases
 
 - Build an extensible local AI agent quickly
