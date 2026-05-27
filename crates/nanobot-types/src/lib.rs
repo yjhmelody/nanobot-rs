@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Newtype wrapper for session keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionKey(String);
 
@@ -37,12 +37,6 @@ impl SessionKey {
     /// Returns `true` if the key is an empty string.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-}
-
-impl Default for SessionKey {
-    fn default() -> Self {
-        Self(String::new())
     }
 }
 

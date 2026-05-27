@@ -138,7 +138,7 @@ impl Default for CronPayload {
 }
 
 /// Runtime state for a cron job's execution history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CronJobState {
     /// Next scheduled run time in unix ms.
@@ -149,17 +149,6 @@ pub struct CronJobState {
     pub last_status: Option<String>,
     /// Last execution error message, if any.
     pub last_error: Option<String>,
-}
-
-impl Default for CronJobState {
-    fn default() -> Self {
-        Self {
-            next_run_at_ms: None,
-            last_run_at_ms: None,
-            last_status: None,
-            last_error: None,
-        }
-    }
 }
 
 /// Stored cron job configuration and state.
