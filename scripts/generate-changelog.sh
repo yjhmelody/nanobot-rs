@@ -49,6 +49,24 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+resolve_github_repo_url() {
+  local remote_url
+  remote_url="$(git config --get remote.origin.url 2>/dev/null || true)"
+  if [[ -z "$remote_url" ]]; then
+    return 0
+  fi
+
+  if [[ "$remote_url" =~ ^git@github\.com:(.+)\.git$ ]]; then
+    echo "https://github.com/${BASH_REMATCH[1]}"
+  elif [[ "$remote_url" =~ ^https://github\.com/(.+)\.git$ ]]; then
+    echo "https://github.com/${BASH_REMATCH[1]}"
+  elif [[ "$remote_url" =~ ^https://github\.com/(.+)$ ]]; then
+    echo "https://github.com/${BASH_REMATCH[1]}"
+  fi
+}
+
+repo_url="$(resolve_github_repo_url)"
+
 if [[ -z "$since_ref" ]]; then
   while IFS= read -r tag; do
     if [[ "$tag" != "$version" ]]; then
@@ -81,9 +99,14 @@ append_commit() {
   esac
 }
 
-while IFS='|' read -r subject sha; do
+while IFS='|' read -r subject short_sha full_sha; do
   [[ -z "${subject// }" ]] && continue
-  line="- ${subject} (\`${sha}\`)"
+  if [[ -n "$repo_url" ]]; then
+    sha_ref="[\`${short_sha}\`](${repo_url}/commit/${full_sha})"
+  else
+    sha_ref="\`${short_sha}\`"
+  fi
+  line="- ${subject} (${sha_ref})"
   lower="$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')"
 
   if [[ "$lower" =~ ^feat(\(.+\))?: ]] || [[ "$lower" =~ (add|support|introduce) ]]; then
@@ -97,7 +120,7 @@ while IFS='|' read -r subject sha; do
   else
     append_commit changed "$line"
   fi
-done < <(git log --no-merges --pretty=format:'%s|%h' "$range")
+done < <(git log --no-merges --pretty=format:'%s|%h|%H' "$range")
 
 entry_file="$(mktemp)"
 {
@@ -172,4 +195,3 @@ awk -v entry_file="$entry_file" '
 mv "$tmp_out" "$changelog_path"
 rm -f "$entry_file"
 echo "Updated CHANGELOG.md for ${version} (range: ${range})"
-
