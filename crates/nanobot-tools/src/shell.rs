@@ -171,12 +171,25 @@ pub async fn execute(
 
     const MAX_LEN: usize = 10_000;
     if result.len() > MAX_LEN {
-        let remaining = result.len() - MAX_LEN;
-        result.truncate(MAX_LEN);
-        result.push_str(&format!("\n... (truncated, {} more chars)", remaining));
+        let remaining = truncate_utf8(&mut result, MAX_LEN);
+        result.push_str(&format!("\n... (truncated, {} more bytes)", remaining));
     }
 
     Ok(result)
+}
+
+fn truncate_utf8(value: &mut String, max_len: usize) -> usize {
+    if value.len() <= max_len {
+        return 0;
+    }
+
+    let mut boundary = max_len.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let remaining = value.len() - boundary;
+    value.truncate(boundary);
+    remaining
 }
 
 fn platform_shell(command: &str) -> (&'static str, Vec<&str>) {
@@ -420,5 +433,13 @@ mod tests {
             Some(workspace.as_path()),
         );
         assert!(resolved.is_err());
+    }
+
+    #[test]
+    fn truncate_utf8_respects_char_boundaries() {
+        let mut value = "hello你好世界".to_string();
+        let remaining = truncate_utf8(&mut value, 8);
+        assert_eq!(value, "hello你");
+        assert_eq!(remaining, "好世界".len());
     }
 }
