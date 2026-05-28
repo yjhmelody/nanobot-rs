@@ -1440,7 +1440,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nanobot"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-agent"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-bus"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-channels"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-config"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-cron"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-prompt"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-provider"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-session"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-tools"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "nanobot-types"
-version = "0.0.5"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "chrono",

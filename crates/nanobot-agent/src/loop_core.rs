@@ -33,6 +33,7 @@ const TARGET: &str = "nanobot::agent";
 const INTERNAL_ERROR_PREFIX: &str = "⚠️ ";
 const SYSTEM_INFO_PREFIX: &str = "ℹ️ ";
 const SYSTEM_SUCCESS_PREFIX: &str = "✅ ";
+const SAVE_WITH_CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct AgentLoop {
     pub(crate) bus: MessageBus,
@@ -578,15 +579,26 @@ impl AgentLoop {
         }
 
         self.save_turn(&mut session, outcome.messages, start_index);
-        self.sessions
-            .save_with_consolidation(
+        tokio::time::timeout(
+            SAVE_WITH_CONSOLIDATION_TIMEOUT,
+            self.sessions.save_with_consolidation(
                 &mut session,
                 &self.provider,
                 &self.model,
                 Some(&runtime_settings.consolidation_config),
                 runtime_settings.consolidation_enabled,
-            )
-            .await?;
+            ),
+        )
+        .await
+        .map_err(|_| {
+            AgentError::loop_error(format!(
+                "session save/consolidation timeout (session_key={}, channel={}, chat_id={}, timeout={}s)",
+                session_key,
+                msg.channel,
+                msg.chat_id,
+                SAVE_WITH_CONSOLIDATION_TIMEOUT.as_secs()
+            ))
+        })??;
 
         // 如果本轮已经显式调用 message 工具发消息，则跳过默认最终回复，避免重复发送。
         if self.tools.message_sent_in_turn().await {

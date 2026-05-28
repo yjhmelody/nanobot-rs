@@ -20,6 +20,8 @@ const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const TOOL_HINT_MIN_CHARS: usize = 24;
 const TOOL_HINT_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const TOOL_HINT_MAX_CHARS: usize = 480;
+const STREAM_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Queries the model and parses responses
 pub struct Planner {
@@ -60,11 +62,20 @@ impl Planner {
             reasoning_effort: config.reasoning_effort.clone(),
         };
 
-        let mut stream = self
-            .provider
-            .chat_stream(request.clone())
-            .await
-            .map_err(|err| map_stream_error(err, &config.model, config.iteration))?;
+        let mut stream = tokio::time::timeout(
+            STREAM_SETUP_TIMEOUT,
+            self.provider.chat_stream(request.clone()),
+        )
+        .await
+        .map_err(|_| {
+            AgentError::loop_error(format!(
+                "provider stream setup timeout (model='{}', iteration={}, timeout={}s)",
+                config.model,
+                config.iteration,
+                STREAM_SETUP_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|err| map_stream_error(err, &config.model, config.iteration))?;
 
         let mut accumulator = StreamAccumulator::new();
         let mut progress_state = ProgressState::new();
@@ -73,7 +84,17 @@ impl Planner {
         let mut progress_throttle = Throttle::new(PROGRESS_MIN_CHARS, PROGRESS_MIN_INTERVAL);
         let mut done_response = None;
 
-        while let Some(event) = stream.next().await {
+        while let Some(event) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| {
+                AgentError::loop_error(format!(
+                    "provider stream idle timeout (model='{}', iteration={}, timeout={}s)",
+                    config.model,
+                    config.iteration,
+                    STREAM_IDLE_TIMEOUT.as_secs()
+                ))
+            })?
+        {
             let event =
                 event.map_err(|err| map_stream_error(err, &config.model, config.iteration))?;
             saw_event = true;
