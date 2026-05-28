@@ -9,6 +9,8 @@ use nanobot_provider::LLMProvider;
 use nanobot_tools::{ToolContext, ToolRegistry};
 use nanobot_types::provider::{AssistantToolCall, ChatMessage, UsageStats};
 
+use nanobot_types::text::truncate_text;
+
 use super::planner::{ModelConfig, Planner, ProgressEmitter};
 use super::state::{LoopExitReason, LoopOutcome, LoopState};
 use super::tool_runner::ToolRunner;
@@ -237,7 +239,8 @@ impl ReActExecutor {
                     ));
 
                     if let Some(progress) = &progress {
-                        let result_preview = truncate_tool_result(&obs_content_for_hint);
+                        let result_preview =
+                            truncate_text(&obs_content_for_hint, TOOL_RESULT_MAX_CHARS);
                         progress.send_tool_hint(&format!(
                             "Tool result: {} (id={}) -> {}",
                             current_call.name, current_call.id, result_preview
@@ -295,14 +298,6 @@ impl ExecutionContext {
             message_id: None,
         }
     }
-}
-
-fn truncate_tool_result(value: &str) -> String {
-    if value.len() <= TOOL_RESULT_MAX_CHARS {
-        return value.to_string();
-    }
-    let truncated: String = value.chars().take(TOOL_RESULT_MAX_CHARS).collect();
-    format!("{}\u{2026}", truncated)
 }
 
 fn effective_total_tokens(usage: &UsageStats) -> Option<u64> {

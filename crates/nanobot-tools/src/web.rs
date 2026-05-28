@@ -7,6 +7,7 @@ use url::Url;
 use crate::base::{Tool, ToolContext, ToolDefinition, parse_args, tool_definition_from_json};
 use crate::config::SharedToolConfig;
 use crate::error::{ToolError, ToolResult};
+use nanobot_types::text::truncate_utf8_in_place;
 use nanobot_types::tools::{BraveSearchResponse, WebFetchArgs, WebFetchResponse, WebSearchArgs};
 
 // Tool descriptions
@@ -263,7 +264,7 @@ pub async fn execute_fetch(
         ("raw", body)
     };
 
-    let truncated = truncate_utf8_to_max_bytes(&mut text, max_chars);
+    let truncated = truncate_utf8_in_place(&mut text, max_chars) > 0;
 
     serde_json::to_string(&WebFetchResponse {
         url: parsed.to_string(),
@@ -280,20 +281,6 @@ pub async fn execute_fetch(
             anyhow::anyhow!("serializing web_fetch response: {}", e),
         )
     })
-}
-
-fn truncate_utf8_to_max_bytes(text: &mut String, max_bytes: usize) -> bool {
-    if text.len() <= max_bytes {
-        return false;
-    }
-
-    let mut new_len = max_bytes.min(text.len());
-    while new_len > 0 && !text.is_char_boundary(new_len) {
-        new_len -= 1;
-    }
-
-    text.truncate(new_len);
-    true
 }
 
 fn build_client(proxy: Option<&str>) -> ToolResult<reqwest::Client> {
@@ -352,18 +339,18 @@ mod tests {
     }
 
     #[test]
-    fn truncate_utf8_to_max_bytes_respects_char_boundaries() {
+    fn truncate_utf8_in_place_respects_char_boundaries() {
         let mut value = "中文ab".to_string();
-        let truncated = truncate_utf8_to_max_bytes(&mut value, 5);
-        assert!(truncated);
+        let truncated = truncate_utf8_in_place(&mut value, 5);
+        assert!(truncated > 0);
         assert_eq!(value, "中");
     }
 
     #[test]
-    fn truncate_utf8_to_max_bytes_noop_when_within_limit() {
+    fn truncate_utf8_in_place_noop_when_within_limit() {
         let mut value = "hello".to_string();
-        let truncated = truncate_utf8_to_max_bytes(&mut value, 5);
-        assert!(!truncated);
+        let truncated = truncate_utf8_in_place(&mut value, 5);
+        assert_eq!(truncated, 0);
         assert_eq!(value, "hello");
     }
 }

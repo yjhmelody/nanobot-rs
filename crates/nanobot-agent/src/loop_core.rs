@@ -20,6 +20,7 @@ use nanobot_bus::{
 };
 use nanobot_config::schema::{AgentRuntimeOverrides, ChannelsConfig};
 use nanobot_provider::LLMProvider;
+use nanobot_provider::ReasoningConfig;
 use nanobot_session::{
     ConsolidationConfig, ConsolidationOutcome, Session, SessionEntry, SessionManager,
 };
@@ -28,6 +29,7 @@ use nanobot_tools::{ToolContext, ToolRegistry};
 use nanobot_types::SessionKey;
 use nanobot_types::provider::{ChatMessage, MessageContent, MessageRole, UsageStats};
 use nanobot_types::task::TaskId;
+use nanobot_types::text::truncate_utf8_prefix;
 
 const TARGET: &str = "nanobot::agent";
 const INTERNAL_ERROR_PREFIX: &str = "⚠️ ";
@@ -43,7 +45,7 @@ pub struct AgentLoop {
     pub(crate) temperature: f32,
     pub(crate) max_tokens: i32,
     pub(crate) memory_window: usize,
-    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningConfig>,
     pub(crate) consolidation_config: ConsolidationConfig,
     pub(crate) consolidation_enabled: bool,
     pub(crate) channel_configs: ChannelsConfig,
@@ -821,17 +823,6 @@ impl AgentLoop {
             "persisted turn into session history"
         );
     }
-}
-
-fn truncate_utf8_prefix(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut boundary = max_bytes;
-    while boundary > 0 && !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    &value[..boundary]
 }
 
 impl Clone for AgentLoop {

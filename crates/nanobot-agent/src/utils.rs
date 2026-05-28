@@ -47,14 +47,8 @@ impl Throttle {
     }
 }
 
-/// Truncate text to a maximum character length, adding ellipsis if truncated.
-pub fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(max_chars).collect();
-    format!("{}\u{2026}", truncated)
-}
+/// Truncate text to a maximum character count, adding ellipsis if truncated.
+pub use nanobot_types::text::truncate_text;
 
 /// Truncate and preview text for display.
 pub fn preview_text(text: &str, max_chars: usize) -> String {
