@@ -771,7 +771,7 @@ impl AgentLoop {
                         truncated_tool_results += 1;
                         MessageContent::Text(format!(
                             "{}\u{2026}[truncated]",
-                            &t[..MAX_TOOL_RESULT_CHARS]
+                            truncate_utf8_prefix(&t, MAX_TOOL_RESULT_CHARS)
                         ))
                     } else {
                         MessageContent::Text(t)
@@ -809,6 +809,17 @@ impl AgentLoop {
             "persisted turn into session history"
         );
     }
+}
+
+fn truncate_utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &value[..boundary]
 }
 
 impl Clone for AgentLoop {

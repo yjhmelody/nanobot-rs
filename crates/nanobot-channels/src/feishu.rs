@@ -213,7 +213,7 @@ impl FeishuChannel {
         .unwrap_or(false);
         let stream_placeholder_text =
             extra_string(&config, &["streamPlaceholderText", "typingIndicatorText"])
-                .unwrap_or_else(|| "思考中...".to_string());
+                .unwrap_or_else(|| "thinking...".to_string());
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()

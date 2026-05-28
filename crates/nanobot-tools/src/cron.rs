@@ -144,8 +144,8 @@ impl CronTool {
                     ));
                 };
 
-                let name = if message.len() > 30 {
-                    message[..30].to_string()
+                let name = if message.chars().count() > 30 {
+                    message.chars().take(30).collect()
                 } else {
                     message.clone()
                 };
@@ -198,8 +198,8 @@ impl CronTool {
                     ..CronSchedule::default()
                 };
 
-                let name = if message.len() > 30 {
-                    message[..30].to_string()
+                let name = if message.chars().count() > 30 {
+                    message.chars().take(30).collect()
                 } else {
                     message.clone()
                 };

@@ -770,8 +770,14 @@ fn redacted_header_map(headers: &HeaderMap) -> HashMap<String, String> {
 fn redact_authorization_header(value: &HeaderValue) -> String {
     let raw = value.to_str().unwrap_or("<non-utf8>");
     if let Some(token) = raw.strip_prefix("Bearer ") {
-        let suffix_len = token.len().min(6);
-        let suffix = &token[token.len().saturating_sub(suffix_len)..];
+        let suffix: String = token
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         return format!("Bearer <redacted:{}>", suffix);
     }
     "<redacted>".to_string()

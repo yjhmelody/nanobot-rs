@@ -74,6 +74,47 @@
 - `consolidationMinMessages` 控制至少累积多少条“尚未 consolidation”的消息后才触发。
 - `consolidationSummaryMaxTokens` 控制 consolidation 摘要请求可使用的最大 token。
 
+### 3.1 长会话/复杂任务最佳实践
+
+当你希望减少“对话进行到一半失忆”的情况，可以优先按下面思路调整：
+
+- 增大 `memoryWindow`：每轮请求带更多历史。
+- 增大 `consolidationKeepRecent`：压缩后保留更多原始最近消息。
+- 增大 `consolidationMinMessages`：减少过早 consolidation。
+- 增大 `consolidationSummaryMaxTokens`：让 consolidation 摘要更完整。
+- 增大 `maxToolIterations`：允许复杂任务使用更多工具回合。
+
+推荐起步参数（可按模型成本继续微调）：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "maxTokens": 16384,
+      "maxToolIterations": 80,
+      "memoryWindow": 400,
+      "consolidationEnabled": true,
+      "consolidationKeepRecent": 80,
+      "consolidationMinMessages": 120,
+      "consolidationSummaryMaxTokens": 4000
+    }
+  },
+  "channels": {
+    "lark": {
+      "agentOverrides": {
+        "memoryWindow": 300,
+        "consolidationEnabled": true,
+        "consolidationKeepRecent": 80,
+        "consolidationMinMessages": 100,
+        "consolidationSummaryMaxTokens": 3500
+      }
+    }
+  }
+}
+```
+
+如果你主要在某个 channel（如 `lark`）跑长任务，建议把更大的参数放在该 channel 的 `agentOverrides`，避免全局都使用高成本配置。
+
 ## 4. providers
 
 ### 4.1 当前支持的“模型提供商”范围

@@ -49,6 +49,28 @@ nanobot onboard
 
 默认配置已经包含推荐参数，你通常只需要补上 provider 凭证。
 
+### 长会话 / 复杂任务推荐配置
+
+如果你希望多轮复杂任务时更不容易“失忆”，建议从默认值提升到下面这一档：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "maxTokens": 16384,
+      "maxToolIterations": 80,
+      "memoryWindow": 400,
+      "consolidationEnabled": true,
+      "consolidationKeepRecent": 80,
+      "consolidationMinMessages": 120,
+      "consolidationSummaryMaxTokens": 4000
+    }
+  }
+}
+```
+
+如果你主要在某个通道（如 `lark`）处理长任务，优先使用 `channels.<channel>.agentOverrides` 做局部放大。
+
 ### Anthropic
 
 ```json

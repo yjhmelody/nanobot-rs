@@ -309,10 +309,14 @@ fn split_text(text: &str, max_len: usize) -> Vec<String> {
             chunks.push(content);
             break;
         }
-        let cut = &content[..max_len];
+        let safe_end = floor_char_boundary(&content, max_len);
+        let cut = &content[..safe_end];
         let mut pos = cut.rfind('\n').unwrap_or(0);
         if pos == 0 {
-            pos = cut.rfind(' ').unwrap_or(max_len);
+            pos = cut.rfind(' ').unwrap_or(safe_end);
+        }
+        if pos == 0 {
+            pos = safe_end;
         }
         chunks.push(content[..pos].to_string());
         content = content[pos..].trim_start().to_string();
@@ -324,9 +328,15 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         return text.to_string();
     }
-    let mut out = text.to_string();
-    out.truncate(max_len);
-    out
+    text[..floor_char_boundary(text, max_len)].to_string()
+}
+
+fn floor_char_boundary(input: &str, max_len: usize) -> usize {
+    let mut boundary = max_len.min(input.len());
+    while boundary > 0 && !input.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
 }
 
 fn extra_string(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<String> {

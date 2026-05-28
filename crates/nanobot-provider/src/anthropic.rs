@@ -487,8 +487,14 @@ fn redacted_header_map(headers: &HeaderMap) -> HashMap<String, String> {
 
 fn redact_api_key(value: &HeaderValue) -> String {
     let raw = value.to_str().unwrap_or("<non-utf8>");
-    let suffix_len = raw.len().min(6);
-    let suffix = &raw[raw.len().saturating_sub(suffix_len)..];
+    let suffix: String = raw
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("<redacted:{}>", suffix)
 }
 

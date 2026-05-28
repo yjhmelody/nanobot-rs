@@ -19,8 +19,7 @@ impl TaskId {
 
     /// Get the short (8-character) representation for display.
     pub fn short(&self) -> String {
-        let s = self.0.to_string();
-        s[..8].to_string()
+        self.0.to_string().chars().take(8).collect()
     }
 
     /// Get the inner UUID.
