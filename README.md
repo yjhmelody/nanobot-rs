@@ -114,7 +114,7 @@ DeepSeek（Anthropic-compatible）：
 - `Release`：在 Linux / macOS / Windows 上构建发行包；推送 `v*` tag 时自动创建 GitHub Release
 
 具体发布说明见 `docs/DEPLOYMENT.md`。
-发布前可用 `just changelog vX.Y.Z` 自动生成 `CHANGELOG.md` 条目。
+发布前可用 `just changelog vX.Y.Z` 自动生成 `CHANGELOG.md` 条目。仓库 `pre-push` 已内置 tag-changelog 校验：推送 `v*` tag 时若缺失对应 changelog 条目会被拦截。
 
 ## 开发命令
 

@@ -18,7 +18,18 @@ fi
 
 case "$phase" in
   pre-commit) recipe="hook-commit" ;;
-  pre-push) recipe="hook-push" ;;
+  pre-push)
+    recipe="hook-push"
+    # Git pre-push hooks pass ref updates through stdin:
+    # <local-ref> <local-sha> <remote-ref> <remote-sha>
+    # Enforce changelog entry for pushed tags before running heavier checks.
+    if [[ ! -t 0 ]]; then
+      refspec_file="$(mktemp)"
+      cat >"$refspec_file"
+      trap 'rm -f "$refspec_file"' EXIT
+      bash "$repo_root/scripts/verify-tag-changelog.sh" "$refspec_file"
+    fi
+    ;;
   *)
     echo "Unknown phase: $phase" >&2
     exit 2
@@ -37,4 +48,3 @@ if [[ "$mode" == "--claude" ]]; then
 fi
 
 exit 1
-
