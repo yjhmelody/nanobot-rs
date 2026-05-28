@@ -1209,8 +1209,10 @@ mod tests {
 
     #[test]
     fn feishu_reads_stream_placeholder_config() {
-        let mut cfg = GenericChannelConfig::default();
-        cfg.allow_from = vec!["*".to_string()];
+        let mut cfg = GenericChannelConfig {
+            allow_from: vec!["*".to_string()],
+            ..GenericChannelConfig::default()
+        };
         cfg.extra.insert("appId".to_string(), json!("demo"));
         cfg.extra.insert("appSecret".to_string(), json!("secret"));
         cfg.extra

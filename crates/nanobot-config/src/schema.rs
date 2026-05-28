@@ -68,12 +68,23 @@ impl Config {
     /// - `temperature` is not in range [0.0, 2.0]
     /// - `max_tool_iterations` is zero
     /// - `memory_window` is zero
-    /// - `keep_recent` is zero or greater than `memory_window`
+    /// - `consolidation_keep_recent` is zero or greater than `memory_window`
     /// - `exec.timeout` is zero
     /// - `heartbeat.interval_s` is zero when enabled
     pub fn validate(&self) -> ConfigResult<()> {
         // Validate agent defaults
         self.agents.defaults.validate()?;
+        for (name, cfg) in [
+            ("channels.telegram", &self.channels.telegram),
+            ("channels.discord", &self.channels.discord),
+            ("channels.feishu", &self.channels.feishu),
+        ] {
+            if let Some(overrides) = &cfg.agent_overrides {
+                self.agents
+                    .defaults
+                    .validate_overrides(overrides, &format!("{name}.agentOverrides"))?;
+            }
+        }
 
         // Validate tools config
         self.tools.validate()?;
@@ -313,14 +324,39 @@ pub struct AgentDefaults {
     /// Number of recent messages to include in context.
     pub memory_window: usize,
     /// Number of recent messages kept as raw turns during consolidation.
-    pub keep_recent: usize,
+    pub consolidation_keep_recent: usize,
     /// Optional reasoning effort hint for supported providers.
     pub reasoning_effort: Option<String>,
     /// Enables automatic session consolidation after saving turns.
-    pub auto_consolidate: bool,
+    pub consolidation_enabled: bool,
+    /// Minimum number of unconsolidated messages before consolidation runs.
+    pub consolidation_min_messages: usize,
+    /// Maximum tokens used for the consolidation summary request.
+    pub consolidation_summary_max_tokens: i32,
     /// Custom prompt configuration for this agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptConfig>,
+}
+
+/// Optional agent runtime overrides that can be applied per channel.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AgentRuntimeOverrides {
+    /// Override for the number of recent messages included in context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_window: Option<usize>,
+    /// Override for enabling automatic session consolidation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consolidation_enabled: Option<bool>,
+    /// Override for the number of recent raw messages preserved during consolidation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consolidation_keep_recent: Option<usize>,
+    /// Override for the unconsolidated-message threshold before consolidation runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consolidation_min_messages: Option<usize>,
+    /// Override for the summarization token budget used by consolidation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consolidation_summary_max_tokens: Option<i32>,
 }
 
 /// Configuration for agent prompts
@@ -355,9 +391,11 @@ impl Default for AgentDefaults {
             temperature: 0.1,
             max_tool_iterations: 40,
             memory_window: 100,
-            keep_recent: 10,
+            consolidation_keep_recent: 10,
             reasoning_effort: None,
-            auto_consolidate: true,
+            consolidation_enabled: true,
+            consolidation_min_messages: 20,
+            consolidation_summary_max_tokens: 1000,
             prompt: None,
         }
     }
@@ -388,14 +426,29 @@ impl AgentDefaults {
             return Err(ConfigError::invalid("memory_window must be positive"));
         }
 
-        if self.keep_recent == 0 {
-            return Err(ConfigError::invalid("keep_recent must be positive"));
+        if self.consolidation_keep_recent == 0 {
+            return Err(ConfigError::invalid(
+                "consolidation_keep_recent must be positive",
+            ));
         }
 
-        if self.keep_recent > self.memory_window {
+        if self.consolidation_keep_recent > self.memory_window {
             return Err(ConfigError::invalid(format!(
-                "keep_recent ({}) cannot be greater than memory_window ({})",
-                self.keep_recent, self.memory_window
+                "consolidation_keep_recent ({}) cannot be greater than memory_window ({})",
+                self.consolidation_keep_recent, self.memory_window
+            )));
+        }
+
+        if self.consolidation_min_messages == 0 {
+            return Err(ConfigError::invalid(
+                "consolidation_min_messages must be positive",
+            ));
+        }
+
+        if self.consolidation_summary_max_tokens <= 0 {
+            return Err(ConfigError::invalid(format!(
+                "consolidation_summary_max_tokens must be positive, got {}",
+                self.consolidation_summary_max_tokens
             )));
         }
 
@@ -405,6 +458,56 @@ impl AgentDefaults {
 
         if self.model.trim().is_empty() {
             return Err(ConfigError::invalid("model name cannot be empty"));
+        }
+
+        Ok(())
+    }
+
+    /// Validates a channel-specific override set against these defaults.
+    pub fn validate_overrides(
+        &self,
+        overrides: &AgentRuntimeOverrides,
+        scope: &str,
+    ) -> ConfigResult<()> {
+        let memory_window = overrides.memory_window.unwrap_or(self.memory_window);
+        let consolidation_keep_recent = overrides
+            .consolidation_keep_recent
+            .unwrap_or(self.consolidation_keep_recent);
+        let consolidation_min_messages = overrides
+            .consolidation_min_messages
+            .unwrap_or(self.consolidation_min_messages);
+        let consolidation_summary_max_tokens = overrides
+            .consolidation_summary_max_tokens
+            .unwrap_or(self.consolidation_summary_max_tokens);
+
+        if memory_window == 0 {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: memory_window must be positive"
+            )));
+        }
+
+        if consolidation_keep_recent == 0 {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: consolidation_keep_recent must be positive"
+            )));
+        }
+
+        if consolidation_keep_recent > memory_window {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: consolidation_keep_recent ({consolidation_keep_recent}) cannot be greater than memory_window ({memory_window})"
+            )));
+        }
+
+        if consolidation_min_messages == 0 {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: consolidation_min_messages must be positive"
+            )));
+        }
+
+        if consolidation_summary_max_tokens <= 0 {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: consolidation_summary_max_tokens must be positive, got {consolidation_summary_max_tokens}"
+            )));
         }
 
         Ok(())
@@ -467,6 +570,9 @@ pub struct GenericChannelConfig {
     pub enabled: bool,
     /// Allowed sender IDs or chat IDs.
     pub allow_from: Vec<String>,
+    /// Optional per-channel overrides for agent runtime behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_overrides: Option<AgentRuntimeOverrides>,
     #[serde(flatten)]
     /// Adapter-specific extra fields.
     pub extra: HashMap<String, serde_json::Value>,
@@ -1122,22 +1228,69 @@ mod tests {
     }
 
     #[test]
-    fn agent_defaults_validation_rejects_zero_keep_recent() {
+    fn agent_defaults_validation_rejects_zero_consolidation_keep_recent() {
         let defaults = AgentDefaults {
-            keep_recent: 0,
+            consolidation_keep_recent: 0,
             ..AgentDefaults::default()
         };
         assert!(defaults.validate().is_err());
     }
 
     #[test]
-    fn agent_defaults_validation_rejects_keep_recent_greater_than_memory_window() {
+    fn agent_defaults_validation_rejects_consolidation_keep_recent_greater_than_memory_window() {
         let defaults = AgentDefaults {
             memory_window: 5,
-            keep_recent: 6,
+            consolidation_keep_recent: 6,
             ..AgentDefaults::default()
         };
         assert!(defaults.validate().is_err());
+    }
+
+    #[test]
+    fn agent_defaults_validation_rejects_zero_consolidation_min_messages() {
+        let defaults = AgentDefaults {
+            consolidation_min_messages: 0,
+            ..AgentDefaults::default()
+        };
+        assert!(defaults.validate().is_err());
+    }
+
+    #[test]
+    fn agent_defaults_validation_rejects_non_positive_consolidation_summary_max_tokens() {
+        let defaults = AgentDefaults {
+            consolidation_summary_max_tokens: 0,
+            ..AgentDefaults::default()
+        };
+        assert!(defaults.validate().is_err());
+    }
+
+    #[test]
+    fn agent_overrides_validation_rejects_invalid_memory_window() {
+        let defaults = AgentDefaults::default();
+        let overrides = AgentRuntimeOverrides {
+            memory_window: Some(0),
+            ..AgentRuntimeOverrides::default()
+        };
+        assert!(
+            defaults
+                .validate_overrides(&overrides, "channels.feishu.agentOverrides")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_overrides_validation_rejects_invalid_consolidation_window() {
+        let defaults = AgentDefaults::default();
+        let overrides = AgentRuntimeOverrides {
+            memory_window: Some(10),
+            consolidation_keep_recent: Some(11),
+            ..AgentRuntimeOverrides::default()
+        };
+        assert!(
+            defaults
+                .validate_overrides(&overrides, "channels.feishu.agentOverrides")
+                .is_err()
+        );
     }
 
     #[test]

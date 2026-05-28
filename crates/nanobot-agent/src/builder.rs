@@ -10,7 +10,7 @@ use crate::loop_core::AgentLoop;
 use crate::subagent::SubagentManager;
 use crate::traits::ContextProvider;
 use nanobot_bus::MessageBus;
-use nanobot_config::schema::{ExecToolConfig, MCPServerConfig, WebToolsConfig};
+use nanobot_config::schema::{ChannelsConfig, ExecToolConfig, MCPServerConfig, WebToolsConfig};
 use nanobot_cron::CronService;
 use nanobot_provider::LLMProvider;
 use nanobot_session::{
@@ -56,6 +56,7 @@ pub struct AgentLoopBuilder {
     exec_config: ExecToolConfig,
     mcp_servers: HashMap<String, MCPServerConfig>,
     restrict_to_workspace: bool,
+    channel_configs: ChannelsConfig,
     send_usage_summary: bool,
     cron_service: Option<Arc<CronService>>,
     custom_tools: Vec<Arc<dyn nanobot_tools::Tool>>,
@@ -75,6 +76,7 @@ impl AgentLoopBuilder {
             exec_config: ExecToolConfig::default(),
             mcp_servers: HashMap::new(),
             restrict_to_workspace: false,
+            channel_configs: ChannelsConfig::default(),
             send_usage_summary: false,
             cron_service: None,
             custom_tools: Vec::new(),
@@ -90,12 +92,6 @@ impl AgentLoopBuilder {
     /// Sets the session consolidation configuration.
     pub fn with_consolidation_config(mut self, config: ConsolidationConfig) -> Self {
         self.consolidation_config = config;
-        self
-    }
-
-    /// Sets how many most-recent messages are kept raw during consolidation.
-    pub fn with_keep_recent(mut self, keep_recent: usize) -> Self {
-        self.consolidation_config.keep_recent = keep_recent;
         self
     }
 
@@ -126,6 +122,12 @@ impl AgentLoopBuilder {
     /// When `true`, filesystem tools are restricted to the workspace directory.
     pub fn with_restrict_to_workspace(mut self, restrict: bool) -> Self {
         self.restrict_to_workspace = restrict;
+        self
+    }
+
+    /// Provides channel configuration so per-channel agent overrides can be resolved at runtime.
+    pub fn with_channel_configs(mut self, config: ChannelsConfig) -> Self {
+        self.channel_configs = config;
         self
     }
 
@@ -197,6 +199,9 @@ impl AgentLoopBuilder {
             max_tokens: self.config.max_tokens,
             memory_window: self.config.memory_window,
             reasoning_effort: self.config.reasoning_effort,
+            consolidation_config: self.consolidation_config,
+            consolidation_enabled: self.auto_consolidation,
+            channel_configs: self.channel_configs,
             send_usage_summary: self.send_usage_summary,
             tools,
             mcp,

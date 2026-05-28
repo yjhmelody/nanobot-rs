@@ -18,8 +18,11 @@ use crate::utils::preview_text;
 use nanobot_bus::{
     InboundCommand, InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage,
 };
+use nanobot_config::schema::{AgentRuntimeOverrides, ChannelsConfig};
 use nanobot_provider::LLMProvider;
-use nanobot_session::{ConsolidationOutcome, Session, SessionEntry, SessionManager};
+use nanobot_session::{
+    ConsolidationConfig, ConsolidationOutcome, Session, SessionEntry, SessionManager,
+};
 use nanobot_tools::mcp::MCPManager;
 use nanobot_tools::{ToolContext, ToolRegistry};
 use nanobot_types::SessionKey;
@@ -40,6 +43,9 @@ pub struct AgentLoop {
     pub(crate) max_tokens: i32,
     pub(crate) memory_window: usize,
     pub(crate) reasoning_effort: Option<String>,
+    pub(crate) consolidation_config: ConsolidationConfig,
+    pub(crate) consolidation_enabled: bool,
+    pub(crate) channel_configs: ChannelsConfig,
     pub(crate) send_usage_summary: bool,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) mcp: Option<Arc<MCPManager>>,
@@ -54,6 +60,13 @@ pub struct AgentLoop {
 struct OutboundEnvelope {
     message: OutboundMessage,
     usage: Option<UsageStats>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentRuntimeSettings {
+    memory_window: usize,
+    consolidation_enabled: bool,
+    consolidation_config: ConsolidationConfig,
 }
 
 impl AgentLoop {
@@ -102,6 +115,54 @@ impl AgentLoop {
             "Tokens: {} in / {} out / {} total",
             prompt_tokens, completion_tokens, total_tokens
         )
+    }
+
+    fn runtime_settings_for_channel(&self, channel: &str) -> AgentRuntimeSettings {
+        let overrides = match channel {
+            "telegram" => self.channel_configs.telegram.agent_overrides.as_ref(),
+            "discord" => self.channel_configs.discord.agent_overrides.as_ref(),
+            "feishu" | "lark" => self.channel_configs.feishu.agent_overrides.as_ref(),
+            _ => None,
+        };
+        Self::merge_runtime_settings(
+            self.memory_window,
+            self.consolidation_enabled,
+            &self.consolidation_config,
+            overrides,
+        )
+    }
+
+    fn merge_runtime_settings(
+        default_memory_window: usize,
+        default_consolidation_enabled: bool,
+        default_consolidation_config: &ConsolidationConfig,
+        overrides: Option<&AgentRuntimeOverrides>,
+    ) -> AgentRuntimeSettings {
+        let mut settings = AgentRuntimeSettings {
+            memory_window: default_memory_window,
+            consolidation_enabled: default_consolidation_enabled,
+            consolidation_config: default_consolidation_config.clone(),
+        };
+
+        if let Some(overrides) = overrides {
+            if let Some(memory_window) = overrides.memory_window {
+                settings.memory_window = memory_window;
+            }
+            if let Some(enabled) = overrides.consolidation_enabled {
+                settings.consolidation_enabled = enabled;
+            }
+            if let Some(keep_recent) = overrides.consolidation_keep_recent {
+                settings.consolidation_config.keep_recent = keep_recent;
+            }
+            if let Some(min_messages) = overrides.consolidation_min_messages {
+                settings.consolidation_config.min_messages = min_messages;
+            }
+            if let Some(max_tokens) = overrides.consolidation_summary_max_tokens {
+                settings.consolidation_config.max_tokens = max_tokens;
+            }
+        }
+
+        settings
     }
 
     async fn ensure_mcp_connected(&self) {
@@ -445,6 +506,7 @@ impl AgentLoop {
 
         let session_key = msg.session_key();
         let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
+        let runtime_settings = self.runtime_settings_for_channel(&msg.channel);
 
         let tool_context = ToolContext {
             channel: msg.channel.clone(),
@@ -457,7 +519,7 @@ impl AgentLoop {
 
         let history = self
             .sessions
-            .get_history(&session, self.memory_window)
+            .get_history(&session, runtime_settings.memory_window)
             .await?;
         let history_len = history.len();
         let messages = self
@@ -516,7 +578,15 @@ impl AgentLoop {
         }
 
         self.save_turn(&mut session, outcome.messages, start_index);
-        self.sessions.save(&mut session).await?;
+        self.sessions
+            .save_with_consolidation(
+                &mut session,
+                &self.provider,
+                &self.model,
+                Some(&runtime_settings.consolidation_config),
+                runtime_settings.consolidation_enabled,
+            )
+            .await?;
 
         // 如果本轮已经显式调用 message 工具发消息，则跳过默认最终回复，避免重复发送。
         if self.tools.message_sent_in_turn().await {
@@ -572,16 +642,35 @@ impl AgentLoop {
             InboundCommand::Compact => {
                 let session_key = msg.session_key();
                 let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
-                let content = match self.sessions.consolidate_now(&mut session).await {
-                    Err(e) => Self::format_internal_error(format!("Failed to consolidate: {}", e)),
-                    Ok(ConsolidationOutcome::Disabled) => {
-                        Self::format_system_info("Consolidation is not configured.")
-                    }
-                    Ok(ConsolidationOutcome::Skipped) => {
-                        Self::format_system_info("Not enough messages to consolidate yet.")
-                    }
-                    Ok(ConsolidationOutcome::Consolidated { removed }) => {
-                        Self::format_system_success(format!("Consolidated {} messages.", removed))
+                let runtime_settings = self.runtime_settings_for_channel(&msg.channel);
+                let content = if !runtime_settings.consolidation_enabled {
+                    Self::format_system_info("Consolidation is disabled for this channel.")
+                } else {
+                    match self
+                        .sessions
+                        .consolidate_now_with_config(
+                            &mut session,
+                            &self.provider,
+                            &self.model,
+                            &runtime_settings.consolidation_config,
+                        )
+                        .await
+                    {
+                        Err(e) => {
+                            Self::format_internal_error(format!("Failed to consolidate: {}", e))
+                        }
+                        Ok(ConsolidationOutcome::Disabled) => {
+                            Self::format_system_info("Consolidation is not configured.")
+                        }
+                        Ok(ConsolidationOutcome::Skipped) => {
+                            Self::format_system_info("Not enough messages to consolidate yet.")
+                        }
+                        Ok(ConsolidationOutcome::Consolidated { removed }) => {
+                            Self::format_system_success(format!(
+                                "Consolidated {} messages.",
+                                removed
+                            ))
+                        }
                     }
                 };
                 Ok(Some(OutboundMessage {
@@ -733,6 +822,9 @@ impl Clone for AgentLoop {
             max_tokens: self.max_tokens,
             memory_window: self.memory_window,
             reasoning_effort: self.reasoning_effort.clone(),
+            consolidation_config: self.consolidation_config.clone(),
+            consolidation_enabled: self.consolidation_enabled,
+            channel_configs: self.channel_configs.clone(),
             send_usage_summary: self.send_usage_summary,
             tools: self.tools.clone(),
             mcp: self.mcp.clone(),
@@ -777,5 +869,51 @@ impl Agent for AgentLoop {
 
     async fn close_provider(&self) {
         AgentLoop::close_provider(self).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_runtime_settings_uses_defaults_without_overrides() {
+        let defaults = ConsolidationConfig {
+            min_messages: 20,
+            keep_recent: 12,
+            max_tokens: 900,
+        };
+
+        let settings = AgentLoop::merge_runtime_settings(80, true, &defaults, None);
+
+        assert_eq!(settings.memory_window, 80);
+        assert!(settings.consolidation_enabled);
+        assert_eq!(settings.consolidation_config.min_messages, 20);
+        assert_eq!(settings.consolidation_config.keep_recent, 12);
+        assert_eq!(settings.consolidation_config.max_tokens, 900);
+    }
+
+    #[test]
+    fn merge_runtime_settings_applies_channel_overrides() {
+        let defaults = ConsolidationConfig {
+            min_messages: 20,
+            keep_recent: 12,
+            max_tokens: 900,
+        };
+        let overrides = AgentRuntimeOverrides {
+            memory_window: Some(160),
+            consolidation_enabled: Some(false),
+            consolidation_keep_recent: Some(36),
+            consolidation_min_messages: Some(48),
+            consolidation_summary_max_tokens: Some(1800),
+        };
+
+        let settings = AgentLoop::merge_runtime_settings(80, true, &defaults, Some(&overrides));
+
+        assert_eq!(settings.memory_window, 160);
+        assert!(!settings.consolidation_enabled);
+        assert_eq!(settings.consolidation_config.min_messages, 48);
+        assert_eq!(settings.consolidation_config.keep_recent, 36);
+        assert_eq!(settings.consolidation_config.max_tokens, 1800);
     }
 }

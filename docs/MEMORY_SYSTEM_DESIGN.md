@@ -167,6 +167,15 @@ Memory 负责：
 - 将更早的会话消息摘要为一条系统消息
 - 降低后续上下文长度
 
+当前默认运行时可配置项包括：
+
+- `consolidationEnabled`
+- `consolidationKeepRecent`
+- `consolidationMinMessages`
+- `consolidationSummaryMaxTokens`
+
+并且这些参数现在可以通过 `channels.<name>.agentOverrides` 按 channel 覆盖。
+
 ### memory 当前职责
 
 - 存储长期 memory 文件

@@ -62,7 +62,10 @@ nanobot onboard
       "temperature": 0.1,
       "maxToolIterations": 40,
       "memoryWindow": 100,
-      "keepRecent": 10,
+      "consolidationEnabled": true,
+      "consolidationKeepRecent": 10,
+      "consolidationMinMessages": 20,
+      "consolidationSummaryMaxTokens": 1000,
       "reasoningEffort": null
     }
   },

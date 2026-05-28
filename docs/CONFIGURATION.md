@@ -49,9 +49,11 @@
 - `temperature`: `0.1`
 - `maxToolIterations`: `40`
 - `memoryWindow`: `100`
-- `keepRecent`: `10`
+- `consolidationKeepRecent`: `10`
+- `consolidationMinMessages`: `20`
+- `consolidationSummaryMaxTokens`: `1000`
 - `reasoningEffort`: `null`
-- `autoConsolidate`: `true`
+- `consolidationEnabled`: `true`
 
 校验规则：
 
@@ -59,13 +61,18 @@
 - `temperature` 在 `[0.0, 2.0]`
 - `maxToolIterations > 0`
 - `memoryWindow > 0`
-- `keepRecent > 0` 且 `keepRecent <= memoryWindow`
+- `consolidationKeepRecent > 0` 且 `consolidationKeepRecent <= memoryWindow`
+- `consolidationMinMessages > 0`
+- `consolidationSummaryMaxTokens > 0`
 - `workspace` / `model` 非空
 
 说明：
 
 - `memoryWindow` 控制每次请求模型时带入的历史窗口大小。
-- `keepRecent` 控制会话 consolidation 时保留为原始消息的最近条数（更早消息会被摘要压缩）。
+- `consolidationEnabled` 控制是否在每次保存回合后自动执行 consolidation。
+- `consolidationKeepRecent` 控制会话 consolidation 时保留为原始消息的最近条数。
+- `consolidationMinMessages` 控制至少累积多少条“尚未 consolidation”的消息后才触发。
+- `consolidationSummaryMaxTokens` 控制 consolidation 摘要请求可使用的最大 token。
 
 ## 4. providers
 
@@ -182,7 +189,21 @@ DeepSeek（Anthropic-compatible）示例：
 
 - `enabled: bool`
 - `allowFrom: string[]`
+- `agentOverrides?: object`
 - 其余字段通过 `extra` 承载（配置文件中直接写扁平字段）
+
+`agentOverrides` 当前支持：
+
+- `memoryWindow`
+- `consolidationEnabled`
+- `consolidationKeepRecent`
+- `consolidationMinMessages`
+- `consolidationSummaryMaxTokens`
+
+说明：
+
+- 这些覆盖值只对对应 channel 生效。
+- 典型用法是给 `feishu` 这种长任务入口设置更大的 `memoryWindow` 和更保守的 consolidation 参数。
 
 `allowFrom` 约束（启用通道时）：
 

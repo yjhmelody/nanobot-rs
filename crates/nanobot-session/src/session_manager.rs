@@ -1,7 +1,11 @@
+use super::ConsolidationConfig;
 use super::SessionResult;
+use super::consolidate_session;
 use super::traits::*;
 use super::types::{ConsolidationOutcome, Session, SessionSummary};
 use nanobot_provider::ChatMessage;
+use nanobot_provider::LLMProvider;
+use std::sync::Arc;
 
 /// Composite session manager that orchestrates multiple components.
 ///
@@ -110,6 +114,53 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Saves a session using the provided consolidation settings instead of the manager defaults.
+    pub async fn save_with_consolidation(
+        &self,
+        session: &mut Session,
+        provider: &Arc<dyn LLMProvider>,
+        model: &str,
+        config: Option<&ConsolidationConfig>,
+        enabled: bool,
+    ) -> SessionResult<()> {
+        for hook in &self.hooks {
+            hook.on_before_save(session).await?;
+        }
+
+        if enabled && let Some(config) = config {
+            let messages_before = session.messages.len();
+            if consolidate_session(session, provider.as_ref(), model, config).await? {
+                let messages_after = session.messages.len();
+                let consolidated = messages_before.saturating_sub(messages_after);
+
+                for hook in &self.hooks {
+                    hook.on_consolidate(session, consolidated).await?;
+                }
+            }
+        } else if self.auto_consolidation
+            && let Some(strategy) = &self.consolidation
+            && strategy.should_consolidate(session).await
+        {
+            let messages_before = session.messages.len();
+            if strategy.consolidate(session).await? {
+                let messages_after = session.messages.len();
+                let consolidated = messages_before.saturating_sub(messages_after);
+
+                for hook in &self.hooks {
+                    hook.on_consolidate(session, consolidated).await?;
+                }
+            }
+        }
+
+        self.store.save(session).await?;
+
+        for hook in &self.hooks {
+            hook.on_after_save(session).await?;
+        }
+
+        Ok(())
+    }
+
     /// Forces a consolidation pass for the given session.
     pub async fn consolidate_now(
         &self,
@@ -125,6 +176,42 @@ impl SessionManager {
 
         let messages_before = session.messages.len();
         let consolidated = strategy.consolidate(session).await?;
+        let outcome = if consolidated {
+            let messages_after = session.messages.len();
+            let removed = messages_before.saturating_sub(messages_after);
+
+            for hook in &self.hooks {
+                hook.on_consolidate(session, removed).await?;
+            }
+
+            ConsolidationOutcome::Consolidated { removed }
+        } else {
+            ConsolidationOutcome::Skipped
+        };
+
+        self.store.save(session).await?;
+
+        for hook in &self.hooks {
+            hook.on_after_save(session).await?;
+        }
+
+        Ok(outcome)
+    }
+
+    /// Forces a consolidation pass using the provided config instead of the manager defaults.
+    pub async fn consolidate_now_with_config(
+        &self,
+        session: &mut Session,
+        provider: &Arc<dyn LLMProvider>,
+        model: &str,
+        config: &ConsolidationConfig,
+    ) -> SessionResult<ConsolidationOutcome> {
+        for hook in &self.hooks {
+            hook.on_before_save(session).await?;
+        }
+
+        let messages_before = session.messages.len();
+        let consolidated = consolidate_session(session, provider.as_ref(), model, config).await?;
         let outcome = if consolidated {
             let messages_after = session.messages.len();
             let removed = messages_before.saturating_sub(messages_after);

@@ -82,6 +82,7 @@ impl Tool for ShellTool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     args_json: &str,
     default_working_dir: &Path,

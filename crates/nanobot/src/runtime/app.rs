@@ -10,6 +10,7 @@ use nanobot_bus::MessageBus;
 use nanobot_config::schema::Config;
 use nanobot_cron::CronService;
 use nanobot_provider::make_provider;
+use nanobot_session::ConsolidationConfig;
 
 /// All runtime services for a running nanobot instance.
 #[derive(Clone)]
@@ -61,14 +62,19 @@ pub async fn build_runtime(config: Config) -> NanobotResult<RuntimeBundle> {
 
     let mut builder = AgentLoopBuilder::new(bus.clone(), provider, workspace)
         .with_config(agent_config)
-        .with_keep_recent(defaults.keep_recent)
+        .with_consolidation_config(ConsolidationConfig {
+            min_messages: defaults.consolidation_min_messages,
+            keep_recent: defaults.consolidation_keep_recent,
+            max_tokens: defaults.consolidation_summary_max_tokens,
+        })
         .with_web_config(config.tools.web.clone())
         .with_exec_config(config.tools.exec.clone())
         .with_mcp_servers(config.tools.mcp_servers.clone())
         .with_restrict_to_workspace(config.tools.restrict_to_workspace)
         .with_cron_service(cron.clone())
+        .with_channel_configs(config.channels.clone())
         .with_send_usage_summary(config.channels.send_usage_summary)
-        .with_auto_consolidation(config.agents.defaults.auto_consolidate);
+        .with_auto_consolidation(config.agents.defaults.consolidation_enabled);
 
     // ACP 不是主 provider，而是一个按需注入的“外部编码代理工具”。
     // 这样可以保持主对话模型与外部 coding agent 的职责解耦。
