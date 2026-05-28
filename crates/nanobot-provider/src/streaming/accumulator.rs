@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use crate::{LLMResponse, ToolCallRequest, ToolName, UsageStats};
+use crate::{LLMResponse, ThinkingBlock, ToolCallRequest, ToolName, UsageStats};
 
 use super::events::StreamEvent;
 
 /// Accumulates streaming events to build a complete response.
 pub struct StreamAccumulator {
     content_blocks: Vec<String>,
-    thinking_blocks: Vec<String>,
+    thinking_blocks: Vec<ThinkingBlock>,
     tool_calls: HashMap<String, ToolCallBuilder>,
     tool_calls_by_index: HashMap<usize, String>,
     usage: UsageStats,
@@ -41,9 +41,19 @@ impl StreamAccumulator {
             }
             StreamEvent::ThinkingDelta { content } => {
                 if self.thinking_blocks.is_empty() {
-                    self.thinking_blocks.push(String::new());
+                    self.thinking_blocks.push(ThinkingBlock::new(String::new()));
                 }
-                self.thinking_blocks.last_mut().unwrap().push_str(content);
+                self.thinking_blocks
+                    .last_mut()
+                    .unwrap()
+                    .thinking
+                    .push_str(content);
+            }
+            StreamEvent::SignatureDelta { signature } => {
+                if self.thinking_blocks.is_empty() {
+                    self.thinking_blocks.push(ThinkingBlock::new(String::new()));
+                }
+                self.thinking_blocks.last_mut().unwrap().signature = Some(signature.clone());
             }
             StreamEvent::ToolCallStart { id, name, index } => {
                 self.tool_calls.insert(
@@ -98,7 +108,7 @@ impl StreamAccumulator {
             Some(self.content_blocks.join("\n\n"))
         };
 
-        let thinking_blocks = if self.thinking_blocks.is_empty() {
+        let thinking_blocks = if self.thinking_blocks.iter().all(|b| b.thinking.is_empty()) {
             None
         } else {
             Some(self.thinking_blocks)
@@ -190,7 +200,7 @@ mod tests {
         let response = acc.build_response();
         assert_eq!(
             response.thinking_blocks.as_deref(),
-            Some(&["Let me think... about this.".to_string()][..])
+            Some(&[ThinkingBlock::new("Let me think... about this.")][..])
         );
     }
 

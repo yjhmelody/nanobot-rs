@@ -20,6 +20,9 @@ pub enum StreamEvent {
     /// Thinking/reasoning content delta.
     ThinkingDelta { content: String },
 
+    /// Thinking signature delta (required by Anthropic extended thinking).
+    SignatureDelta { signature: String },
+
     /// Tool call started.
     ToolCallStart {
         id: String,
@@ -118,6 +121,13 @@ impl StreamEvent {
     pub fn thinking_delta(content: impl Into<String>) -> Self {
         Self::ThinkingDelta {
             content: content.into(),
+        }
+    }
+
+    /// Creates a thinking signature delta event.
+    pub fn signature_delta(signature: impl Into<String>) -> Self {
+        Self::SignatureDelta {
+            signature: signature.into(),
         }
     }
 

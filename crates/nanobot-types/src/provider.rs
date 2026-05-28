@@ -93,7 +93,7 @@ pub struct ChatMessage {
     pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Optional structured thinking blocks for long-form reasoning.
-    pub thinking_blocks: Option<Vec<String>>,
+    pub thinking_blocks: Option<Vec<ThinkingBlock>>,
 }
 
 impl ChatMessage {
@@ -137,7 +137,7 @@ impl ChatMessage {
         content: Option<String>,
         tool_calls: Option<Vec<AssistantToolCall>>,
         reasoning_content: Option<String>,
-        thinking_blocks: Option<Vec<String>>,
+        thinking_blocks: Option<Vec<ThinkingBlock>>,
     ) -> Self {
         Self {
             role: MessageRole::Assistant,
@@ -180,6 +180,87 @@ pub struct ToolCallRequest {
     pub name: ToolName,
     /// JSON payload for the tool arguments.
     pub arguments_json: String,
+}
+
+/// A structured thinking block with optional signature (required by Anthropic extended thinking).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThinkingBlock {
+    /// The thinking/reasoning text content.
+    pub thinking: String,
+    /// Signature for this thinking block, required by Anthropic extended thinking API
+    /// to be passed back on subsequent requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+impl ThinkingBlock {
+    /// Creates a new thinking block with text content only (no signature).
+    pub fn new(thinking: impl Into<String>) -> Self {
+        Self {
+            thinking: thinking.into(),
+            signature: None,
+        }
+    }
+
+    /// Creates a new thinking block with both text and an optional signature.
+    pub fn with_signature(thinking: impl Into<String>, signature: Option<String>) -> Self {
+        Self {
+            thinking: thinking.into(),
+            signature,
+        }
+    }
+}
+
+impl From<String> for ThinkingBlock {
+    fn from(thinking: String) -> Self {
+        Self::new(thinking)
+    }
+}
+
+impl From<&str> for ThinkingBlock {
+    fn from(thinking: &str) -> Self {
+        Self::new(thinking.to_string())
+    }
+}
+
+/// Generic reasoning/thinking configuration for LLM providers.
+///
+/// Supports both Anthropic-style thinking (type/budget_tokens) and
+/// OpenAI-compatible reasoning effort in a single provider-agnostic struct.
+///
+/// # Anthropic (thinking)
+/// - `type: "adaptive"` — model decides when to think (Claude 4.6+)
+/// - `type: "enabled"` + `budget_tokens: N` — fixed thinking budget (Claude 3.7/4.0-4.5)
+/// - omitted — no extended thinking
+///
+/// # OpenAI-compatible (reasoning_effort)
+/// - `effort: "low" | "medium" | "high" | "xhigh"` — reasoning depth
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ReasoningConfig {
+    /// Thinking type for Anthropic extended thinking.
+    /// Supported: "adaptive" (4.6+), "enabled" (3.7/4.0-4.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    /// Token budget for thinking (used when type="enabled" for Claude 3.7/4.0-4.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<i32>,
+    /// Reasoning effort for OpenAI-compatible providers.
+    /// Supported: "low", "medium", "high", "xhigh".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl ReasoningConfig {
+    /// Returns the effort value for OpenAI-compatible providers.
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref().filter(|s| !s.trim().is_empty())
+    }
+
+    /// Returns the thinking type for Anthropic.
+    pub fn thinking_type(&self) -> Option<&str> {
+        self.r#type.as_deref().filter(|s| !s.trim().is_empty())
+    }
 }
 
 /// Token usage statistics from provider responses.
@@ -232,7 +313,7 @@ pub struct LLMResponse {
     pub reasoning_content: Option<String>,
     #[serde(default)]
     /// Optional structured thinking blocks for long-form reasoning.
-    pub thinking_blocks: Option<Vec<String>>,
+    pub thinking_blocks: Option<Vec<ThinkingBlock>>,
 }
 
 impl LLMResponse {

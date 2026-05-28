@@ -10,7 +10,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use nanobot_provider::{AssistantToolCall, ChatMessage, MessageContent, MessageRole};
+use nanobot_provider::{
+    AssistantToolCall, ChatMessage, MessageContent, MessageRole, ThinkingBlock,
+};
 
 /// Arbitrary metadata attached to a session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -47,7 +49,7 @@ pub struct SessionEntry {
     pub reasoning_content: Option<String>,
     /// Optional structured thinking blocks from extended-thinking providers.
     #[serde(default)]
-    pub thinking_blocks: Option<Vec<String>>,
+    pub thinking_blocks: Option<Vec<ThinkingBlock>>,
 }
 
 impl SessionEntry {

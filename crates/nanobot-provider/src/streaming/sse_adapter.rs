@@ -170,7 +170,10 @@ impl AnthropicEventExt for AnthropicStreamEvent {
                     );
                     Vec::new()
                 }
-                AnthropicStreamContentBlock::Thinking { .. } => {
+                AnthropicStreamContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
                     parser.content_blocks.insert(
                         *index,
                         ContentBlockState {
@@ -179,7 +182,18 @@ impl AnthropicEventExt for AnthropicStreamEvent {
                             tool_call_name: None,
                         },
                     );
-                    Vec::new()
+                    let mut events = Vec::new();
+                    if let Some(text) = thinking
+                        && !text.trim().is_empty()
+                    {
+                        events.push(Ok(StreamEvent::thinking_delta(text.clone())));
+                    }
+                    if let Some(sig) = signature
+                        && !sig.trim().is_empty()
+                    {
+                        events.push(Ok(StreamEvent::signature_delta(sig.clone())));
+                    }
+                    events
                 }
                 AnthropicStreamContentBlock::Unknown => Vec::new(),
             },
@@ -202,7 +216,9 @@ impl AnthropicEventExt for AnthropicStreamEvent {
                 AnthropicStreamContentDelta::ThinkingDelta { thinking } => {
                     vec![Ok(StreamEvent::thinking_delta(thinking.clone()))]
                 }
-                AnthropicStreamContentDelta::SignatureDelta { .. } => Vec::new(),
+                AnthropicStreamContentDelta::SignatureDelta { signature } => {
+                    vec![Ok(StreamEvent::signature_delta(signature.clone()))]
+                }
                 AnthropicStreamContentDelta::Unknown => Vec::new(),
             },
             AnthropicStreamEvent::ContentBlockStop { index } => {

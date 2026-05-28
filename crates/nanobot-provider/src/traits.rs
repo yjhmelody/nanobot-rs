@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crate::ProviderResult;
 use crate::streaming::{StreamError, StreamEvent, StreamResponse};
 use nanobot_types::SessionKey;
-use nanobot_types::provider::{ChatMessage, LLMResponse};
+use nanobot_types::provider::{ChatMessage, LLMResponse, ReasoningConfig};
 use nanobot_types::tools::ToolDefinition;
 
 /// Request payload for LLM chat completion.
@@ -24,8 +24,10 @@ pub struct ChatRequest {
     pub max_tokens: i32,
     /// Sampling temperature (0.0 = deterministic, higher = more creative).
     pub temperature: f32,
-    /// Optional reasoning effort hint for providers that support extended thinking.
-    pub reasoning_effort: Option<String>,
+    /// Optional reasoning/thinking configuration.
+    ///
+    /// Provider-agnostic: Anthropic reads `r#type` / `budget_tokens`, OpenAI reads `effort`.
+    pub reasoning_effort: Option<ReasoningConfig>,
 }
 
 /// Trait for LLM providers supporting both streaming and non-streaming chat completions.
