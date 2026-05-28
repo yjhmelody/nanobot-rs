@@ -230,17 +230,18 @@ impl AnthropicEventExt for AnthropicStreamEvent {
                 Vec::new()
             }
             AnthropicStreamEvent::MessageDelta { delta, usage } => {
+                let mut events = Vec::new();
                 if let Some(delta) = delta
                     && let Some(reason) = delta.stop_reason.as_deref()
                 {
-                    return vec![Ok(StreamEvent::finish_reason_update(reason))];
+                    events.push(Ok(StreamEvent::finish_reason_update(reason)));
                 }
                 if let Some(usage) = usage
                     && let Some(tokens) = usage.output_tokens
                 {
-                    return vec![Ok(StreamEvent::usage_update(None, Some(tokens), None))];
+                    events.push(Ok(StreamEvent::usage_update(None, Some(tokens), None)));
                 }
-                Vec::new()
+                events
             }
             AnthropicStreamEvent::Error { error } => {
                 let message = error
