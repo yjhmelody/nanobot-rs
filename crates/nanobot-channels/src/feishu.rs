@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::extract::State;
@@ -32,7 +33,27 @@ const FEISHU_API_DEFAULT: &str = "https://open.feishu.cn";
 const FEISHU_TEXT_LIMIT: usize = 3000;
 const FEISHU_CALLBACK_LISTEN_DEFAULT: &str = "0.0.0.0:19820";
 const FEISHU_CALLBACK_PATH_DEFAULT: &str = "/feishu/events";
+/// Minimum new content (in chars) before flushing a batched edit.
+const FEISHU_EDIT_BATCH_NEW_CHARS: usize = 500;
+/// Minimum interval between batched edits.
+const FEISHU_EDIT_BATCH_INTERVAL: Duration = Duration::from_secs(2);
+/// Max edits per message before sharding to a new message. Feishu limit is 20.
+const FEISHU_EDIT_SHARD_EDITS: usize = 18;
+/// Max content length (in chars) before sharding to a new message.
+const FEISHU_EDIT_SHARD_CHARS: usize = 24000;
 const LOG_TARGET: &str = "nanobot::channels::feishu";
+
+/// Per-stream state for batching edit API calls and sharding long streams.
+struct StreamEditState {
+    /// The actual message_id being edited (may differ from the dispatch key after sharding).
+    actual_message_id: String,
+    /// Number of edits performed on the current message.
+    edit_count: usize,
+    /// Content length (in chars) at last successful flush.
+    last_flushed_len: usize,
+    /// Timestamp of last successful flush.
+    last_flush: Instant,
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -173,6 +194,8 @@ pub struct FeishuChannel {
     callback_task: Mutex<Option<JoinHandle<()>>>,
     ws_task: Mutex<Option<JoinHandle<()>>>,
     tenant_access_token: Mutex<Option<CachedTenantAccessToken>>,
+    /// Per-stream edit state for batching + sharding.
+    edit_states: Mutex<HashMap<String, StreamEditState>>,
 }
 
 impl FeishuChannel {
@@ -248,6 +271,7 @@ impl FeishuChannel {
             callback_task: Mutex::new(None),
             ws_task: Mutex::new(None),
             tenant_access_token: Mutex::new(None),
+            edit_states: Mutex::new(HashMap::new()),
         })
     }
 
@@ -346,61 +370,96 @@ impl FeishuChannel {
         let verify_token = self.verify_token.clone();
         let running = self.running.clone();
 
-        let (payload_tx, mut payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let dispatcher = EventDispatcherHandler::builder()
-            .payload_sender(payload_tx)
-            .build();
+        let ws_task = tokio::spawn(async move {
+            const MAX_BACKOFF: Duration = Duration::from_secs(60);
+            let mut retry_delay = Duration::from_secs(1);
 
-        let payload_task = tokio::spawn(async move {
-            while let Some(payload) = payload_rx.recv().await {
+            loop {
                 if !running.load(Ordering::SeqCst) {
                     break;
                 }
-                match serde_json::from_slice::<FeishuIncomingEnvelope>(&payload) {
-                    Ok(envelope) => {
-                        if let Some(expected) = verify_token.as_deref()
-                            && !expected.is_empty()
-                        {
-                            let actual = envelope
-                                .header
-                                .as_ref()
-                                .and_then(|h| h.token.as_deref())
-                                .unwrap_or_default();
-                            if actual != expected {
-                                warn!(
-                                    target: LOG_TARGET,
-                                    "feishu WS event token mismatch: got '{}', expected '{}'",
-                                    actual,
-                                    expected
-                                );
-                                continue;
+
+                let (payload_tx, mut payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                let dispatcher = EventDispatcherHandler::builder()
+                    .payload_sender(payload_tx)
+                    .build();
+
+                let payload_task = tokio::spawn({
+                    let running = running.clone();
+                    let bus = bus.clone();
+                    let allow_from = allow_from.clone();
+                    let verify_token = verify_token.clone();
+                    async move {
+                        while let Some(payload) = payload_rx.recv().await {
+                            if !running.load(Ordering::SeqCst) {
+                                break;
                             }
-                        }
-                        match extract_inbound_message(&envelope, &allow_from) {
-                            Ok(Some(message)) => {
-                                if let Err(err) = bus.publish_inbound(message) {
-                                    warn!(target: LOG_TARGET, "feishu WS publish inbound failed: {}", err);
+                            match serde_json::from_slice::<FeishuIncomingEnvelope>(&payload) {
+                                Ok(envelope) => {
+                                    if let Some(expected) = verify_token.as_deref()
+                                        && !expected.is_empty()
+                                    {
+                                        let actual = envelope
+                                            .header
+                                            .as_ref()
+                                            .and_then(|h| h.token.as_deref())
+                                            .unwrap_or_default();
+                                        if actual != expected {
+                                            warn!(
+                                                target: LOG_TARGET,
+                                                "feishu WS event token mismatch: got '{}', expected '{}'",
+                                                actual,
+                                                expected
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    match extract_inbound_message(&envelope, &allow_from) {
+                                        Ok(Some(message)) => {
+                                            if let Err(err) = bus.publish_inbound(message) {
+                                                warn!(target: LOG_TARGET, "feishu WS publish inbound failed: {}", err);
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(err) => {
+                                            warn!(target: LOG_TARGET, "feishu WS event parse skipped: {}", err);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(target: LOG_TARGET, "feishu WS payload decode failed: {}", err);
                                 }
                             }
-                            Ok(None) => {}
-                            Err(err) => {
-                                warn!(target: LOG_TARGET, "feishu WS event parse skipped: {}", err);
-                            }
                         }
                     }
+                });
+
+                info!(target: LOG_TARGET, "feishu WebSocket connecting");
+                match LarkWsClient::open(ws_config.clone(), dispatcher).await {
+                    Ok(()) => {
+                        info!(target: LOG_TARGET, "feishu WebSocket closed");
+                        retry_delay = Duration::from_secs(1);
+                    }
                     Err(err) => {
-                        warn!(target: LOG_TARGET, "feishu WS payload decode failed: {}", err);
+                        error!(target: LOG_TARGET, "feishu WebSocket error: {}", err);
                     }
                 }
-            }
-        });
 
-        let ws_task = tokio::spawn(async move {
-            let result = LarkWsClient::open(ws_config, dispatcher).await;
-            if let Err(err) = result {
-                error!(target: LOG_TARGET, "feishu WebSocket client exited: {}", err);
+                payload_task.abort();
+
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                info!(
+                    target: LOG_TARGET,
+                    retry_delay_ms = retry_delay.as_millis(),
+                    "feishu WebSocket reconnecting in {}ms",
+                    retry_delay.as_millis()
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
             }
-            payload_task.abort();
         });
 
         *self.ws_task.lock().await = Some(ws_task);
@@ -1139,7 +1198,7 @@ impl ChannelAdapter for FeishuChannel {
     }
 
     async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
-        let text = msg.content.trim();
+        let text = msg.content.trim().to_string();
         if text.is_empty() {
             return Ok(());
         }
@@ -1147,8 +1206,46 @@ impl ChannelAdapter for FeishuChannel {
             let _ = self.send(msg).await?;
             return Ok(());
         }
-        self.update_message_by_app(message_id, &msg.chat_id, text)
-            .await
+
+        let content_len = text.chars().count();
+        let mut states = self.edit_states.lock().await;
+        let state = states
+            .entry(message_id.to_string())
+            .or_insert_with(|| StreamEditState {
+                actual_message_id: message_id.to_string(),
+                edit_count: 0,
+                last_flushed_len: 0,
+                last_flush: Instant::now(),
+            });
+
+        let new_chars = content_len.saturating_sub(state.last_flushed_len);
+        let elapsed = state.last_flush.elapsed();
+
+        // Batch: skip if not enough new content AND not enough time passed.
+        if new_chars < FEISHU_EDIT_BATCH_NEW_CHARS && elapsed < FEISHU_EDIT_BATCH_INTERVAL {
+            return Ok(());
+        }
+
+        // Shard: if the current message has too many edits or is too long,
+        // send a new message and switch to editing that one instead.
+        if state.edit_count >= FEISHU_EDIT_SHARD_EDITS || content_len >= FEISHU_EDIT_SHARD_CHARS {
+            let new_message_id = self.send_message_by_app(&msg.chat_id, &text).await?;
+            state.actual_message_id = new_message_id;
+            state.edit_count = 0;
+            state.last_flushed_len = content_len;
+            state.last_flush = Instant::now();
+            return Ok(());
+        }
+
+        // Normal edit on the current message.
+        self.update_message_by_app(&state.actual_message_id, &msg.chat_id, &text)
+            .await?;
+
+        state.edit_count += 1;
+        state.last_flushed_len = content_len;
+        state.last_flush = Instant::now();
+
+        Ok(())
     }
 
     fn supports_stream_updates(&self) -> bool {
