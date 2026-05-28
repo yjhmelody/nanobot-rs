@@ -6,15 +6,15 @@ use tracing::trace;
 
 use crate::anthropic_types::{
     AnthropicContentBlock, AnthropicErrorResponse, AnthropicInputContentBlock,
-    AnthropicInputMessage, AnthropicMessagesPayload, AnthropicMessagesResponse,
-    AnthropicToolDefinition, AnthropicUsage,
+    AnthropicInputMessage, AnthropicMessageRole, AnthropicMessagesPayload,
+    AnthropicMessagesResponse, AnthropicThinkingConfig, AnthropicToolDefinition, AnthropicUsage,
 };
 use crate::proxy::ProxyFallbackHelper;
 use crate::proxy::TARGET;
 use crate::streaming::{SseAdapter, StreamAdapter, StreamError, StreamResponse};
 use crate::{
     AssistantToolCall, ChatMessage, ChatRequest, LLMProvider, LLMResponse, MessageContent,
-    MessageRole, ToolCallRequest, UsageStats,
+    MessageRole, ThinkingBlock, ToolCallRequest, UsageStats,
 };
 use crate::{ProviderError, ProviderResult};
 
@@ -28,6 +28,32 @@ pub struct AnthropicProvider {
     default_model: String,
     extra_headers: HashMap<String, String>,
     proxy_helper: ProxyFallbackHelper,
+}
+
+#[test]
+fn anthropic_messages_include_reasoning_content_as_thinking() {
+    let assistant = ChatMessage::assistant(
+        Some("Final answer".to_string()),
+        None,
+        Some("chain of thought".to_string()),
+        None,
+    );
+
+    let (_, messages) = anthropic_messages_from_chat(vec![assistant]);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, AnthropicMessageRole::Assistant);
+    assert_eq!(
+        messages[0].content,
+        vec![
+            AnthropicInputContentBlock::Thinking {
+                thinking: "chain of thought".to_string(),
+                signature: None,
+            },
+            AnthropicInputContentBlock::Text {
+                text: "Final answer".to_string(),
+            },
+        ]
+    );
 }
 
 impl AnthropicProvider {
@@ -134,16 +160,22 @@ impl AnthropicProvider {
                         .collect()
                 })
             }),
+            thinking: req.reasoning_effort.as_ref().and_then(|r| {
+                r.thinking_type().map(|t| AnthropicThinkingConfig {
+                    r#type: t.to_string(),
+                    budget_tokens: r.budget_tokens,
+                })
+            }),
             stream: None,
         }
     }
 
-    async fn send_request(
+    async fn send_request<T: serde::Serialize + std::fmt::Debug>(
         &self,
         client: &reqwest::Client,
         request_kind: &str,
         endpoint: &str,
-        payload: &serde_json::Value,
+        payload: &T,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let headers = self.headers();
         trace!(
@@ -164,10 +196,10 @@ impl AnthropicProvider {
             .await
     }
 
-    async fn send_request_with_proxy_fallback(
+    async fn send_request_with_proxy_fallback<T: serde::Serialize + std::fmt::Debug>(
         &self,
         endpoint: &str,
-        payload: &serde_json::Value,
+        payload: &T,
     ) -> Result<reqwest::Response, String> {
         let primary = self
             .send_request(self.proxy_helper.client(), "primary", endpoint, payload)
@@ -229,9 +261,7 @@ impl LLMProvider for AnthropicProvider {
             .clone()
             .unwrap_or_else(|| self.default_model.clone());
         let endpoint = self.endpoint();
-        let payload = serde_json::to_value(self.build_payload(model, req)).map_err(|e| {
-            ProviderError::InvalidConfig(format!("Error serializing request: {}", e))
-        })?;
+        let payload = self.build_payload(model, req);
 
         let response = self
             .send_request_with_proxy_fallback(&endpoint, &payload)
@@ -276,11 +306,8 @@ impl LLMProvider for AnthropicProvider {
         // Enable streaming
         payload.stream = Some(true);
 
-        let payload_value = serde_json::to_value(payload)
-            .map_err(|e| StreamError::Provider(format!("Error serializing request: {}", e)))?;
-
         let response = self
-            .send_request_with_proxy_fallback(&endpoint, &payload_value)
+            .send_request_with_proxy_fallback(&endpoint, &payload)
             .await
             .map_err(StreamError::Network)?;
 
@@ -331,18 +358,38 @@ fn anthropic_messages_from_chat(
                     content.push(AnthropicInputContentBlock::Text { text });
                 }
                 if !content.is_empty() {
-                    anthropic_messages.push(AnthropicInputMessage::new("user", content));
+                    anthropic_messages.push(AnthropicInputMessage::new(
+                        AnthropicMessageRole::User,
+                        content,
+                    ));
                 }
             }
             MessageRole::Assistant => {
                 if !pending_tool_results.is_empty() {
                     anthropic_messages.push(AnthropicInputMessage::new(
-                        "user",
+                        AnthropicMessageRole::User,
                         std::mem::take(&mut pending_tool_results),
                     ));
                 }
 
                 let mut content = Vec::new();
+                if let Some(thinking_blocks) = message.thinking_blocks {
+                    for block in thinking_blocks {
+                        if !block.thinking.trim().is_empty() {
+                            content.push(AnthropicInputContentBlock::Thinking {
+                                thinking: block.thinking,
+                                signature: block.signature,
+                            });
+                        }
+                    }
+                } else if let Some(reasoning) = message.reasoning_content
+                    && !reasoning.trim().is_empty()
+                {
+                    content.push(AnthropicInputContentBlock::Thinking {
+                        thinking: reasoning,
+                        signature: None,
+                    });
+                }
                 if let Some(text) = message_content_text(message.content.as_ref())
                     && !text.trim().is_empty()
                 {
@@ -361,7 +408,10 @@ fn anthropic_messages_from_chat(
                 }
 
                 if !content.is_empty() {
-                    anthropic_messages.push(AnthropicInputMessage::new("assistant", content));
+                    anthropic_messages.push(AnthropicInputMessage::new(
+                        AnthropicMessageRole::Assistant,
+                        content,
+                    ));
                 }
             }
             MessageRole::Tool => {
@@ -378,7 +428,10 @@ fn anthropic_messages_from_chat(
     }
 
     if !pending_tool_results.is_empty() {
-        anthropic_messages.push(AnthropicInputMessage::new("user", pending_tool_results));
+        anthropic_messages.push(AnthropicInputMessage::new(
+            AnthropicMessageRole::User,
+            pending_tool_results,
+        ));
     }
 
     let system = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
@@ -410,9 +463,12 @@ fn parse_messages_response(resp: AnthropicMessagesResponse) -> LLMResponse {
                     arguments_json,
                 });
             }
-            AnthropicContentBlock::Thinking { thinking, .. } => {
+            AnthropicContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 if !thinking.trim().is_empty() {
-                    thinking_blocks.push(thinking);
+                    thinking_blocks.push(ThinkingBlock::with_signature(thinking, signature));
                 }
             }
         }
@@ -498,8 +554,8 @@ fn redact_api_key(value: &HeaderValue) -> String {
     format!("<redacted:{}>", suffix)
 }
 
-fn format_request_body(payload: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
+fn format_request_body<T: serde::Serialize>(payload: &T) -> String {
+    serde_json::to_string_pretty(payload).unwrap_or_else(|_| "<unprintable>".to_string())
 }
 
 fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
@@ -527,7 +583,7 @@ mod tests {
 
     use super::*;
 
-    use crate::{AssistantFunctionCall, ContentPart};
+    use crate::{AssistantFunctionCall, ContentPart, ReasoningConfig};
     use nanobot_types::tools::{JsonSchema, ToolDefinition};
 
     #[test]
@@ -543,7 +599,10 @@ mod tests {
                 },
             }]),
             None,
-            None,
+            Some(vec![
+                ThinkingBlock::new("reasoning-1"),
+                ThinkingBlock::new("reasoning-2"),
+            ]),
         );
         let tool = ChatMessage::tool_result("toolu_1", "read_file", "contents");
         let user = ChatMessage::user_parts(vec![ContentPart::Text {
@@ -560,17 +619,25 @@ mod tests {
 
         assert_eq!(system.as_deref(), Some("sys-a\n\nsys-b"));
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].role, AnthropicMessageRole::User);
         assert_eq!(
             messages[0].content,
             vec![AnthropicInputContentBlock::Text {
                 text: "hello".to_string()
             }]
         );
-        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].role, AnthropicMessageRole::Assistant);
         assert_eq!(
             messages[1].content,
             vec![
+                AnthropicInputContentBlock::Thinking {
+                    thinking: "reasoning-1".to_string(),
+                    signature: None,
+                },
+                AnthropicInputContentBlock::Thinking {
+                    thinking: "reasoning-2".to_string(),
+                    signature: None,
+                },
                 AnthropicInputContentBlock::Text {
                     text: "Calling tool".to_string()
                 },
@@ -581,7 +648,7 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[2].role, AnthropicMessageRole::User);
         assert_eq!(
             messages[2].content,
             vec![AnthropicInputContentBlock::ToolResult {
@@ -630,7 +697,10 @@ mod tests {
         assert_eq!(out.usage.total_tokens, Some(15));
         assert_eq!(
             out.thinking_blocks,
-            Some(vec!["inspect request".to_string()])
+            Some(vec![ThinkingBlock::with_signature(
+                "inspect request",
+                Some("sig".to_string())
+            )])
         );
     }
 
@@ -658,7 +728,10 @@ mod tests {
                 model: None,
                 max_tokens: 1024,
                 temperature: 1.5,
-                reasoning_effort: Some("high".to_string()),
+                reasoning_effort: Some(ReasoningConfig {
+                    effort: Some("high".to_string()),
+                    ..Default::default()
+                }),
             },
         );
 

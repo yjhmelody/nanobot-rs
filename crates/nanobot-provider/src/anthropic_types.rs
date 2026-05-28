@@ -22,22 +22,50 @@ pub(crate) struct AnthropicMessagesPayload {
     /// Optional tool definitions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tools: Option<Vec<AnthropicToolDefinition>>,
+    /// Optional thinking/reasoning configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking: Option<AnthropicThinkingConfig>,
     /// Enable streaming responses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stream: Option<bool>,
 }
 
+/// Thinking configuration for Anthropic extended thinking.
+///
+/// Spec: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnthropicThinkingConfig {
+    /// Thinking type: "adaptive" (4.6+) or "enabled" (3.7/4.0-4.5).
+    pub(crate) r#type: String,
+    /// Token budget for thinking when type="enabled".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) budget_tokens: Option<i32>,
+}
+
+/// Role for Anthropic input messages — only "user" and "assistant" are valid
+/// in the `messages` array (system is a top-level field).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AnthropicMessageRole {
+    User,
+    Assistant,
+}
+
 /// Input message structure for Anthropic requests.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AnthropicInputMessage {
-    /// Role string ("user" or "assistant").
-    pub(crate) role: &'static str,
+    /// Role for this message.
+    pub(crate) role: AnthropicMessageRole,
     /// Content blocks for the message.
     pub(crate) content: Vec<AnthropicInputContentBlock>,
 }
 
 impl AnthropicInputMessage {
-    pub(crate) fn new(role: &'static str, content: Vec<AnthropicInputContentBlock>) -> Self {
+    pub(crate) fn new(
+        role: AnthropicMessageRole,
+        content: Vec<AnthropicInputContentBlock>,
+    ) -> Self {
         Self { role, content }
     }
 }
@@ -66,6 +94,13 @@ pub(crate) enum AnthropicInputContentBlock {
         /// Whether the tool result represents an error.
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+    },
+    Thinking {
+        /// Thinking content that must be passed back in thinking mode.
+        thinking: String,
+        /// Signature, when provided by upstream.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
 }
 
