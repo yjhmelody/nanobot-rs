@@ -255,6 +255,9 @@ pub(crate) struct AnthropicStreamMessage {
     /// Message id.
     #[serde(default)]
     pub(crate) id: Option<String>,
+    /// Usage info from message_start.
+    #[serde(default)]
+    pub(crate) usage: Option<AnthropicStreamUsage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -320,4 +323,7 @@ pub(crate) struct AnthropicStreamUsage {
     /// Output token count, when provided.
     #[serde(default)]
     pub(crate) output_tokens: Option<i32>,
+    /// Input token count (from message_start), when provided.
+    #[serde(default)]
+    pub(crate) input_tokens: Option<i32>,
 }

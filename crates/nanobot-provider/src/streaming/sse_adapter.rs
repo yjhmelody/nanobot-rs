@@ -136,8 +136,16 @@ trait AnthropicEventExt {
 impl AnthropicEventExt for AnthropicStreamEvent {
     fn to_stream_events(&self, parser: &mut SseParser) -> Vec<Result<StreamEvent, StreamError>> {
         match self {
-            AnthropicStreamEvent::MessageStart { .. }
-            | AnthropicStreamEvent::MessageStop
+            AnthropicStreamEvent::MessageStart { message } => {
+                let mut events = Vec::new();
+                if let Some(usage) = message.as_ref().and_then(|m| m.usage.as_ref())
+                    && let Some(tokens) = usage.input_tokens
+                {
+                    events.push(Ok(StreamEvent::usage_update(Some(tokens), None, None)));
+                }
+                events
+            }
+            AnthropicStreamEvent::MessageStop
             | AnthropicStreamEvent::Ping
             | AnthropicStreamEvent::Unknown => Vec::new(),
             AnthropicStreamEvent::ContentBlockStart {
