@@ -52,7 +52,7 @@
 - `consolidationKeepRecent`: `10`
 - `consolidationMinMessages`: `20`
 - `consolidationSummaryMaxTokens`: `1000`
-- `reasoningEffort`: `null`
+- `reasoningEffort`: `null` — 推理/思考配置。详见 [§4](#4-reasoningeffort-推理思考配置)
 - `consolidationEnabled`: `true`
 
 校验规则：
@@ -115,7 +115,57 @@
 
 如果你主要在某个 channel（如 `lark`）跑长任务，建议把更大的参数放在该 channel 的 `agentOverrides`，避免全局都使用高成本配置。
 
-## 4. providers
+## 4. reasoningEffort（推理/思考配置）
+
+`reasoningEffort` 是 provider-agnostic 的推理/思考配置超集。
+
+各 provider 按 `providerType` 只读自己关心的字段，无关字段静默忽略。
+
+```jsonc
+{
+  "reasoningEffort": {
+    // --- Anthropic 字段 ---
+    "type": "adaptive",       // "adaptive" (Claude 4.6+) 或 "enabled" (4.0-4.5)
+    "budgetTokens": 4096,     // type="enabled" 时的 token 预算
+
+    // --- OpenAI / 兼容 provider 字段 ---
+    "effort": "xhigh"         // "low" | "medium" | "high" | "xhigh"
+  }
+}
+```
+
+### 各 provider 映射关系
+
+| Provider | 读取字段 | 序列化成 |
+|----------|---------|----------|
+| Anthropic | `type` + `budget_tokens` | `thinking: {type, budget_tokens?}` |
+| OpenAI-Compatible | `effort` | `reasoning: {effort}` |
+
+### 配置示例
+
+```jsonc
+// Anthropic Claude 4.6+ 自适应思考（模型自行决定是否思考）
+{ "reasoningEffort": { "type": "adaptive" } }
+
+// Anthropic Claude 3.7 / 4.0-4.5 固定思考预算
+{ "reasoningEffort": { "type": "enabled", "budgetTokens": 4096 } }
+
+// OpenAI Codex / o系列 深度思考
+{ "reasoningEffort": { "effort": "xhigh" } }
+
+// 不配置或为 null：不使用 reasoning/thinking
+{ "reasoningEffort": null }
+```
+
+### 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | `string` | 仅 Anthropic 使用。`"adaptive"`（Claude 4.6+）或 `"enabled"`（Claude 3.7/4.0-4.5）|
+| `budgetTokens` | `number` | 仅 Anthropic `type="enabled"` 时生效。思考 token 预算，须小于 `maxTokens` |
+| `effort` | `string` | 仅 OpenAI-compatible 使用。可选值：`low`, `medium`, `high`, `xhigh` |
+
+## 5. providers
 
 ### 4.1 当前支持的“模型提供商”范围
 
@@ -274,7 +324,7 @@ Feishu/Lark 额外字段：
 - `webhook` / `webhookUrl` / `url` / `botKey`
 - `appId` + `appSecret`
 
-## 6. tools
+## 7. tools
 
 - `web.proxy`: 可选 HTTP 代理
 - `web.search.apiKey`: `web_search` 所需 API key
@@ -286,7 +336,7 @@ Feishu/Lark 额外字段：
 - `restrictToWorkspace`: 是否限制文件工具在 workspace 内
 - `mcpServers`: MCP server 定义（每个 server 需至少提供 `command` 或 `url`）
 
-## 7. gateway
+## 8. gateway
 
 - `host`: 默认 `0.0.0.0`
 - `port`: 默认 `18790`
@@ -295,7 +345,7 @@ Feishu/Lark 额外字段：
 
 说明：当前二进制的 `gateway` 子命令会启动 channels + cron + heartbeat + agent loop。`host/port` 字段仅为保留配置，当前不生效，也不代表已暴露独立 HTTP API 服务。
 
-## 8. acp（可选）
+## 9. acp（可选）
 
 `acp` 配置用于注入 `acp_execute` 工具，典型字段：
 
