@@ -210,8 +210,7 @@ fn should_deliver(msg: &OutboundMessage, send_progress: bool, send_tool_hints: b
 
 fn canonical_channel_name(channel: &str) -> &str {
     for registration in channel_registrations() {
-        if registration.key == channel || registration.aliases.contains(&channel)
-        {
+        if registration.key == channel || registration.aliases.contains(&channel) {
             return registration.key;
         }
     }
