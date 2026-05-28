@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::{ConfigError, ConfigResult};
+use nanobot_types::provider::ReasoningConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Top-level configuration loaded from config files and defaults.
@@ -325,8 +326,10 @@ pub struct AgentDefaults {
     pub memory_window: usize,
     /// Number of recent messages kept as raw turns during consolidation.
     pub consolidation_keep_recent: usize,
-    /// Optional reasoning effort hint for supported providers.
-    pub reasoning_effort: Option<String>,
+    /// Optional reasoning/thinking configuration.
+    /// Provider-agnostic: Anthropic reads `type`/`budget_tokens`, OpenAI reads `effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningConfig>,
     /// Enables automatic session consolidation after saving turns.
     pub consolidation_enabled: bool,
     /// Minimum number of unconsolidated messages before consolidation runs.

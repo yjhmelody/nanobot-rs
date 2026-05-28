@@ -8,7 +8,7 @@ use crate::skills::SkillsLoader;
 use crate::traits::{ContextProvider, SkillsProvider};
 use nanobot_session::SessionManager;
 use nanobot_types::provider::{
-    AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole,
+    AssistantToolCall, ChatMessage, ContentPart, MessageContent, MessageRole, ThinkingBlock,
 };
 
 const IDENTITY_PROMPT_TEMPLATE: &str = "# nanobot\n\nYou are nanobot, a helpful AI assistant.\n\n## Runtime\nRust runtime\n\n## Workspace\nYour workspace is at: {workspace}\n- Long-term memory: {workspace}/memory/MEMORY.md\n- History log: {workspace}/memory/HISTORY.md\n- Custom skills: {workspace}/skills/{skill-name}/SKILL.md\n\n## nanobot Guidelines\n- State intent before tool calls, but NEVER predict or claim results before receiving them.\n- Before modifying a file, read it first. Do not assume files or directories exist.\n- After writing or editing a file, re-read it if accuracy matters.\n- If a tool call fails, analyze the error before retrying with a different approach.\n- Ask for clarification when the request is ambiguous.\n\nReply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.";
@@ -89,7 +89,7 @@ impl ContextBuilder {
         content: Option<String>,
         tool_calls: Option<Vec<AssistantToolCall>>,
         reasoning_content: Option<String>,
-        thinking_blocks: Option<Vec<String>>,
+        thinking_blocks: Option<Vec<ThinkingBlock>>,
     ) {
         messages.push(ChatMessage::assistant(
             content,

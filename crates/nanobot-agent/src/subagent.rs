@@ -27,7 +27,7 @@ struct SubagentManagerInner {
     model: String,
     temperature: f32,
     max_tokens: i32,
-    reasoning_effort: Option<String>,
+    reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
     running_tasks: DashMap<TaskId, JoinHandle<()>>,
     session_tasks: DashMap<SessionKey, DashMap<TaskId, ()>>,
 }
@@ -61,7 +61,7 @@ impl SubagentManager {
         model: String,
         temperature: f32,
         max_tokens: i32,
-        reasoning_effort: Option<String>,
+        reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
     ) -> Self {
         Self {
             inner: Arc::new(SubagentManagerInner {
@@ -191,7 +191,7 @@ impl SubagentManagerInner {
             &self.model,
             self.temperature,
             self.max_tokens,
-            self.reasoning_effort.as_deref(),
+            self.reasoning_effort.clone(),
         )
         .await;
 
@@ -279,7 +279,7 @@ async fn run_subagent_loop_impl(
     model: &str,
     temperature: f32,
     max_tokens: i32,
-    reasoning_effort: Option<&str>,
+    reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
 ) -> anyhow::Result<String> {
     let tool_defs = tools.definitions();
 
@@ -314,7 +314,7 @@ async fn run_subagent_loop_impl(
                 model: Some(model.to_string()),
                 max_tokens,
                 temperature,
-                reasoning_effort: reasoning_effort.map(|s| s.to_string()),
+                reasoning_effort: reasoning_effort.clone(),
             })
             .await
             .map_err(|e| anyhow::anyhow!("Subagent LLM provider error: {}", e))?;

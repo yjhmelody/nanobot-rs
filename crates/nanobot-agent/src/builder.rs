@@ -13,6 +13,7 @@ use nanobot_bus::MessageBus;
 use nanobot_config::schema::{ChannelsConfig, ExecToolConfig, MCPServerConfig, WebToolsConfig};
 use nanobot_cron::CronService;
 use nanobot_provider::LLMProvider;
+use nanobot_provider::ReasoningConfig;
 use nanobot_session::{
     ConsolidationConfig, FileMemoryProvider, JsonlSessionStore, LlmConsolidationStrategy,
     SessionManager,
@@ -28,7 +29,7 @@ pub struct AgentConfig {
     pub temperature: f32,
     pub max_tokens: i32,
     pub memory_window: usize,
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<ReasoningConfig>,
 }
 
 impl Default for AgentConfig {
