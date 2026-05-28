@@ -461,3 +461,147 @@ pub(crate) enum ResponsesOutputItem {
     #[serde(other)]
     Unknown,
 }
+
+// ============================================================================
+// Chat Completions Request Types
+// ============================================================================
+
+/// Chat completions API request payload.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ChatCompletionsPayload {
+    pub(crate) model: String,
+    pub(crate) messages: Vec<ChatCompletionsRequestMessage>,
+    pub(crate) temperature: f32,
+    pub(crate) max_tokens: i32,
+    pub(crate) stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tools: Option<Vec<ChatCompletionsRequestTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_effort: Option<String>,
+}
+
+/// A single message in a chat completions request.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ChatCompletionsRequestMessage {
+    pub(crate) role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_calls: Option<Vec<ChatCompletionsRequestToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_call_id: Option<String>,
+}
+
+/// A tool call inside an assistant request message.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ChatCompletionsRequestToolCall {
+    pub(crate) id: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) function: ChatCompletionsRequestFunctionCall,
+}
+
+/// Function call inside a request tool call.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ChatCompletionsRequestFunctionCall {
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+}
+
+/// Tool definition for chat completions request (nested under "function").
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ChatCompletionsRequestTool {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) function: ChatCompletionsRequestToolFunction,
+}
+
+/// Function metadata inside a request tool definition.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ChatCompletionsRequestToolFunction {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) parameters: JsonSchema,
+}
+
+// ============================================================================
+// Chat Completions Response Types
+// ============================================================================
+
+/// Chat completions API response payload.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChatCompletionsResponse {
+    pub choices: Vec<ChatCompletionsChoice>,
+    #[serde(default)]
+    pub usage: Option<ChatCompletionsUsage>,
+}
+
+/// A single choice (message) in a chat completions response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChatCompletionsChoice {
+    pub message: ChatCompletionsResponseMessage,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// Response message from chat completions.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChatCompletionsResponseMessage {
+    #[serde(default)]
+    pub content: Option<ChatCompletionsResponseContent>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ChatCompletionsResponseToolCall>>,
+    #[serde(default, alias = "reasoningContent")]
+    pub reasoning_content: Option<String>,
+}
+
+/// Message content that can be either a plain string or an array of content blocks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ChatCompletionsResponseContent {
+    Text(String),
+    Blocks(Vec<ChatCompletionsResponseContentBlock>),
+}
+
+/// A single content block inside a chat completions response message.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ChatCompletionsResponseContentBlock {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+/// A tool call inside a chat completions response message.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChatCompletionsResponseToolCall {
+    pub id: String,
+    pub function: ChatCompletionsResponseFunctionCall,
+}
+
+/// Function call details inside a response tool call.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChatCompletionsResponseFunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Token usage statistics from chat completions.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChatCompletionsUsage {
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+}
