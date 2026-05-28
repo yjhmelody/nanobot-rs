@@ -12,12 +12,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use open_lark::Config as OpenLarkConfig;
-use open_lark::auth::AuthService;
 use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
-use openlark_auth::AuthTokenProvider;
-use openlark_communication::im::v1::chat::list::ListChatsRequest;
-use openlark_communication::im::v1::message::models::UserIdType;
-use openlark_core::config::Config as OpenLarkCoreConfig;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -167,7 +162,6 @@ pub struct FeishuChannel {
     running: Arc<AtomicBool>,
     callback_task: Mutex<Option<JoinHandle<()>>>,
     ws_task: Mutex<Option<JoinHandle<()>>>,
-    openlark_core_config: Option<OpenLarkCoreConfig>,
     tenant_access_token: Mutex<Option<CachedTenantAccessToken>>,
 }
 
@@ -210,12 +204,6 @@ impl FeishuChannel {
 
         let callback_path = extra_string(&config, &["callbackPath", "eventPath"])
             .unwrap_or_else(|| FEISHU_CALLBACK_PATH_DEFAULT.to_string());
-        let openlark_core_config = match (app_id.as_ref(), app_secret.as_ref()) {
-            (Some(app_id), Some(app_secret)) => {
-                Some(build_openlark_core_config(app_id, app_secret, &api_base))
-            }
-            _ => None,
-        };
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -239,7 +227,6 @@ impl FeishuChannel {
             running: Arc::new(AtomicBool::new(false)),
             callback_task: Mutex::new(None),
             ws_task: Mutex::new(None),
-            openlark_core_config,
             tenant_access_token: Mutex::new(None),
         })
     }
@@ -263,54 +250,70 @@ impl FeishuChannel {
             })
     }
 
-    fn build_openlark_core_config(&self) -> ChannelResult<OpenLarkCoreConfig> {
-        self.openlark_core_config
-            .clone()
-            .ok_or_else(|| ChannelError::adapter("feishu", "appId/appSecret is not configured"))
-    }
-
     async fn verify_auth_connectivity(&self) -> ChannelResult<()> {
-        let config = self.build_openlark_core_config()?;
-        let auth = AuthService::new(config.clone());
-        let app_id = self
-            .app_id
-            .as_deref()
-            .ok_or_else(|| ChannelError::adapter("feishu", "appId is not configured"))?;
-        let app_secret = self
-            .app_secret
-            .as_deref()
-            .ok_or_else(|| ChannelError::adapter("feishu", "appSecret is not configured"))?;
-
-        auth.v3()
-            .tenant_access_token_internal()
-            .app_id(app_id)
-            .app_secret(app_secret)
-            .execute()
-            .await
-            .map_err(|err| {
-                ChannelError::adapter(
-                    "feishu",
-                    format!("startup auth connectivity check failed: {err}"),
-                )
-            })?;
+        self.fetch_tenant_access_token().await.map_err(|err| {
+            ChannelError::adapter(
+                "feishu",
+                format!("startup auth connectivity check failed: {err}"),
+            )
+        })?;
 
         info!(target: LOG_TARGET, "feishu startup auth connectivity check passed");
         Ok(())
     }
 
     async fn verify_im_readiness(&self) -> ChannelResult<()> {
-        let config = self.build_openlark_core_config()?;
-        ListChatsRequest::new(config)
-            .user_id_type(UserIdType::OpenId)
-            .page_size(1)
-            .execute()
+        let access_token = self.tenant_access_token().await.map_err(|err| {
+            ChannelError::adapter("feishu", format!("startup IM readiness auth failed: {err}"))
+        })?;
+        let url = format!(
+            "{}/open-apis/im/v1/chats",
+            self.api_base.trim_end_matches('/')
+        );
+        let response = self
+            .client
+            .get(url)
+            .query(&[("page_size", "1")])
+            .bearer_auth(access_token)
+            .send()
             .await
             .map_err(|err| {
                 ChannelError::adapter(
                     "feishu",
-                    format!("startup IM readiness check failed: {err}"),
+                    format!("startup IM readiness check request failed: {err}"),
                 )
             })?;
+        let status = response.status();
+        let body_text = response.text().await.map_err(|err| {
+            ChannelError::adapter(
+                "feishu",
+                format!("startup IM readiness response read failed: {err}"),
+            )
+        })?;
+        if !status.is_success() {
+            return Err(ChannelError::adapter(
+                "feishu",
+                format!("startup IM readiness http {}: {}", status, body_text),
+            ));
+        }
+
+        let body: FeishuApiResponse<serde_json::Value> =
+            serde_json::from_str(&body_text).map_err(|err| {
+                ChannelError::adapter(
+                    "feishu",
+                    format!("startup IM readiness parse failed: {err}; body={body_text}"),
+                )
+            })?;
+        if body.code != 0 {
+            return Err(ChannelError::adapter(
+                "feishu",
+                format!(
+                    "startup IM readiness rejected: code={} msg={}",
+                    body.code,
+                    body.msg.unwrap_or(body_text)
+                ),
+            ));
+        }
 
         info!(target: LOG_TARGET, "feishu startup IM readiness check passed");
         Ok(())
@@ -1000,6 +1003,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn env_var(key: &str) -> Option<String> {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     #[test]
     fn feishu_new_requires_delivery_config() {
         let cfg = GenericChannelConfig::default();
@@ -1041,20 +1051,32 @@ mod tests {
             ]
         );
     }
-}
 
-fn build_openlark_core_config(
-    app_id: &str,
-    app_secret: &str,
-    api_base: &str,
-) -> OpenLarkCoreConfig {
-    let base_config = OpenLarkCoreConfig::builder()
-        .app_id(app_id.to_string())
-        .app_secret(app_secret.to_string())
-        .base_url(api_base.to_string())
-        .enable_token_cache(true)
-        .req_timeout(Duration::from_secs(30))
-        .build();
-    let token_provider = AuthTokenProvider::new(base_config.clone());
-    base_config.with_token_provider(token_provider)
+    #[tokio::test]
+    async fn feishu_connectivity_check_with_env_credentials() {
+        let Some(app_id) = env_var("FEISHU_TEST_APP_ID") else {
+            return;
+        };
+        let Some(app_secret) = env_var("FEISHU_TEST_APP_SECRET") else {
+            return;
+        };
+
+        let mut cfg = GenericChannelConfig::default();
+        cfg.allow_from = vec!["*".to_string()];
+        cfg.extra.insert("appId".to_string(), json!(app_id));
+        cfg.extra.insert("appSecret".to_string(), json!(app_secret));
+        if let Some(api_base) = env_var("FEISHU_TEST_API_BASE") {
+            cfg.extra.insert("apiBase".to_string(), json!(api_base));
+        }
+
+        let channel = FeishuChannel::new(cfg, MessageBus::new()).expect("feishu channel");
+        channel
+            .verify_auth_connectivity()
+            .await
+            .expect("verify auth connectivity");
+        channel
+            .verify_im_readiness()
+            .await
+            .expect("verify IM readiness");
+    }
 }
