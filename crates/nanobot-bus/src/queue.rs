@@ -1,6 +1,11 @@
+use nanobot_types::text::truncate_utf8_prefix;
 use tokio::sync::broadcast;
+use tracing::info;
 
 use crate::{BusError, BusResult, InboundMessage, OutboundMessage};
+
+/// Maximum length of content preview in inbound message logs.
+const CONTENT_PREVIEW_MAX: usize = 120;
 
 /// Multi-subscriber message bus using broadcast channels.
 #[derive(Debug, Clone)]
@@ -27,6 +32,21 @@ impl MessageBus {
 
     /// Publishes an inbound message to all subscribers.
     pub fn publish_inbound(&self, msg: InboundMessage) -> BusResult<()> {
+        let preview = msg.content.as_text();
+        let preview = if preview.len() > CONTENT_PREVIEW_MAX {
+            truncate_utf8_prefix(preview.trim(), CONTENT_PREVIEW_MAX)
+        } else {
+            preview
+        };
+        info!(
+            target: "nanobot::bus",
+            channel = %msg.channel,
+            sender = %msg.sender_id,
+            chat_id = %msg.chat_id,
+            media = msg.media.len(),
+            content_preview = %preview,
+            "inbound message received"
+        );
         self.inbound_tx
             .send(msg)
             .map(|_| ())
@@ -40,6 +60,30 @@ impl MessageBus {
 
     /// Publishes an outbound message to all subscribers.
     pub fn publish_outbound(&self, msg: OutboundMessage) -> BusResult<()> {
+        let preview = truncate_utf8_prefix(msg.content.trim(), CONTENT_PREVIEW_MAX);
+        let msg_type = msg
+            .metadata
+            .message_id
+            .as_ref()
+            .map(|id| {
+                if id.is_progress() {
+                    "progress"
+                } else if id.is_tool_hint() {
+                    "tool_hint"
+                } else {
+                    "reply"
+                }
+            })
+            .unwrap_or("send");
+        info!(
+            target: "nanobot::bus",
+            channel = %msg.channel,
+            chat_id = %msg.chat_id,
+            media = msg.media.len(),
+            msg_type,
+            content_preview = %preview,
+            "outbound message sent"
+        );
         self.outbound_tx
             .send(msg)
             .map(|_| ())
