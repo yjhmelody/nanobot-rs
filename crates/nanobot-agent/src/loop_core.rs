@@ -27,6 +27,9 @@ use nanobot_types::provider::{ChatMessage, MessageContent, MessageRole, UsageSta
 use nanobot_types::task::TaskId;
 
 const TARGET: &str = "nanobot::agent";
+const INTERNAL_ERROR_PREFIX: &str = "⚠️ ";
+const SYSTEM_INFO_PREFIX: &str = "ℹ️ ";
+const SYSTEM_SUCCESS_PREFIX: &str = "✅ ";
 
 pub struct AgentLoop {
     pub(crate) bus: MessageBus,
@@ -55,6 +58,51 @@ struct OutboundEnvelope {
 
 impl AgentLoop {
     const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+
+    pub(crate) fn format_internal_error(message: impl AsRef<str>) -> String {
+        let message = message.as_ref().trim();
+        if message.starts_with(INTERNAL_ERROR_PREFIX) {
+            message.to_string()
+        } else {
+            format!("{INTERNAL_ERROR_PREFIX}{message}")
+        }
+    }
+
+    pub(crate) fn format_system_info(message: impl AsRef<str>) -> String {
+        let message = message.as_ref().trim();
+        if message.starts_with(SYSTEM_INFO_PREFIX) {
+            message.to_string()
+        } else {
+            format!("{SYSTEM_INFO_PREFIX}{message}")
+        }
+    }
+
+    pub(crate) fn format_system_success(message: impl AsRef<str>) -> String {
+        let message = message.as_ref().trim();
+        if message.starts_with(SYSTEM_SUCCESS_PREFIX) {
+            message.to_string()
+        } else {
+            format!("{SYSTEM_SUCCESS_PREFIX}{message}")
+        }
+    }
+
+    fn usage_summary_text(usage: &UsageStats) -> String {
+        let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
+        let completion_tokens = usage.completion_tokens.unwrap_or(0);
+        let total_tokens = usage
+            .total_tokens
+            .or_else(|| {
+                usage
+                    .prompt_tokens
+                    .zip(usage.completion_tokens)
+                    .map(|(prompt, completion)| prompt + completion)
+            })
+            .unwrap_or(0);
+        format!(
+            "Tokens: {} in / {} out / {} total",
+            prompt_tokens, completion_tokens, total_tokens
+        )
+    }
 
     async fn ensure_mcp_connected(&self) {
         if let Some(mcp) = &self.mcp
@@ -203,13 +251,10 @@ impl AgentLoop {
             .map(|m| m.message.content.clone())
             .unwrap_or_default();
         if self.send_usage_summary
-            && let Some(usage_text) = out.as_ref().and_then(|o| o.usage.as_ref()).map(|u| {
-                format!(
-                    "\n\n---\n_Tokens: {} in / {} out_",
-                    u.prompt_tokens.unwrap_or(0),
-                    u.completion_tokens.unwrap_or(0)
-                )
-            })
+            && let Some(usage_text) = out
+                .as_ref()
+                .and_then(|o| o.usage.as_ref())
+                .map(|u| format!("\n\n---\n_{}_", Self::usage_summary_text(u)))
         {
             content.push_str(&usage_text);
         }
@@ -262,9 +307,9 @@ impl AgentLoop {
         let cancelled_sub = self.tools.cancel_spawn_by_session(&session_key).await;
         let total = cancelled_main + cancelled_sub;
         let content = if total > 0 {
-            format!("\u{23f9} Stopped {} task(s).", total)
+            Self::format_system_success(format!("Stopped {} task(s).", total))
         } else {
-            "No active task to stop.".to_string()
+            Self::format_system_info("No active task to stop.")
         };
 
         let _ = self.bus.publish_outbound(OutboundMessage {
@@ -309,11 +354,10 @@ impl AgentLoop {
                     let usage_msg = OutboundMessage {
                         channel: out.message.channel.clone(),
                         chat_id: out.message.chat_id.clone(),
-                        content: format!(
-                            "**Tokens: {} in / {} out**",
-                            usage.prompt_tokens.unwrap_or(0),
-                            usage.completion_tokens.unwrap_or(0)
-                        ),
+                        content: Self::format_system_info(format!(
+                            "**{}**",
+                            Self::usage_summary_text(&usage)
+                        )),
                         reply_to: None,
                         media: Vec::new(),
                         metadata: MessageMetadata::default(),
@@ -331,7 +375,7 @@ impl AgentLoop {
                 let _ = self.bus.publish_outbound(OutboundMessage {
                     channel: msg.channel,
                     chat_id: msg.chat_id,
-                    content: format!("Error: {}", err),
+                    content: Self::format_internal_error(format!("Error: {}", err)),
                     reply_to: None,
                     media: Vec::new(),
                     metadata: msg.metadata,
@@ -461,9 +505,14 @@ impl AgentLoop {
             .await?;
 
         if outcome.exit_reason == LoopExitReason::ProviderError {
-            return Err(AgentError::loop_error(
-                "provider request failed; check provider config/network and retry",
-            ));
+            let detail = outcome
+                .error_detail
+                .as_deref()
+                .unwrap_or("provider error detail unavailable");
+            return Err(AgentError::loop_error(format!(
+                "provider request failed; check provider config/network and retry (session_key={}, channel={}, chat_id={}, detail={})",
+                session_key, msg.channel, msg.chat_id, detail
+            )));
         }
 
         self.save_turn(&mut session, outcome.messages, start_index);
@@ -501,7 +550,9 @@ impl AgentLoop {
             InboundCommand::Help => Ok(Some(OutboundMessage {
                 channel: msg.channel,
                 chat_id: msg.chat_id,
-                content: "\u{1f408} nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/compact - Consolidate session history\n/help - Show available commands".to_string(),
+                content: Self::format_system_info(
+                    "nanobot commands:\n/new - Start a new conversation\n/stop - Stop the current task\n/compact - Consolidate session history\n/help - Show available commands",
+                ),
                 reply_to: None,
                 media: Vec::new(),
                 metadata: msg.metadata,
@@ -512,7 +563,7 @@ impl AgentLoop {
                 Ok(Some(OutboundMessage {
                     channel: msg.channel,
                     chat_id: msg.chat_id,
-                    content: "\u{1f195} Starting a new conversation.".to_string(),
+                    content: Self::format_system_success("Starting a new conversation."),
                     reply_to: None,
                     media: Vec::new(),
                     metadata: msg.metadata,
@@ -522,15 +573,15 @@ impl AgentLoop {
                 let session_key = msg.session_key();
                 let mut session = self.sessions.get_or_create(session_key.as_str()).await?;
                 let content = match self.sessions.consolidate_now(&mut session).await {
-                    Err(e) => format!("Failed to consolidate: {}", e),
+                    Err(e) => Self::format_internal_error(format!("Failed to consolidate: {}", e)),
                     Ok(ConsolidationOutcome::Disabled) => {
-                        "Consolidation is not configured.".to_string()
+                        Self::format_system_info("Consolidation is not configured.")
                     }
                     Ok(ConsolidationOutcome::Skipped) => {
-                        "Not enough messages to consolidate yet.".to_string()
+                        Self::format_system_info("Not enough messages to consolidate yet.")
                     }
                     Ok(ConsolidationOutcome::Consolidated { removed }) => {
-                        format!("\u{2705} Consolidated {} messages.", removed)
+                        Self::format_system_success(format!("Consolidated {} messages.", removed))
                     }
                 };
                 Ok(Some(OutboundMessage {

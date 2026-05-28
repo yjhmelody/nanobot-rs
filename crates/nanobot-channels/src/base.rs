@@ -25,6 +25,12 @@ pub trait ChannelAdapter: Send + Sync {
     /// Deliver an outbound message to the external platform.
     async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome>;
 
+    /// Optionally create an initial placeholder for a streaming response.
+    async fn begin_stream(&self, msg: &OutboundMessage) -> ChannelResult<Option<SendOutcome>> {
+        let _ = msg;
+        Ok(None)
+    }
+
     /// Update an existing message on platforms that support edits.
     async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
         let _ = message_id;

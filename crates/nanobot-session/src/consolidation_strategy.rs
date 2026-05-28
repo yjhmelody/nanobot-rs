@@ -199,7 +199,16 @@ async fn generate_summary(
     let response = provider
         .chat(request)
         .await
-        .map_err(|e| anyhow::anyhow!("Consolidation LLM provider error: {}", e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Consolidation LLM provider error (model='{}', message_count={}, keep_recent={}, max_tokens={}): {}",
+                model,
+                messages.len(),
+                config.keep_recent,
+                config.max_tokens,
+                e
+            )
+        })?;
 
     let summary = response
         .content

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use super::TARGET;
+use crate::loop_core::AgentLoop;
 use nanobot_tools::{ToolContext, ToolRegistry};
 use nanobot_types::provider::ToolCallRequest;
 
@@ -48,7 +49,7 @@ impl ToolRunner {
                 );
                 ToolObservation {
                     tool_call_id: tool_call.id.clone(),
-                    content: format!("Error: {}", err),
+                    content: AgentLoop::format_internal_error(format!("Error: {}", err)),
                 }
             }
         }

@@ -159,6 +159,8 @@ pub struct FeishuChannel {
     callback_listen: Option<String>,
     callback_path: String,
     ws_enabled: bool,
+    stream_placeholder_enabled: bool,
+    stream_placeholder_text: String,
     running: Arc<AtomicBool>,
     callback_task: Mutex<Option<JoinHandle<()>>>,
     ws_task: Mutex<Option<JoinHandle<()>>>,
@@ -204,6 +206,14 @@ impl FeishuChannel {
 
         let callback_path = extra_string(&config, &["callbackPath", "eventPath"])
             .unwrap_or_else(|| FEISHU_CALLBACK_PATH_DEFAULT.to_string());
+        let stream_placeholder_enabled = extra_bool(
+            &config,
+            &["streamPlaceholderEnabled", "typingIndicatorEnabled"],
+        )
+        .unwrap_or(false);
+        let stream_placeholder_text =
+            extra_string(&config, &["streamPlaceholderText", "typingIndicatorText"])
+                .unwrap_or_else(|| "思考中...".to_string());
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -224,6 +234,8 @@ impl FeishuChannel {
             callback_listen,
             callback_path,
             ws_enabled,
+            stream_placeholder_enabled,
+            stream_placeholder_text,
             running: Arc::new(AtomicBool::new(false)),
             callback_task: Mutex::new(None),
             ws_task: Mutex::new(None),
@@ -395,12 +407,7 @@ impl FeishuChannel {
     }
 
     async fn send_message_by_app(&self, receive_id: &str, text: &str) -> ChannelResult<String> {
-        let content = serde_json::to_string(&FeishuTextContent {
-            text: text.to_string(),
-        })
-        .map_err(|err| {
-            ChannelError::adapter("feishu", format!("serialize content failed: {err}"))
-        })?;
+        let content = serialize_text_content(text)?;
 
         let mut last_err: Option<ChannelError> = None;
         for attempt in 0..2 {
@@ -596,6 +603,113 @@ impl FeishuChannel {
             .unwrap_or_else(|| ChannelError::adapter("feishu", "request tenant token failed")))
     }
 
+    async fn update_message_by_app(
+        &self,
+        message_id: &str,
+        receive_id: &str,
+        text: &str,
+    ) -> ChannelResult<()> {
+        let chunks = split_text(text, FEISHU_TEXT_LIMIT);
+        let first_chunk = chunks.first().cloned().unwrap_or_default();
+        let content = serialize_text_content(&first_chunk)?;
+
+        let mut last_err: Option<ChannelError> = None;
+        for attempt in 0..2 {
+            let token = if attempt == 0 {
+                self.tenant_access_token().await?
+            } else {
+                self.refresh_tenant_access_token().await?
+            };
+            match self
+                .update_message_by_app_with_token(message_id, &content, &token)
+                .await
+            {
+                Ok(()) => {
+                    for chunk in chunks.into_iter().skip(1) {
+                        self.send_message_by_app(receive_id, &chunk).await?;
+                    }
+                    return Ok(());
+                }
+                Err(err) if attempt == 0 && is_retryable_auth_send_error(&err) => {
+                    warn!(
+                        target: LOG_TARGET,
+                        "feishu app update failed with cached token, refreshing tenant token and retrying: {}",
+                        err
+                    );
+                    last_err = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            ChannelError::adapter("feishu", "update app message failed after retry")
+        }))
+    }
+
+    async fn update_message_by_app_with_token(
+        &self,
+        message_id: &str,
+        content: &str,
+        access_token: &str,
+    ) -> ChannelResult<()> {
+        let url = format!(
+            "{}/open-apis/im/v1/messages/{}",
+            self.api_base.trim_end_matches('/'),
+            message_id
+        );
+        let response = self
+            .client
+            .put(url)
+            .bearer_auth(access_token)
+            .json(&json!({
+                "msg_type": "text",
+                "content": content,
+            }))
+            .send()
+            .await
+            .map_err(|err| {
+                ChannelError::adapter(
+                    "feishu",
+                    format!("update app message request failed: {err}"),
+                )
+            })?;
+
+        let status = response.status();
+        let body_text = response.text().await.map_err(|err| {
+            ChannelError::adapter(
+                "feishu",
+                format!("read update message response failed: {err}"),
+            )
+        })?;
+        if !status.is_success() {
+            return Err(ChannelError::adapter(
+                "feishu",
+                format!("update app message http {}: {}", status, body_text),
+            ));
+        }
+
+        let body: FeishuApiResponse<serde_json::Value> =
+            serde_json::from_str(&body_text).map_err(|err| {
+                ChannelError::adapter(
+                    "feishu",
+                    format!("parse update message response failed: {err}; body={body_text}"),
+                )
+            })?;
+        if body.code != 0 {
+            return Err(ChannelError::adapter(
+                "feishu",
+                format!(
+                    "update app message rejected: code={} msg={}",
+                    body.code,
+                    body.msg.unwrap_or(body_text)
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn send_message_by_webhook(&self, text: &str) -> ChannelResult<()> {
         let webhook_url = self
             .webhook_url
@@ -745,6 +859,40 @@ impl ChannelAdapter for FeishuChannel {
 
     fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
+        let text = msg.content.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        if self.app_id.is_none() {
+            let _ = self.send(msg).await?;
+            return Ok(());
+        }
+        self.update_message_by_app(message_id, &msg.chat_id, text)
+            .await
+    }
+
+    fn supports_stream_updates(&self) -> bool {
+        self.app_id.is_some()
+    }
+
+    async fn begin_stream(&self, msg: &OutboundMessage) -> ChannelResult<Option<SendOutcome>> {
+        if !self.stream_placeholder_enabled || self.app_id.is_none() {
+            return Ok(None);
+        }
+
+        let message_id = self
+            .send_message_by_app(&msg.chat_id, &self.stream_placeholder_text)
+            .await?;
+        Ok(Some(SendOutcome {
+            message_id: if message_id.is_empty() {
+                None
+            } else {
+                Some(message_id)
+            },
+        }))
     }
 }
 
@@ -930,6 +1078,13 @@ fn split_text(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+fn serialize_text_content(text: &str) -> ChannelResult<String> {
+    serde_json::to_string(&FeishuTextContent {
+        text: text.to_string(),
+    })
+    .map_err(|err| ChannelError::adapter("feishu", format!("serialize content failed: {err}")))
+}
+
 fn floor_char_boundary(input: &str, max_len: usize) -> usize {
     let mut boundary = max_len.min(input.len());
     while boundary > 0 && !input.is_char_boundary(boundary) {
@@ -1052,6 +1207,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn feishu_reads_stream_placeholder_config() {
+        let mut cfg = GenericChannelConfig::default();
+        cfg.allow_from = vec!["*".to_string()];
+        cfg.extra.insert("appId".to_string(), json!("demo"));
+        cfg.extra.insert("appSecret".to_string(), json!("secret"));
+        cfg.extra
+            .insert("streamPlaceholderEnabled".to_string(), json!(true));
+        cfg.extra
+            .insert("streamPlaceholderText".to_string(), json!("处理中..."));
+
+        let channel = FeishuChannel::new(cfg, MessageBus::new()).expect("feishu channel");
+        assert!(channel.stream_placeholder_enabled);
+        assert_eq!(channel.stream_placeholder_text, "处理中...");
+    }
+
     #[tokio::test]
     async fn feishu_connectivity_check_with_env_credentials() {
         let Some(app_id) = env_var("FEISHU_TEST_APP_ID") else {
@@ -1061,8 +1232,10 @@ mod tests {
             return;
         };
 
-        let mut cfg = GenericChannelConfig::default();
-        cfg.allow_from = vec!["*".to_string()];
+        let mut cfg = GenericChannelConfig {
+            allow_from: vec!["*".to_string()],
+            ..GenericChannelConfig::default()
+        };
         cfg.extra.insert("appId".to_string(), json!(app_id));
         cfg.extra.insert("appSecret".to_string(), json!(app_secret));
         if let Some(api_base) = env_var("FEISHU_TEST_API_BASE") {

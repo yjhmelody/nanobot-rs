@@ -615,7 +615,7 @@ impl CronJobHandler for GatewayCronJobHandler {
                 job.payload.to.as_deref().unwrap_or("direct"),
             )
             .await
-            .unwrap_or_else(|e| format!("Error: {}", e));
+            .unwrap_or_else(|e| format!("⚠️ Error: {}", e));
 
         if job.payload.deliver
             && let Some(chat_id) = job.payload.to.as_deref()

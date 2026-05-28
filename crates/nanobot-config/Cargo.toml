@@ -6,6 +6,7 @@ license.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile.workspace = true
 
 [dependencies]
 nanobot-types.workspace = true

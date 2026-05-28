@@ -64,7 +64,7 @@ impl Planner {
             .provider
             .chat_stream(request.clone())
             .await
-            .map_err(map_stream_error)?;
+            .map_err(|err| map_stream_error(err, &config.model, config.iteration))?;
 
         let mut accumulator = StreamAccumulator::new();
         let mut progress_state = ProgressState::new();
@@ -74,7 +74,8 @@ impl Planner {
         let mut done_response = None;
 
         while let Some(event) = stream.next().await {
-            let event = event.map_err(map_stream_error)?;
+            let event =
+                event.map_err(|err| map_stream_error(err, &config.model, config.iteration))?;
             saw_event = true;
 
             match &event {
@@ -84,8 +85,8 @@ impl Planner {
                 }
                 StreamEvent::Error { message } => {
                     return Err(AgentError::loop_error(format!(
-                        "Provider stream error: {}",
-                        message
+                        "provider stream error (model='{}', iteration={}): {}",
+                        config.model, config.iteration, message
                     )));
                 }
                 StreamEvent::ToolCallStart { id, name, index } => {
@@ -136,10 +137,12 @@ impl Planner {
         }
 
         let response = if !saw_event {
-            self.provider
-                .chat(request)
-                .await
-                .map_err(|e| AgentError::loop_error(format!("LLM provider error: {}", e)))?
+            self.provider.chat(request).await.map_err(|e| {
+                AgentError::loop_error(format!(
+                    "llm provider error (model='{}', iteration={}): {}",
+                    config.model, config.iteration, e
+                ))
+            })?
         } else {
             done_response.unwrap_or_else(|| accumulator.build_response())
         };
@@ -251,8 +254,11 @@ impl ProgressState {
     }
 }
 
-fn map_stream_error(err: StreamError) -> AgentError {
-    AgentError::loop_error(format!("Provider stream error: {}", err))
+fn map_stream_error(err: StreamError, model: &str, iteration: usize) -> AgentError {
+    AgentError::loop_error(format!(
+        "provider stream error (model='{}', iteration={}): {}",
+        model, iteration, err
+    ))
 }
 
 struct ToolHintState {

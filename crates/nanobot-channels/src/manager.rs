@@ -15,15 +15,21 @@ use crate::placeholder::PlaceholderChannel;
 #[cfg(feature = "channel-telegram")]
 use crate::telegram::TelegramChannel;
 use nanobot_bus::{MessageBus, OutboundMessage};
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-feishu",
-    feature = "channel-discord"
-))]
 use nanobot_config::schema::GenericChannelConfig;
 use nanobot_config::schema::{ChannelsConfig, StreamMode};
 
 const LOG_TARGET: &str = "nanobot::channels::manager";
+
+type ChannelFactory =
+    fn(GenericChannelConfig, MessageBus) -> ChannelResult<Arc<dyn ChannelAdapter>>;
+
+struct ChannelRegistration {
+    key: &'static str,
+    aliases: &'static [&'static str],
+    config: fn(&ChannelsConfig) -> &GenericChannelConfig,
+    compiled_in: bool,
+    factory: Option<ChannelFactory>,
+}
 
 pub struct ChannelManager {
     config: ChannelsConfig,
@@ -37,45 +43,28 @@ impl ChannelManager {
         let mut channels: HashMap<String, Arc<dyn ChannelAdapter>> = HashMap::new();
         channels.insert("cli".to_string(), Arc::new(CliChannel::new()));
 
-        #[cfg(feature = "channel-telegram")]
-        if config.telegram.enabled {
-            validate_allow_from("telegram", &config.telegram)?;
-            let tg = TelegramChannel::new(config.telegram.clone(), bus.clone())?;
-            channels.insert("telegram".to_string(), Arc::new(tg));
-        }
-        #[cfg(not(feature = "channel-telegram"))]
-        if config.telegram.enabled {
-            return Err(ChannelError::config(
-                "telegram channel is enabled in config but not compiled in; rebuild with feature 'channel-telegram'",
-            ));
-        }
-
-        #[cfg(feature = "channel-feishu")]
-        if config.feishu.enabled {
-            validate_allow_from("feishu", &config.feishu)?;
-            let feishu = FeishuChannel::new(config.feishu.clone(), bus.clone())?;
-            channels.insert("feishu".to_string(), Arc::new(feishu));
-        }
-        #[cfg(not(feature = "channel-feishu"))]
-        if config.feishu.enabled {
-            return Err(ChannelError::config(
-                "feishu channel is enabled in config but not compiled in; rebuild with feature 'channel-feishu'",
-            ));
-        }
-
-        #[cfg(feature = "channel-discord")]
-        if config.discord.enabled {
-            validate_allow_from("discord", &config.discord)?;
+        for registration in channel_registrations() {
+            let cfg = (registration.config)(&config);
+            if !cfg.enabled {
+                continue;
+            }
+            validate_allow_from(registration.key, cfg)?;
+            if !registration.compiled_in {
+                return Err(ChannelError::config(format!(
+                    "{} channel is enabled in config but not compiled in; rebuild with feature 'channel-{}'",
+                    registration.key, registration.key
+                )));
+            }
+            let Some(factory) = registration.factory else {
+                return Err(ChannelError::config(format!(
+                    "{} channel is enabled but has no registered factory",
+                    registration.key
+                )));
+            };
             channels.insert(
-                "discord".to_string(),
-                Arc::new(PlaceholderChannel::new("discord")),
+                registration.key.to_string(),
+                factory(cfg.clone(), bus.clone())?,
             );
-        }
-        #[cfg(not(feature = "channel-discord"))]
-        if config.discord.enabled {
-            return Err(ChannelError::config(
-                "discord channel is enabled in config but not compiled in; rebuild with feature 'channel-discord'",
-            ));
         }
 
         Ok(Self {
@@ -164,12 +153,6 @@ impl ChannelManager {
             .collect()
     }
 }
-
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-feishu",
-    feature = "channel-discord"
-))]
 fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> ChannelResult<()> {
     if cfg.allow_from.is_empty() {
         return Err(ChannelError::config(format!(
@@ -226,10 +209,93 @@ fn should_deliver(msg: &OutboundMessage, send_progress: bool, send_tool_hints: b
 }
 
 fn canonical_channel_name(channel: &str) -> &str {
-    match channel {
-        "lark" => "feishu",
-        _ => channel,
+    for registration in channel_registrations() {
+        if registration.key == channel || registration.aliases.iter().any(|alias| *alias == channel)
+        {
+            return registration.key;
+        }
     }
+    channel
+}
+
+fn channel_registrations() -> Vec<ChannelRegistration> {
+    vec![
+        ChannelRegistration {
+            key: "telegram",
+            aliases: &[],
+            config: |cfg| &cfg.telegram,
+            compiled_in: cfg!(feature = "channel-telegram"),
+            factory: telegram_factory(),
+        },
+        ChannelRegistration {
+            key: "feishu",
+            aliases: &["lark"],
+            config: |cfg| &cfg.feishu,
+            compiled_in: cfg!(feature = "channel-feishu"),
+            factory: feishu_factory(),
+        },
+        ChannelRegistration {
+            key: "discord",
+            aliases: &[],
+            config: |cfg| &cfg.discord,
+            compiled_in: cfg!(feature = "channel-discord"),
+            factory: discord_factory(),
+        },
+    ]
+}
+
+#[cfg(feature = "channel-telegram")]
+fn build_telegram_channel(
+    cfg: GenericChannelConfig,
+    bus: MessageBus,
+) -> ChannelResult<Arc<dyn ChannelAdapter>> {
+    Ok(Arc::new(TelegramChannel::new(cfg, bus)?))
+}
+
+#[cfg(feature = "channel-telegram")]
+fn telegram_factory() -> Option<ChannelFactory> {
+    Some(build_telegram_channel)
+}
+
+#[cfg(not(feature = "channel-telegram"))]
+fn telegram_factory() -> Option<ChannelFactory> {
+    None
+}
+
+#[cfg(feature = "channel-feishu")]
+fn build_feishu_channel(
+    cfg: GenericChannelConfig,
+    bus: MessageBus,
+) -> ChannelResult<Arc<dyn ChannelAdapter>> {
+    Ok(Arc::new(FeishuChannel::new(cfg, bus)?))
+}
+
+#[cfg(feature = "channel-feishu")]
+fn feishu_factory() -> Option<ChannelFactory> {
+    Some(build_feishu_channel)
+}
+
+#[cfg(not(feature = "channel-feishu"))]
+fn feishu_factory() -> Option<ChannelFactory> {
+    None
+}
+
+#[cfg(feature = "channel-discord")]
+fn build_discord_channel(
+    _cfg: GenericChannelConfig,
+    _bus: MessageBus,
+) -> ChannelResult<Arc<dyn ChannelAdapter>> {
+    Ok(Arc::new(PlaceholderChannel::new("discord")))
+}
+
+#[cfg(feature = "channel-discord")]
+fn discord_factory() -> Option<ChannelFactory> {
+    Some(build_discord_channel)
+}
+
+#[cfg(not(feature = "channel-discord"))]
+fn discord_factory() -> Option<ChannelFactory> {
+    None
 }
 
 async fn dispatch_outbound(
@@ -271,7 +337,11 @@ async fn dispatch_outbound(
                 return Ok(());
             }
         } else if is_progress && channel.supports_stream_updates() {
-            let outcome = channel.send(msg).await?;
+            let outcome = if let Some(outcome) = channel.begin_stream(&msg).await? {
+                outcome
+            } else {
+                channel.send(msg).await?
+            };
             if let Some(sent_id) = outcome.message_id {
                 stream_registry.insert(key, sent_id);
             }

@@ -59,6 +59,7 @@ impl ReActExecutor {
                     LoopExitReason::Cancelled,
                     iterations,
                     last_usage.clone(),
+                    None,
                 ));
             }
 
@@ -74,6 +75,7 @@ impl ReActExecutor {
                             LoopExitReason::MaxIterations,
                             iterations,
                             last_usage.clone(),
+                            None,
                         ));
                     }
 
@@ -118,6 +120,7 @@ impl ReActExecutor {
                                         LoopExitReason::Finished,
                                         iterations,
                                         last_usage.clone(),
+                                        None,
                                     ));
                                 } else {
                                     return Ok(LoopOutcome::new(
@@ -126,6 +129,7 @@ impl ReActExecutor {
                                         LoopExitReason::Finished,
                                         iterations,
                                         last_usage.clone(),
+                                        None,
                                     ));
                                 }
                             } else {
@@ -180,6 +184,7 @@ impl ReActExecutor {
                                 LoopExitReason::ProviderError,
                                 iterations,
                                 last_usage.clone(),
+                                Some(err.to_string()),
                             ));
                         }
                     }
@@ -252,6 +257,7 @@ impl ReActExecutor {
                         reason,
                         iterations,
                         last_usage.clone(),
+                        None,
                     ));
                 }
             }
