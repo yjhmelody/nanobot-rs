@@ -49,6 +49,7 @@ impl ReActExecutor {
         let mut state = LoopState::QueryModel { iteration: 0 };
         let mut iterations = 0;
         let mut last_usage: Option<UsageStats> = None;
+        let mut loop_usage: Option<UsageStats> = None;
         loop {
             // Check cancellation
             if context.is_cancelled() {
@@ -59,6 +60,7 @@ impl ReActExecutor {
                     LoopExitReason::Cancelled,
                     iterations,
                     last_usage.clone(),
+                    loop_usage.clone(),
                     None,
                 ));
             }
@@ -75,6 +77,7 @@ impl ReActExecutor {
                             LoopExitReason::MaxIterations,
                             iterations,
                             last_usage.clone(),
+                            loop_usage.clone(),
                             None,
                         ));
                     }
@@ -86,6 +89,7 @@ impl ReActExecutor {
                     {
                         Ok(response) => {
                             last_usage = Some(response.usage.clone());
+                            accumulate_loop_usage(&mut loop_usage, &response.usage);
                             if response.is_truncated() {
                                 warn!(
                                     target: TARGET,
@@ -120,6 +124,7 @@ impl ReActExecutor {
                                         LoopExitReason::Finished,
                                         iterations,
                                         last_usage.clone(),
+                                        loop_usage.clone(),
                                         None,
                                     ));
                                 } else {
@@ -129,6 +134,7 @@ impl ReActExecutor {
                                         LoopExitReason::Finished,
                                         iterations,
                                         last_usage.clone(),
+                                        loop_usage.clone(),
                                         None,
                                     ));
                                 }
@@ -184,6 +190,7 @@ impl ReActExecutor {
                                 LoopExitReason::ProviderError,
                                 iterations,
                                 last_usage.clone(),
+                                loop_usage.clone(),
                                 Some(err.to_string()),
                             ));
                         }
@@ -257,6 +264,7 @@ impl ReActExecutor {
                         reason,
                         iterations,
                         last_usage.clone(),
+                        loop_usage.clone(),
                         None,
                     ));
                 }
@@ -295,4 +303,83 @@ fn truncate_tool_result(value: &str) -> String {
     }
     let truncated: String = value.chars().take(TOOL_RESULT_MAX_CHARS).collect();
     format!("{}\u{2026}", truncated)
+}
+
+fn effective_total_tokens(usage: &UsageStats) -> Option<u64> {
+    usage.total_tokens.or_else(|| {
+        usage
+            .prompt_tokens
+            .zip(usage.completion_tokens)
+            .map(|(p, c)| p + c)
+    })
+}
+
+fn accumulate_loop_usage(acc: &mut Option<UsageStats>, usage: &UsageStats) {
+    if usage.prompt_tokens.is_none()
+        && usage.completion_tokens.is_none()
+        && effective_total_tokens(usage).is_none()
+    {
+        return;
+    }
+
+    let mut current = acc.take().unwrap_or_default();
+
+    if let Some(v) = usage.prompt_tokens {
+        current.prompt_tokens = Some(current.prompt_tokens.unwrap_or(0) + v);
+    }
+    if let Some(v) = usage.completion_tokens {
+        current.completion_tokens = Some(current.completion_tokens.unwrap_or(0) + v);
+    }
+    if let Some(v) = effective_total_tokens(usage) {
+        current.total_tokens = Some(current.total_tokens.unwrap_or(0) + v);
+    } else if let (Some(p), Some(c)) = (current.prompt_tokens, current.completion_tokens) {
+        current.total_tokens = Some(p + c);
+    }
+
+    *acc = Some(current);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulate_loop_usage_sums_prompt_completion_and_total() {
+        let mut acc = None;
+        let first = UsageStats {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+        };
+        let second = UsageStats {
+            prompt_tokens: Some(8),
+            completion_tokens: Some(7),
+            total_tokens: Some(15),
+        };
+
+        accumulate_loop_usage(&mut acc, &first);
+        accumulate_loop_usage(&mut acc, &second);
+
+        let out = acc.expect("loop usage");
+        assert_eq!(out.prompt_tokens, Some(18));
+        assert_eq!(out.completion_tokens, Some(12));
+        assert_eq!(out.total_tokens, Some(30));
+    }
+
+    #[test]
+    fn accumulate_loop_usage_derives_total_when_missing() {
+        let mut acc = None;
+        let usage = UsageStats {
+            prompt_tokens: Some(3),
+            completion_tokens: Some(2),
+            total_tokens: None,
+        };
+
+        accumulate_loop_usage(&mut acc, &usage);
+
+        let out = acc.expect("loop usage");
+        assert_eq!(out.prompt_tokens, Some(3));
+        assert_eq!(out.completion_tokens, Some(2));
+        assert_eq!(out.total_tokens, Some(5));
+    }
 }

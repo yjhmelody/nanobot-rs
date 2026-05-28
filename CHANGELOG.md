@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 <!-- changelog-entries -->
 
+## [v0.0.8] - 2026-05-28
+
+### Changed
+- No notable changes.
+
+
 ## [v0.0.5] - 2026-05-27
 
 ### Added

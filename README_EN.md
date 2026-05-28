@@ -25,13 +25,13 @@ The early implementation of this project referenced:
 ## Use Cases
 
 - Build an extensible local AI agent quickly
-- Connect multi-turn conversations and tool calls via Telegram/CLI
+- Connect multi-turn conversations and tool calls via Telegram/Feishu/CLI
 - Switch between OpenAI-compatible and Anthropic-compatible gateways with one config format
 
 ## Current Capability Status
 
 - **Providers**: `anthropic`, `openai`, `custom`, plus arbitrary custom provider keys (HashMap-based)
-- **Channels**: `CLI` (available), `Telegram` (available), `Discord/Feishu` (placeholder)
+- **Channels**: `CLI` (available), `Telegram` (available), `Feishu/Lark` (available), `Discord` (placeholder)
 - **Run modes**: `agent` (interactive/single-shot) and `gateway` (channels + scheduler + heartbeat)
 
 ## Documentation

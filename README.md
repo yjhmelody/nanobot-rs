@@ -25,13 +25,13 @@
 ## 适用场景
 
 - 在本地快速搭建可扩展的 AI Agent
-- 通过 Telegram/CLI 接入多轮对话与工具调用
+- 通过 Telegram/Feishu/CLI 接入多轮对话与工具调用
 - 用统一配置切换 OpenAI-compatible 与 Anthropic-compatible 网关
 
 ## 当前能力状态
 
 - **Provider**：`anthropic`、`openai`、`custom`、任意自定义键（HashMap）
-- **Channel**：`CLI`（可用）、`Telegram`（可用）、`Discord/Feishu`（占位实现）
+- **Channel**：`CLI`（可用）、`Telegram`（可用）、`Feishu/Lark`（可用）、`Discord`（占位实现）
 - **运行模式**：`agent`（交互/单轮）与 `gateway`（渠道 + 调度 + 心跳）
 
 ## 文档

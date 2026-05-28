@@ -43,6 +43,8 @@ pub struct LoopOutcome {
     pub iterations: usize,
     /// Usage statistics for the final model call (if available).
     pub usage: Option<UsageStats>,
+    /// Aggregated usage statistics across all model calls in this loop.
+    pub loop_usage: Option<UsageStats>,
     /// Optional exit error details when loop exits on provider/runtime failures.
     pub error_detail: Option<String>,
 }
@@ -54,6 +56,7 @@ impl LoopOutcome {
         exit_reason: LoopExitReason,
         iterations: usize,
         usage: Option<UsageStats>,
+        loop_usage: Option<UsageStats>,
         error_detail: Option<String>,
     ) -> Self {
         Self {
@@ -62,6 +65,7 @@ impl LoopOutcome {
             exit_reason,
             iterations,
             usage,
+            loop_usage,
             error_detail,
         }
     }

@@ -594,7 +594,7 @@ impl AgentLoop {
         }
 
         Ok(Some(OutboundEnvelope {
-            usage: outcome.usage.clone(),
+            usage: outcome.loop_usage.clone().or(outcome.usage.clone()),
             message: OutboundMessage {
                 channel: msg.channel,
                 chat_id: msg.chat_id,
