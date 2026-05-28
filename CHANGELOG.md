@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 <!-- changelog-entries -->
 
+## [v0.0.9] - 2026-05-28
+
+### Added
+- feat(feishu): support image send and receive ([`07d14ff`](https://github.com/yjhmelody/nanobot-rs/commit/07d14ff270a62f1e19e074939db8fd7ef6762437))
+
+### Changed
+- fix agent loop stall handling ([`85acc36`](https://github.com/yjhmelody/nanobot-rs/commit/85acc36852a37063b3509688fbaa7c91643daa95))
+
+### Documentation
+- Fix changelog range handling and enforce tag-version alignment ([`1cf3c11`](https://github.com/yjhmelody/nanobot-rs/commit/1cf3c119e63b71c091ca14ea8be055e5ac12a90d))
+
+
 ## [v0.0.8] - 2026-05-28
 
 ### Added
