@@ -10,24 +10,20 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use base64::Engine;
-use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
+use chrono::Utc;
 use open_lark::Config as OpenLarkConfig;
 use open_lark::ws_client::{EventDispatcherHandler, LarkWsClient};
 use reqwest::Client;
 use reqwest::multipart::{Form, Part};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Sha256;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::base::{ChannelAdapter, SendOutcome, is_sender_allowed};
+use crate::base::{ChannelAdapter, SendOutcome};
 use crate::error::{ChannelError, ChannelResult};
-use nanobot_bus::{InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage};
-use nanobot_config::schema::GenericChannelConfig;
+use nanobot_bus::{MessageBus, OutboundMessage};
+use nanobot_config::schema::FeishuChannelConfig;
 
 const FEISHU_API_DEFAULT: &str = "https://open.feishu.cn";
 const FEISHU_TEXT_LIMIT: usize = 3000;
@@ -44,138 +40,13 @@ const FEISHU_EDIT_SHARD_CHARS: usize = 24000;
 const LOG_TARGET: &str = "nanobot::channels::feishu";
 
 /// Per-stream state for batching edit API calls and sharding long streams.
-struct StreamEditState {
-    /// The actual message_id being edited (may differ from the dispatch key after sharding).
-    actual_message_id: String,
-    /// Number of edits performed on the current message.
-    edit_count: usize,
-    /// Content length (in chars) at last successful flush.
-    last_flushed_len: usize,
-    /// Timestamp of last successful flush.
-    last_flush: Instant,
-}
-
-type HmacSha256 = Hmac<Sha256>;
-
-#[derive(Debug, Serialize)]
-struct FeishuWebhookMessage {
-    msg_type: String,
-    content: FeishuTextContent,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timestamp: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sign: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct FeishuTextContent {
-    text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuIncomingEnvelope {
-    #[serde(default)]
-    r#type: Option<String>,
-    #[serde(default)]
-    challenge: Option<String>,
-    #[serde(default)]
-    header: Option<FeishuEventHeader>,
-    #[serde(default)]
-    event: Option<FeishuMessageEvent>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuEventHeader {
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    event_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuMessageEvent {
-    #[serde(default)]
-    sender: Option<FeishuSender>,
-    #[serde(default)]
-    message: Option<FeishuMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuSender {
-    #[serde(default)]
-    sender_id: Option<FeishuSenderId>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuSenderId {
-    #[serde(default)]
-    open_id: Option<String>,
-    #[serde(default)]
-    union_id: Option<String>,
-    #[serde(default)]
-    user_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuMessage {
-    #[serde(default)]
-    message_id: Option<String>,
-    #[serde(default)]
-    chat_id: Option<String>,
-    #[serde(default)]
-    message_type: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
-}
-
-#[derive(Clone)]
-struct FeishuCallbackState {
-    bus: MessageBus,
-    allow_from: Vec<String>,
-    verify_token: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct CachedTenantAccessToken {
-    access_token: String,
-    expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuTenantTokenResponse {
-    #[serde(default)]
-    code: i64,
-    #[serde(default)]
-    msg: Option<String>,
-    #[serde(default)]
-    tenant_access_token: Option<String>,
-    #[serde(default)]
-    expire: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FeishuApiResponse<T> {
-    #[serde(default)]
-    code: i64,
-    #[serde(default)]
-    msg: Option<String>,
-    #[serde(default)]
-    data: Option<T>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct FeishuSendMessageData {
-    #[serde(default)]
-    message_id: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct FeishuUploadImageData {
-    #[serde(default)]
-    image_key: Option<String>,
-}
+pub mod types;
+pub mod util;
+use self::types::*;
+use self::util::*;
 
 pub struct FeishuChannel {
+    name: String,
     client: Client,
     bus: MessageBus,
     allow_from: Vec<String>,
@@ -199,14 +70,24 @@ pub struct FeishuChannel {
 }
 
 impl FeishuChannel {
-    pub fn new(config: GenericChannelConfig, bus: MessageBus) -> ChannelResult<Self> {
-        let api_base =
-            extra_string(&config, &["apiBase"]).unwrap_or_else(|| FEISHU_API_DEFAULT.to_string());
-        let webhook_url = build_webhook_url(&config, &api_base);
-        let secret = extra_string(&config, &["secret", "signSecret"]);
+    pub fn new(name: String, cfg: FeishuChannelConfig, bus: MessageBus) -> ChannelResult<Self> {
+        let api_base = cfg
+            .api_base
+            .clone()
+            .unwrap_or_else(|| FEISHU_API_DEFAULT.to_string());
+        let webhook_url = build_webhook_url(&cfg, &api_base);
+        let secret = None;
 
-        let app_id = extra_string(&config, &["appId", "app_id"]);
-        let app_secret = extra_string(&config, &["appSecret", "app_secret"]);
+        let app_id = if cfg.app_id.is_empty() {
+            None
+        } else {
+            Some(cfg.app_id.clone())
+        };
+        let app_secret = if cfg.app_secret.is_empty() {
+            None
+        } else {
+            Some(cfg.app_secret.clone())
+        };
         if (app_id.is_some() && app_secret.is_none()) || (app_id.is_none() && app_secret.is_some())
         {
             return Err(ChannelError::config(
@@ -219,32 +100,36 @@ impl FeishuChannel {
             ));
         }
 
-        let verify_token = extra_string(&config, &["verifyToken", "eventToken", "token"]);
-        let explicit_callback = extra_bool(&config, &["eventEnabled", "callbackEnabled"]);
-        let ws_enabled = extra_bool(&config, &["wsEnabled", "ws_enabled", "useWebSocket"])
+        let verify_token = match &cfg.verify_token {
+            Some(t) if !t.is_empty() => Some(t.clone()),
+            _ => None,
+        };
+        let explicit_callback = cfg.event_enabled;
+        let ws_enabled = cfg
+            .ws_enabled
             .unwrap_or_else(|| app_id.is_some() && explicit_callback != Some(true));
 
         let callback_listen = if explicit_callback == Some(true)
             || (explicit_callback.is_none() && app_id.is_some() && !ws_enabled)
         {
             Some(
-                extra_string(&config, &["callbackListen", "listen"])
+                cfg.callback_listen
+                    .clone()
                     .unwrap_or_else(|| FEISHU_CALLBACK_LISTEN_DEFAULT.to_string()),
             )
         } else {
             None
         };
 
-        let callback_path = extra_string(&config, &["callbackPath", "eventPath"])
+        let callback_path = cfg
+            .callback_path
+            .clone()
             .unwrap_or_else(|| FEISHU_CALLBACK_PATH_DEFAULT.to_string());
-        let stream_placeholder_enabled = extra_bool(
-            &config,
-            &["streamPlaceholderEnabled", "typingIndicatorEnabled"],
-        )
-        .unwrap_or(false);
-        let stream_placeholder_text =
-            extra_string(&config, &["streamPlaceholderText", "typingIndicatorText"])
-                .unwrap_or_else(|| "thinking...".to_string());
+        let stream_placeholder_enabled = cfg.stream_placeholder_enabled.unwrap_or(false);
+        let stream_placeholder_text = cfg
+            .stream_placeholder_text
+            .clone()
+            .unwrap_or_else(|| "thinking...".to_string());
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -253,9 +138,10 @@ impl FeishuChannel {
             })?;
 
         Ok(Self {
+            name,
             client,
             bus,
-            allow_from: config.allow_from,
+            allow_from: cfg.allow_from,
             api_base,
             webhook_url,
             secret,
@@ -365,6 +251,7 @@ impl FeishuChannel {
 
     async fn start_websocket(&self) -> ChannelResult<()> {
         let ws_config = Arc::new(self.build_openlark_ws_config()?);
+        let name = self.name.clone();
         let bus = self.bus.clone();
         let allow_from = self.allow_from.clone();
         let verify_token = self.verify_token.clone();
@@ -387,6 +274,7 @@ impl FeishuChannel {
                 let payload_task = tokio::spawn({
                     let running = running.clone();
                     let bus = bus.clone();
+                    let name = name.clone();
                     let allow_from = allow_from.clone();
                     let verify_token = verify_token.clone();
                     async move {
@@ -414,7 +302,7 @@ impl FeishuChannel {
                                             continue;
                                         }
                                     }
-                                    match extract_inbound_message(&envelope, &allow_from) {
+                                    match extract_inbound_message(&name, &envelope, &allow_from) {
                                         Ok(Some(message)) => {
                                             if let Err(err) = bus.publish_inbound(message) {
                                                 warn!(target: LOG_TARGET, "feishu WS publish inbound failed: {}", err);
@@ -1083,7 +971,7 @@ impl FeishuChannel {
 #[async_trait]
 impl ChannelAdapter for FeishuChannel {
     fn name(&self) -> &str {
-        "feishu"
+        &self.name
     }
 
     async fn start(&self) -> ChannelResult<()> {
@@ -1108,6 +996,7 @@ impl ChannelAdapter for FeishuChannel {
                 ChannelError::config(format!("invalid feishu.callbackListen '{}'", listen))
             })?;
             let state = FeishuCallbackState {
+                name: self.name.clone(),
                 bus: self.bus.clone(),
                 allow_from: self.allow_from.clone(),
                 verify_token: self.verify_token.clone(),
@@ -1296,7 +1185,7 @@ async fn feishu_event_handler(
         }
     }
 
-    match extract_inbound_message(&payload, &state.allow_from) {
+    match extract_inbound_message(&state.name, &payload, &state.allow_from) {
         Ok(Some(message)) => {
             if let Err(err) = state.bus.publish_inbound(message) {
                 error!(target: LOG_TARGET, "feishu publish inbound failed: {}", err);
@@ -1315,281 +1204,6 @@ async fn feishu_event_handler(
     (StatusCode::OK, Json(json!({ "code": 0 })))
 }
 
-fn extract_inbound_message(
-    payload: &FeishuIncomingEnvelope,
-    allow_from: &[String],
-) -> ChannelResult<Option<InboundMessage>> {
-    let event_type = payload
-        .header
-        .as_ref()
-        .and_then(|h| h.event_type.as_deref())
-        .unwrap_or_default();
-    if event_type != "im.message.receive_v1" {
-        return Ok(None);
-    }
-
-    let Some(event) = payload.event.as_ref() else {
-        return Ok(None);
-    };
-    let Some(message) = event.message.as_ref() else {
-        return Ok(None);
-    };
-    let message_type = message.message_type.as_deref().unwrap_or_default();
-    if message_type != "text" && message_type != "image" {
-        return Ok(None);
-    }
-
-    let sender_id = event
-        .sender
-        .as_ref()
-        .and_then(|s| s.sender_id.as_ref())
-        .and_then(|s| {
-            s.open_id
-                .as_deref()
-                .or(s.union_id.as_deref())
-                .or(s.user_id.as_deref())
-        })
-        .ok_or_else(|| ChannelError::adapter("feishu", "missing sender id"))?
-        .to_string();
-    if !is_sender_allowed(allow_from, &sender_id) {
-        return Ok(None);
-    }
-
-    let chat_id = message
-        .chat_id
-        .as_deref()
-        .ok_or_else(|| ChannelError::adapter("feishu", "missing chat_id"))?
-        .to_string();
-    let message_id = message
-        .message_id
-        .as_deref()
-        .ok_or_else(|| ChannelError::adapter("feishu", "missing message_id"))?
-        .to_string();
-    let content_json = message
-        .content
-        .as_deref()
-        .ok_or_else(|| ChannelError::adapter("feishu", "missing content"))?;
-    let content_value: serde_json::Value = serde_json::from_str(content_json)
-        .map_err(|err| ChannelError::adapter("feishu", format!("invalid content json: {}", err)))?;
-    let (text, media) = if message_type == "text" {
-        let text = content_value
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            return Ok(None);
-        }
-        (text, Vec::new())
-    } else {
-        let image_key = content_value
-            .get("image_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if image_key.is_empty() {
-            return Ok(None);
-        }
-        (
-            format!("[image: {}]", image_key),
-            vec![format!("feishu:image_key:{}", image_key)],
-        )
-    };
-
-    Ok(Some(InboundMessage {
-        channel: "feishu".to_string(),
-        sender_id,
-        chat_id,
-        content: text.into(),
-        timestamp: chrono::Utc::now(),
-        media,
-        metadata: MessageMetadata {
-            message_id: Some(MessageId::External(message_id)),
-            stream_id: None,
-        },
-        session_key_override: None,
-    }))
-}
-
-fn build_webhook_url(cfg: &GenericChannelConfig, api_base: &str) -> Option<String> {
-    let webhook_or_key = extra_string(cfg, &["webhook", "webhookUrl", "url", "botKey"])?;
-    if webhook_or_key.starts_with("http://") || webhook_or_key.starts_with("https://") {
-        return Some(webhook_or_key);
-    }
-    Some(format!(
-        "{}/open-apis/bot/v2/hook/{}",
-        api_base.trim_end_matches('/'),
-        webhook_or_key
-    ))
-}
-
-fn build_signature(timestamp: &str, secret: &str) -> ChannelResult<String> {
-    let string_to_sign = format!("{}\n{}", timestamp, secret);
-    let mut mac = HmacSha256::new_from_slice(string_to_sign.as_bytes()).map_err(|err| {
-        ChannelError::adapter("feishu", format!("failed to build signature key: {}", err))
-    })?;
-    mac.update(&[]);
-    Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
-}
-
-fn normalize_path(path: &str) -> String {
-    if path.is_empty() || path == "/" {
-        return FEISHU_CALLBACK_PATH_DEFAULT.to_string();
-    }
-    if path.starts_with('/') {
-        return path.to_string();
-    }
-    format!("/{}", path)
-}
-
-fn infer_file_name(input: &str) -> String {
-    let source = input.split('?').next().unwrap_or(input);
-    if source.ends_with('/') {
-        return "image.jpg".to_string();
-    }
-    let source = source.trim_end_matches('/');
-    if let Some(index) = source.find("://") {
-        let remainder = &source[index + 3..];
-        if !remainder.contains('/') {
-            return "image.jpg".to_string();
-        }
-    }
-    let name = source.rsplit('/').next().unwrap_or("image.jpg");
-    if name.is_empty() {
-        "image.jpg".to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-fn extract_feishu_image_key_ref(media_ref: &str) -> Option<&str> {
-    media_ref
-        .strip_prefix("feishu:image_key:")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn infer_image_mime_from_name(name: &str) -> Option<&'static str> {
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase());
-    match ext.as_deref() {
-        Some("png") => Some("image/png"),
-        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
-        Some("gif") => Some("image/gif"),
-        Some("webp") => Some("image/webp"),
-        Some("bmp") => Some("image/bmp"),
-        Some("tif") | Some("tiff") => Some("image/tiff"),
-        Some("heic") => Some("image/heic"),
-        Some("heif") => Some("image/heif"),
-        _ => None,
-    }
-}
-
-fn split_text(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
-        return vec![text.to_string()];
-    }
-    let mut content = text.to_string();
-    let mut chunks = Vec::new();
-    while !content.is_empty() {
-        if content.len() <= max_len {
-            chunks.push(content);
-            break;
-        }
-        let safe_end = floor_char_boundary(&content, max_len);
-        let cut = &content[..safe_end];
-        let mut pos = cut.rfind('\n').unwrap_or(0);
-        if pos == 0 {
-            pos = cut.rfind(' ').unwrap_or(safe_end);
-        }
-        if pos == 0 {
-            pos = safe_end;
-        }
-        chunks.push(content[..pos].to_string());
-        content = content[pos..].trim_start().to_string();
-    }
-    chunks
-}
-
-fn serialize_text_content(text: &str) -> ChannelResult<String> {
-    serde_json::to_string(&FeishuTextContent {
-        text: text.to_string(),
-    })
-    .map_err(|err| ChannelError::adapter("feishu", format!("serialize content failed: {err}")))
-}
-
-fn floor_char_boundary(input: &str, max_len: usize) -> usize {
-    let mut boundary = max_len.min(input.len());
-    while boundary > 0 && !input.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    boundary
-}
-
-fn is_retryable_auth_send_error(err: &ChannelError) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("401")
-        || message.contains("403")
-        || message.contains("99991661")
-        || message.contains("99991663")
-        || message.contains("invalid tenant access token")
-        || message.contains("access token")
-}
-
-fn is_success_response(body: &serde_json::Value) -> bool {
-    if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
-        return code == 0;
-    }
-    if let Some(code) = body.get("StatusCode").and_then(|v| v.as_i64()) {
-        return code == 0;
-    }
-    true
-}
-
-fn error_message(body: &serde_json::Value) -> String {
-    if let Some(v) = body
-        .get("msg")
-        .or_else(|| body.get("message"))
-        .or_else(|| body.get("StatusMessage"))
-        .and_then(|v| v.as_str())
-    {
-        return v.to_string();
-    }
-    body.to_string()
-}
-
-fn extra_string(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Some(v) = cfg.extra.get(*key).and_then(|v| v.as_str()) {
-            return Some(v.to_string());
-        }
-    }
-    None
-}
-
-fn extra_bool(cfg: &GenericChannelConfig, keys: &[&str]) -> Option<bool> {
-    for key in keys {
-        if let Some(v) = cfg.extra.get(*key) {
-            if let Some(value) = v.as_bool() {
-                return Some(value);
-            }
-            if let Some(value) = v.as_str() {
-                let normalized = value.trim().to_ascii_lowercase();
-                match normalized.as_str() {
-                    "true" | "1" | "yes" | "y" | "on" => return Some(true),
-                    "false" | "0" | "no" | "n" | "off" => return Some(false),
-                    _ => {}
-                }
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1604,8 +1218,8 @@ mod tests {
 
     #[test]
     fn feishu_new_requires_delivery_config() {
-        let cfg = GenericChannelConfig::default();
-        let out = FeishuChannel::new(cfg, MessageBus::new());
+        let cfg = FeishuChannelConfig::default();
+        let out = FeishuChannel::new("test".into(), cfg, MessageBus::new());
         assert!(out.is_err());
         assert!(
             out.err()
@@ -1617,10 +1231,13 @@ mod tests {
 
     #[test]
     fn feishu_accepts_bot_key() {
-        let mut cfg = GenericChannelConfig::default();
-        cfg.extra.insert("botKey".to_string(), json!("abc123"));
-        cfg.allow_from = vec!["*".to_string()];
-        let channel = FeishuChannel::new(cfg, MessageBus::new()).expect("feishu channel");
+        let cfg = FeishuChannelConfig {
+            allow_from: vec!["*".to_string()],
+            webhook_url: Some("abc123".to_string()),
+            ..Default::default()
+        };
+        let channel =
+            FeishuChannel::new("test".into(), cfg, MessageBus::new()).expect("feishu channel");
         assert_eq!(
             channel.webhook_url.as_deref(),
             Some("https://open.feishu.cn/open-apis/bot/v2/hook/abc123")
@@ -1646,18 +1263,17 @@ mod tests {
 
     #[test]
     fn feishu_reads_stream_placeholder_config() {
-        let mut cfg = GenericChannelConfig {
+        let cfg = FeishuChannelConfig {
             allow_from: vec!["*".to_string()],
-            ..GenericChannelConfig::default()
+            app_id: "demo".to_string(),
+            app_secret: "secret".to_string(),
+            stream_placeholder_enabled: Some(true),
+            stream_placeholder_text: Some("处理中...".to_string()),
+            ..Default::default()
         };
-        cfg.extra.insert("appId".to_string(), json!("demo"));
-        cfg.extra.insert("appSecret".to_string(), json!("secret"));
-        cfg.extra
-            .insert("streamPlaceholderEnabled".to_string(), json!(true));
-        cfg.extra
-            .insert("streamPlaceholderText".to_string(), json!("处理中..."));
 
-        let channel = FeishuChannel::new(cfg, MessageBus::new()).expect("feishu channel");
+        let channel =
+            FeishuChannel::new("test".into(), cfg, MessageBus::new()).expect("feishu channel");
         assert!(channel.stream_placeholder_enabled);
         assert_eq!(channel.stream_placeholder_text, "处理中...");
     }
@@ -1713,10 +1329,10 @@ mod tests {
             }
         }))
         .expect("parse payload");
-        let inbound =
-            extract_inbound_message(&payload, &["*".to_string()]).expect("extract inbound");
+        let inbound = extract_inbound_message("test_channel", &payload, &["*".to_string()])
+            .expect("extract inbound");
         let inbound = inbound.expect("image inbound exists");
-        assert_eq!(inbound.channel, "feishu");
+        assert_eq!(inbound.channel, "test_channel");
         assert_eq!(inbound.chat_id, "oc_test");
         assert_eq!(inbound.content_text(), "[image: img_v3_test]");
         assert_eq!(inbound.media, vec!["feishu:image_key:img_v3_test"]);
@@ -1731,17 +1347,16 @@ mod tests {
             return;
         };
 
-        let mut cfg = GenericChannelConfig {
+        let cfg = FeishuChannelConfig {
             allow_from: vec!["*".to_string()],
-            ..GenericChannelConfig::default()
+            app_id: app_id.clone(),
+            app_secret: app_secret.clone(),
+            api_base: env_var("FEISHU_TEST_API_BASE"),
+            ..Default::default()
         };
-        cfg.extra.insert("appId".to_string(), json!(app_id));
-        cfg.extra.insert("appSecret".to_string(), json!(app_secret));
-        if let Some(api_base) = env_var("FEISHU_TEST_API_BASE") {
-            cfg.extra.insert("apiBase".to_string(), json!(api_base));
-        }
 
-        let channel = FeishuChannel::new(cfg, MessageBus::new()).expect("feishu channel");
+        let channel =
+            FeishuChannel::new("test".into(), cfg, MessageBus::new()).expect("feishu channel");
         channel
             .verify_auth_connectivity()
             .await

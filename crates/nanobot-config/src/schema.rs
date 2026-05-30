@@ -75,17 +75,6 @@ impl Config {
     pub fn validate(&self) -> ConfigResult<()> {
         // Validate agent defaults
         self.agents.defaults.validate()?;
-        for (name, cfg) in [
-            ("channels.telegram", &self.channels.telegram),
-            ("channels.discord", &self.channels.discord),
-            ("channels.feishu", &self.channels.feishu),
-        ] {
-            if let Some(overrides) = &cfg.agent_overrides {
-                self.agents
-                    .defaults
-                    .validate_overrides(overrides, &format!("{name}.agentOverrides"))?;
-            }
-        }
 
         // Validate tools config
         self.tools.validate()?;
@@ -530,10 +519,10 @@ pub enum StreamMode {
     Append,
 }
 
-/// Configuration for outbound channel adapters.
+/// Default runtime settings shared across all channel instances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct ChannelsConfig {
+pub struct ChannelDefaults {
     /// Emit progress events during long-running tasks.
     pub send_progress: bool,
     /// Emit tool hints when tools are invoked.
@@ -542,43 +531,181 @@ pub struct ChannelsConfig {
     pub send_usage_summary: bool,
     /// Streaming message behavior for adapters that support edits.
     pub stream_mode: StreamMode,
-    /// Telegram channel configuration.
-    pub telegram: GenericChannelConfig,
-    /// Discord channel configuration.
-    pub discord: GenericChannelConfig,
-    /// Feishu channel configuration.
-    #[serde(alias = "lark")]
-    pub feishu: GenericChannelConfig,
 }
 
-impl Default for ChannelsConfig {
+impl Default for ChannelDefaults {
     fn default() -> Self {
         Self {
             send_progress: true,
             send_tool_hints: false,
             send_usage_summary: false,
             stream_mode: StreamMode::UpdateAll,
-            telegram: GenericChannelConfig::default(),
-            discord: GenericChannelConfig::default(),
-            feishu: GenericChannelConfig::default(),
         }
     }
 }
 
-/// Per-channel settings shared across adapters.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Configuration for outbound channel adapters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-pub struct GenericChannelConfig {
-    /// Whether the channel adapter is enabled.
+pub struct ChannelsConfig {
+    /// Default settings inherited by all instances.
+    pub defaults: ChannelDefaults,
+    /// Named channel instances, keyed by user-defined instance name.
+    pub instances: HashMap<String, ChannelInstanceConfig>,
+}
+
+/// A single named channel instance configuration.
+///
+/// Internally-tagged enum: the `channelType` field selects the variant,
+/// and the remaining fields are deserialized into the variant's struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "channelType", rename_all = "camelCase")]
+pub enum ChannelInstanceConfig {
+    #[serde(rename = "telegram")]
+    Telegram(TelegramChannelConfig),
+    #[serde(rename = "feishu", alias = "lark")]
+    Feishu(FeishuChannelConfig),
+}
+
+/// Telegram channel instance configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TelegramChannelConfig {
+    /// Whether this instance is enabled.
     pub enabled: bool,
     /// Allowed sender IDs or chat IDs.
+    #[serde(default)]
     pub allow_from: Vec<String>,
-    /// Optional per-channel overrides for agent runtime behavior.
+    /// Bot token.
+    pub token: String,
+    /// Optional API base URL override.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_overrides: Option<AgentRuntimeOverrides>,
-    #[serde(flatten)]
-    /// Adapter-specific extra fields.
-    pub extra: HashMap<String, serde_json::Value>,
+    pub api_base: Option<String>,
+    /// Override default: emit progress events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_progress: Option<bool>,
+    /// Override default: emit tool hints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_tool_hints: Option<bool>,
+    /// Override default: send usage summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_usage_summary: Option<bool>,
+    /// Override default: streaming message behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_mode: Option<StreamMode>,
+}
+
+impl Default for TelegramChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_from: Vec::new(),
+            token: String::new(),
+            api_base: None,
+            send_progress: None,
+            send_tool_hints: None,
+            send_usage_summary: None,
+            stream_mode: None,
+        }
+    }
+}
+
+/// Feishu / Lark channel instance configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FeishuChannelConfig {
+    /// Whether this instance is enabled.
+    pub enabled: bool,
+    /// Allowed sender IDs or chat IDs.
+    #[serde(default)]
+    pub allow_from: Vec<String>,
+    /// Feishu app ID.
+    pub app_id: String,
+    /// Feishu app secret.
+    pub app_secret: String,
+    /// Webhook URL (simple delivery mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
+    /// Verify token for event callbacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_token: Option<String>,
+    /// Optional API base URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_base: Option<String>,
+    /// Sign verification secret for webhook callbacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Enable event callback server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_enabled: Option<bool>,
+    /// Enable WebSocket mode (default: true when appId+appSecret present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_enabled: Option<bool>,
+    /// Callback server listen address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_listen: Option<String>,
+    /// Callback server path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_path: Option<String>,
+    /// Enable typing indicator placeholder during streaming.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_placeholder_enabled: Option<bool>,
+    /// Text for the streaming placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_placeholder_text: Option<String>,
+    /// Override default: emit progress events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_progress: Option<bool>,
+    /// Override default: emit tool hints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_tool_hints: Option<bool>,
+    /// Override default: send usage summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_usage_summary: Option<bool>,
+    /// Override default: streaming message behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_mode: Option<StreamMode>,
+}
+
+impl Default for FeishuChannelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_from: Vec::new(),
+            app_id: String::new(),
+            app_secret: String::new(),
+            webhook_url: None,
+            verify_token: None,
+            api_base: None,
+            secret: None,
+            event_enabled: None,
+            ws_enabled: None,
+            callback_listen: None,
+            callback_path: None,
+            stream_placeholder_enabled: None,
+            stream_placeholder_text: None,
+            send_progress: None,
+            send_tool_hints: None,
+            send_usage_summary: None,
+            stream_mode: None,
+        }
+    }
+}
+
+impl ChannelInstanceConfig {
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Telegram(c) => c.enabled,
+            Self::Feishu(c) => c.enabled,
+        }
+    }
+
+    pub fn allow_from(&self) -> &[String] {
+        match self {
+            Self::Telegram(c) => &c.allow_from,
+            Self::Feishu(c) => &c.allow_from,
+        }
+    }
 }
 
 /// Protocol type used by a provider endpoint.
@@ -1276,7 +1403,7 @@ mod tests {
         };
         assert!(
             defaults
-                .validate_overrides(&overrides, "channels.feishu.agentOverrides")
+                .validate_overrides(&overrides, "channels.instances.test.agentOverrides")
                 .is_err()
         );
     }
@@ -1291,7 +1418,7 @@ mod tests {
         };
         assert!(
             defaults
-                .validate_overrides(&overrides, "channels.feishu.agentOverrides")
+                .validate_overrides(&overrides, "channels.instances.test.agentOverrides")
                 .is_err()
         );
     }

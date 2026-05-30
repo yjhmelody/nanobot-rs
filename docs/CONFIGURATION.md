@@ -100,20 +100,16 @@
     }
   },
   "channels": {
-    "lark": {
-      "agentOverrides": {
-        "memoryWindow": 300,
-        "consolidationEnabled": true,
-        "consolidationKeepRecent": 80,
-        "consolidationMinMessages": 100,
-        "consolidationSummaryMaxTokens": 3500
+    "instances": {
+      "my_bot": {
+        "channelType": "feishu",
+        "appId": "cli_xxx",
+        "appSecret": "yyy",
+        "allowFrom": ["*"]
       }
     }
   }
 }
-```
-
-如果你主要在某个 channel（如 `lark`）跑长任务，建议把更大的参数放在该 channel 的 `agentOverrides`，避免全局都使用高成本配置。
 
 ## 4. reasoningEffort（推理/思考配置）
 
@@ -255,74 +251,124 @@ DeepSeek（Anthropic-compatible）示例：
 
 ## 5. channels
 
-### 5.1 当前支持的 channel（按源码状态）
+支持通过 `channels.instances` 配置多个通道实例，每个实例由 `channelType` 字段标识类型。公共默认值在 `channels.defaults` 中配置，各实例可覆盖。
 
-| Channel | 配置键 | 当前状态 |
+### 5.1 配置结构
+
+```json
+{
+  "channels": {
+    "defaults": {
+      "sendProgress": true,
+      "sendToolHints": false,
+      "sendUsageSummary": false,
+      "streamMode": "updateAll"
+    },
+    "instances": {
+      "<instance_name>": {
+        "channelType": "<type>",
+        "enabled": true,
+        "allowFrom": ["*"]
+      }
+    }
+  }
+}
+```
+
+### 5.2 当前支持的通道类型
+
+| 类型 | `channelType` 值 | 当前状态 |
 |---|---|---|
 | CLI | 无（内置） | 可用（本地终端） |
-| Telegram | `channels.telegram` | 可用（完整适配器） |
-| Discord | `channels.discord` | 占位实现（Placeholder） |
-| Feishu/Lark | `channels.feishu`（支持别名 `channels.lark`） | 可用（应用 API 对话 + 事件订阅入站；兼容 webhook 出站） |
+| Telegram | `"telegram"` | 可用 |
+| Feishu/Lark | `"feishu"` / `"lark"` | 可用 |
 
-说明：
+### 5.3 `defaults` 字段说明
 
-- `channels` 配置结构当前只定义了 `telegram/discord/feishu` 三个外部通道键；其中 `feishu` 支持配置别名 `lark`。
-- 其他未在结构中定义的 channel 键不会被当前运行时接入。
+- `sendProgress`（默认 `true`）— 是否发送进度事件
+- `sendToolHints`（默认 `false`）— 是否发送工具调用提示
+- `sendUsageSummary`（默认 `false`）— 是否在回复末尾附加 token 用量
+- `streamMode`（默认 `updateAll`，可选：`updateAll` / `updateProgress` / `append`）— 流式消息行为
 
-公共字段：
+### 5.4 实例通用字段
 
-- `sendProgress`（默认 `true`）
-- `sendToolHints`（默认 `false`）
-- `sendUsageSummary`（默认 `false`）
-- `streamMode`（默认 `updateAll`，可选：`updateAll` / `updateProgress` / `append`）
+每个实例配置中以下字段可选，覆盖 `defaults`：
 
-通道字段结构（`telegram` / `discord` / `feishu`）：
+- `sendProgress`（可选 `boolean`）
+- `sendToolHints`（可选 `boolean`）
+- `sendUsageSummary`（可选 `boolean`）
+- `streamMode`（可选 `string`）
 
-- `enabled: bool`
-- `allowFrom: string[]`
-- `agentOverrides?: object`
-- 其余字段通过 `extra` 承载（配置文件中直接写扁平字段）
-
-`agentOverrides` 当前支持：
-
-- `memoryWindow`
-- `consolidationEnabled`
-- `consolidationKeepRecent`
-- `consolidationMinMessages`
-- `consolidationSummaryMaxTokens`
-
-说明：
-
-- 这些覆盖值只对对应 channel 生效。
-- 典型用法是给 `feishu` 这种长任务入口设置更大的 `memoryWindow` 和更保守的 consolidation 参数。
-
-`allowFrom` 约束（启用通道时）：
+### 5.5 `allowFrom` 约束
 
 - 不能为空
 - 不允许空字符串或首尾空白
 - `*` 不能和显式 id 混用
 
-Telegram 额外字段：
+### 5.6 Telegram 实例专有字段
 
-- `token`（必填）
-- `apiBase`（可选，默认 `https://api.telegram.org`）
-- `receiveAck`（可选，默认 `false`）
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `token` | `string` | 是 | Bot token |
+| `apiBase` | `string` | 否 | API 地址，默认 `https://api.telegram.org` |
 
-Feishu/Lark 额外字段：
+配置示例：
 
-- `webhook`（可选；也可用 `webhookUrl` / `url` / `botKey`，用于 webhook 出站）
-- `appId` + `appSecret`（可选；两者需同时配置，用于应用 API 按 `chat_id` 回消息）
-- `secret`（可选；也可用 `signSecret`，用于签名）
-- `apiBase`（可选；仅在使用 `botKey` 时拼接 webhook，默认 `https://open.feishu.cn`）
-- `verifyToken`（可选；事件订阅 token 校验）
-- `callbackListen`（可选；默认 `0.0.0.0:19820`）
-- `callbackPath`（可选；默认 `/feishu/events`）
-- `eventEnabled`（可选；默认在 `appId/appSecret` 模式下为 `true`，关闭后仅出站）
+```json
+{
+  "channels": {
+    "instances": {
+      "public_bot": {
+        "channelType": "telegram",
+        "token": "bot123:abc",
+        "allowFrom": ["*"]
+      },
+      "admin_bot": {
+        "channelType": "telegram",
+        "token": "bot456:def",
+        "allowFrom": ["admin_chat_id"],
+        "sendProgress": false
+      }
+    }
+  }
+}
+```
 
-说明：`feishu` 启用时，至少需要配置以下其一：
+### 5.7 Feishu/Lark 实例专有字段
 
-- `webhook` / `webhookUrl` / `url` / `botKey`
-- `appId` + `appSecret`
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `appId` | `string` | 是（应用 API 模式） | 飞书应用 ID |
+| `appSecret` | `string` | 是（应用 API 模式） | 飞书应用 Secret |
+| `webhookUrl` | `string` | 否 | webhook 地址或 bot key。如果以 `http` 开头则直接使用，否则拼接为 `{apiBase}/open-apis/bot/v2/hook/{key}` |
+| `apiBase` | `string` | 否 | API 地址，默认 `https://open.feishu.cn` |
+| `verifyToken` | `string` | 否 | 事件订阅 token |
+| `secret` | `string` | 否 | Webhook 签名密钥 |
+| `eventEnabled` | `boolean` | 否 | 是否启动事件监听。默认：有 `appId+appSecret` 且非 WS 模式时为 `true` |
+| `wsEnabled` | `boolean` | 否 | 是否使用 WebSocket 替代回调服务器。默认：有 `appId+appSecret` 且 `eventEnabled` 未显式设为 `true` 时启用 |
+| `callbackListen` | `string` | 否 | 回调监听地址，默认 `0.0.0.0:19820` |
+| `callbackPath` | `string` | 否 | 回调路径，默认 `/feishu/events` |
+| `streamPlaceholderEnabled` | `boolean` | 否 | 流式响应时发送占位提示 |
+| `streamPlaceholderText` | `string` | 否 | 占位提示文本，默认 `"thinking..."` |
+
+配置示例：
+
+```json
+{
+  "channels": {
+    "instances": {
+      "my_feishu_bot": {
+        "channelType": "feishu",
+        "appId": "cli_xxx",
+        "appSecret": "yyy",
+        "allowFrom": ["*"]
+      }
+    }
+  }
+}
+```
+
+说明：Feishu 启用时至少需要配置 webhook URL 或 `appId+appSecret`。
 
 ## 7. tools
 

@@ -73,7 +73,7 @@ pub async fn build_runtime(config: Config) -> NanobotResult<RuntimeBundle> {
         .with_restrict_to_workspace(config.tools.restrict_to_workspace)
         .with_cron_service(cron.clone())
         .with_channel_configs(config.channels.clone())
-        .with_send_usage_summary(config.channels.send_usage_summary)
+        .with_send_usage_summary(config.channels.defaults.send_usage_summary)
         .with_auto_consolidation(config.agents.defaults.consolidation_enabled);
 
     // ACP 不是主 provider，而是一个按需注入的“外部编码代理工具”。

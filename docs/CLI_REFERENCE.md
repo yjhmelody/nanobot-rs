@@ -116,9 +116,10 @@ nanobot provider status github_copilot --config-dir <DIR>
 
 这些命令不是 CLI 子命令，而是聊天消息中的控制指令：
 
-- `/help`
-- `/stop`
-- `/new`
-- `/compact`
+- `/help` — 显示可用命令列表
+- `/cancel` — 优雅打断当前正在执行的 ReAct 循环，清空消息队列，已完成的 tool call 回合会保存到对话历史
+- `/stop` — 暴力中止当前会话的所有任务，不保存中间状态
+- `/new` — 清空当前会话历史，开始新对话
+- `/compact` — 手动触发会话压缩，合并早期消息为摘要
 
 它们由 `InboundCommand` 解析并在 `AgentLoop` 内部处理。

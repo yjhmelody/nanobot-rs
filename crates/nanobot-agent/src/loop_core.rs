@@ -19,8 +19,7 @@ use nanobot_bus::{
     InboundCommand, InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage,
 };
 use nanobot_config::schema::{AgentRuntimeOverrides, ChannelsConfig};
-use nanobot_provider::LLMProvider;
-use nanobot_provider::ReasoningConfig;
+use nanobot_provider::{LLMProvider, ReasoningConfig};
 use nanobot_session::{
     ConsolidationConfig, ConsolidationOutcome, Session, SessionEntry, SessionManager,
 };
@@ -147,18 +146,12 @@ impl AgentLoop {
         )
     }
 
-    fn runtime_settings_for_channel(&self, channel: &str) -> AgentRuntimeSettings {
-        let overrides = match channel {
-            "telegram" => self.channel_configs.telegram.agent_overrides.as_ref(),
-            "discord" => self.channel_configs.discord.agent_overrides.as_ref(),
-            "feishu" | "lark" => self.channel_configs.feishu.agent_overrides.as_ref(),
-            _ => None,
-        };
+    fn runtime_settings_for_channel(&self, _channel: &str) -> AgentRuntimeSettings {
         Self::merge_runtime_settings(
             self.memory_window,
             self.consolidation_enabled,
             &self.consolidation_config,
-            overrides,
+            None,
         )
     }
 
@@ -1148,6 +1141,48 @@ mod tests {
         Arc::new(AgentLoop {
             bus,
             provider: Arc::new(NoopProvider),
+            model: "test".to_string(),
+            max_iterations: 10,
+            temperature: 0.0,
+            max_tokens: 1024,
+            memory_window: 50,
+            reasoning_effort: None,
+            consolidation_config: ConsolidationConfig::default(),
+            consolidation_enabled: false,
+            channel_configs: ChannelsConfig::default(),
+            send_usage_summary: false,
+            tools: Arc::new(tools),
+            mcp: None,
+            context: Arc::new(
+                crate::context::ContextBuilder::new(tmp.path().to_path_buf()).unwrap(),
+            ),
+            sessions,
+            running: Arc::new(AtomicBool::new(true)),
+            session_locks: Arc::new(DashMap::new()),
+            active_tasks: Arc::new(DashMap::new()),
+            cancel_signals,
+            last_cleanup: Arc::new(parking_lot::Mutex::new(Instant::now())),
+        })
+    }
+
+    #[allow(dead_code)]
+    fn create_agent_loop_for_cancel(
+        bus: MessageBus,
+        provider: Arc<dyn LLMProvider>,
+    ) -> Arc<AgentLoop> {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let tools = ToolRegistryBuilder::new(tmp.path().to_path_buf())
+            .build()
+            .expect("test tool registry");
+
+        let store = Box::new(nanobot_session::InMemorySessionStore::new());
+        let sessions = Arc::new(SessionManager::new(store));
+
+        let cancel_signals: Arc<DashMap<SessionKey, CancelSignal>> = Arc::new(DashMap::new());
+
+        Arc::new(AgentLoop {
+            bus,
+            provider,
             model: "test".to_string(),
             max_iterations: 10,
             temperature: 0.0,

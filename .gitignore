@@ -5,3 +5,4 @@ build/
 target/**
 _plans/**
 .claude/settings.local.json
+config.json

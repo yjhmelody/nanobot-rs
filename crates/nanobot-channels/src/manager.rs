@@ -13,62 +13,74 @@ use crate::feishu::FeishuChannel;
 #[cfg(feature = "channel-telegram")]
 use crate::telegram::TelegramChannel;
 use nanobot_bus::{MessageBus, OutboundMessage};
-use nanobot_config::schema::GenericChannelConfig;
-use nanobot_config::schema::{ChannelsConfig, StreamMode};
+use nanobot_config::schema::{ChannelDefaults, ChannelInstanceConfig, ChannelsConfig, StreamMode};
 
 const LOG_TARGET: &str = "nanobot::channels::manager";
 
-type ChannelFactory =
-    fn(GenericChannelConfig, MessageBus) -> ChannelResult<Arc<dyn ChannelAdapter>>;
+/// Per-instance resolved runtime settings (defaults merged with overrides).
+#[derive(Debug, Clone)]
+pub struct InstanceRuntimeConfig {
+    pub send_progress: bool,
+    pub send_tool_hints: bool,
+    pub send_usage_summary: bool,
+    pub stream_mode: StreamMode,
+}
 
-struct ChannelRegistration {
-    key: &'static str,
-    aliases: &'static [&'static str],
-    config: fn(&ChannelsConfig) -> &GenericChannelConfig,
-    compiled_in: bool,
-    factory: Option<ChannelFactory>,
+fn resolve_runtime(
+    cfg: &ChannelInstanceConfig,
+    defaults: &ChannelDefaults,
+) -> InstanceRuntimeConfig {
+    let (sp, sth, sus, sm) = match cfg {
+        ChannelInstanceConfig::Telegram(c) => (
+            c.send_progress,
+            c.send_tool_hints,
+            c.send_usage_summary,
+            c.stream_mode,
+        ),
+        ChannelInstanceConfig::Feishu(c) => (
+            c.send_progress,
+            c.send_tool_hints,
+            c.send_usage_summary,
+            c.stream_mode,
+        ),
+    };
+    InstanceRuntimeConfig {
+        send_progress: sp.unwrap_or(defaults.send_progress),
+        send_tool_hints: sth.unwrap_or(defaults.send_tool_hints),
+        send_usage_summary: sus.unwrap_or(defaults.send_usage_summary),
+        stream_mode: sm.unwrap_or(defaults.stream_mode),
+    }
 }
 
 pub struct ChannelManager {
-    config: ChannelsConfig,
     bus: MessageBus,
     channels: HashMap<String, Arc<dyn ChannelAdapter>>,
+    runtime_configs: HashMap<String, InstanceRuntimeConfig>,
     dispatch_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ChannelManager {
     pub fn new(config: ChannelsConfig, bus: MessageBus) -> ChannelResult<Self> {
         let mut channels: HashMap<String, Arc<dyn ChannelAdapter>> = HashMap::new();
+        let mut runtime_configs: HashMap<String, InstanceRuntimeConfig> = HashMap::new();
+
         channels.insert("cli".to_string(), Arc::new(CliChannel::new()));
 
-        for registration in channel_registrations() {
-            let cfg = (registration.config)(&config);
-            if !cfg.enabled {
+        for (name, instance_cfg) in &config.instances {
+            if !instance_cfg.enabled() {
                 continue;
             }
-            validate_allow_from(registration.key, cfg)?;
-            if !registration.compiled_in {
-                return Err(ChannelError::config(format!(
-                    "{} channel is enabled in config but not compiled in; rebuild with feature 'channel-{}'",
-                    registration.key, registration.key
-                )));
-            }
-            let Some(factory) = registration.factory else {
-                return Err(ChannelError::config(format!(
-                    "{} channel is enabled but has no registered factory",
-                    registration.key
-                )));
-            };
-            channels.insert(
-                registration.key.to_string(),
-                factory(cfg.clone(), bus.clone())?,
-            );
+            validate_allow_from(name, instance_cfg)?;
+            let runtime = resolve_runtime(instance_cfg, &config.defaults);
+            let adapter = build_adapter(name.clone(), instance_cfg.clone(), bus.clone())?;
+            runtime_configs.insert(name.clone(), runtime);
+            channels.insert(name.clone(), adapter);
         }
 
         Ok(Self {
-            config,
             bus,
             channels,
+            runtime_configs,
             dispatch_task: Mutex::new(None),
         })
     }
@@ -87,9 +99,7 @@ impl ChannelManager {
 
         let bus = self.bus.clone();
         let channels = self.channels.clone();
-        let send_progress = self.config.send_progress;
-        let send_tool_hints = self.config.send_tool_hints;
-        let stream_mode = self.config.stream_mode;
+        let runtime_configs = self.runtime_configs.clone();
 
         let handle = tokio::spawn(async move {
             info!(target: LOG_TARGET, "outbound dispatcher started");
@@ -99,11 +109,20 @@ impl ChannelManager {
                 let Ok(msg) = outbound_rx.recv().await else {
                     continue;
                 };
-                if !should_deliver(&msg, send_progress, send_tool_hints) {
+                let channel_name = &msg.channel;
+
+                // Look up per-instance runtime config, fall back to defaults for CLI
+                if let Some(runtime) = runtime_configs.get(channel_name)
+                    && !should_deliver(&msg, runtime.send_progress, runtime.send_tool_hints)
+                {
                     continue;
                 }
-                let channel_name = canonical_channel_name(&msg.channel);
+
                 if let Some(channel) = channels.get(channel_name) {
+                    let stream_mode = runtime_configs
+                        .get(channel_name)
+                        .map(|r| r.stream_mode)
+                        .unwrap_or(StreamMode::UpdateAll);
                     if let Err(err) =
                         dispatch_outbound(channel.as_ref(), &mut stream_registry, msg, stream_mode)
                             .await
@@ -151,8 +170,10 @@ impl ChannelManager {
             .collect()
     }
 }
-fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> ChannelResult<()> {
-    if cfg.allow_from.is_empty() {
+
+fn validate_allow_from(name: &str, cfg: &ChannelInstanceConfig) -> ChannelResult<()> {
+    let allow_from = cfg.allow_from();
+    if allow_from.is_empty() {
         return Err(ChannelError::config(format!(
             "\"{}\" has empty allowFrom (denies all). set [\"*\"] or explicit ids",
             name
@@ -160,14 +181,14 @@ fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> ChannelResult<
     }
     let mut has_valid = false;
     let mut has_wildcard = false;
-    for entry in &cfg.allow_from {
+    for entry in allow_from {
         if entry.is_empty() {
             return Err(ChannelError::config(format!(
                 "\"{}\" has empty allowFrom entry. remove empty strings",
                 name
             )));
         }
-        if entry.trim() != entry {
+        if entry.trim() != entry.as_str() {
             return Err(ChannelError::config(format!(
                 "\"{}\" has allowFrom entry with leading/trailing whitespace: '{}'",
                 name, entry
@@ -178,7 +199,7 @@ fn validate_allow_from(name: &str, cfg: &GenericChannelConfig) -> ChannelResult<
         }
         has_valid = true;
     }
-    if has_wildcard && cfg.allow_from.len() > 1 {
+    if has_wildcard && allow_from.len() > 1 {
         return Err(ChannelError::config(format!(
             "\"{}\" has allowFrom '*' alongside explicit ids. keep only '*' or explicit ids",
             name
@@ -206,96 +227,39 @@ fn should_deliver(msg: &OutboundMessage, send_progress: bool, send_tool_hints: b
     true
 }
 
-fn canonical_channel_name(channel: &str) -> &str {
-    for registration in channel_registrations() {
-        if registration.key == channel || registration.aliases.contains(&channel) {
-            return registration.key;
+fn build_adapter(
+    name: String,
+    cfg: ChannelInstanceConfig,
+    bus: MessageBus,
+) -> ChannelResult<Arc<dyn ChannelAdapter>> {
+    match cfg {
+        ChannelInstanceConfig::Telegram(c) => {
+            #[cfg(feature = "channel-telegram")]
+            {
+                Ok(Arc::new(TelegramChannel::new(name, c, bus)?))
+            }
+            #[cfg(not(feature = "channel-telegram"))]
+            {
+                let _ = (name, c, bus);
+                Err(ChannelError::config(
+                    "telegram channel is enabled but not compiled in; rebuild with feature 'channel-telegram'".to_string(),
+                ))
+            }
+        }
+        ChannelInstanceConfig::Feishu(c) => {
+            #[cfg(feature = "channel-feishu")]
+            {
+                Ok(Arc::new(FeishuChannel::new(name, c, bus)?))
+            }
+            #[cfg(not(feature = "channel-feishu"))]
+            {
+                let _ = (name, c, bus);
+                Err(ChannelError::config(
+                    "feishu channel is enabled but not compiled in; rebuild with feature 'channel-feishu'".to_string(),
+                ))
+            }
         }
     }
-    channel
-}
-
-fn channel_registrations() -> Vec<ChannelRegistration> {
-    vec![
-        ChannelRegistration {
-            key: "telegram",
-            aliases: &[],
-            config: |cfg| &cfg.telegram,
-            compiled_in: cfg!(feature = "channel-telegram"),
-            factory: telegram_factory(),
-        },
-        ChannelRegistration {
-            key: "feishu",
-            aliases: &["lark"],
-            config: |cfg| &cfg.feishu,
-            compiled_in: cfg!(feature = "channel-feishu"),
-            factory: feishu_factory(),
-        },
-        ChannelRegistration {
-            key: "discord",
-            aliases: &[],
-            config: |cfg| &cfg.discord,
-            compiled_in: cfg!(feature = "channel-discord"),
-            factory: discord_factory(),
-        },
-    ]
-}
-
-#[cfg(feature = "channel-telegram")]
-fn build_telegram_channel(
-    cfg: GenericChannelConfig,
-    bus: MessageBus,
-) -> ChannelResult<Arc<dyn ChannelAdapter>> {
-    Ok(Arc::new(TelegramChannel::new(cfg, bus)?))
-}
-
-#[cfg(feature = "channel-telegram")]
-fn telegram_factory() -> Option<ChannelFactory> {
-    Some(build_telegram_channel)
-}
-
-#[cfg(not(feature = "channel-telegram"))]
-fn telegram_factory() -> Option<ChannelFactory> {
-    None
-}
-
-#[cfg(feature = "channel-feishu")]
-fn build_feishu_channel(
-    cfg: GenericChannelConfig,
-    bus: MessageBus,
-) -> ChannelResult<Arc<dyn ChannelAdapter>> {
-    Ok(Arc::new(FeishuChannel::new(cfg, bus)?))
-}
-
-#[cfg(feature = "channel-feishu")]
-fn feishu_factory() -> Option<ChannelFactory> {
-    Some(build_feishu_channel)
-}
-
-#[cfg(not(feature = "channel-feishu"))]
-fn feishu_factory() -> Option<ChannelFactory> {
-    None
-}
-
-#[cfg(feature = "channel-discord")]
-fn build_discord_channel(
-    cfg: GenericChannelConfig,
-    _bus: MessageBus,
-) -> ChannelResult<Arc<dyn ChannelAdapter>> {
-    Err(ChannelError::config(format!(
-        "discord channel is enabled but not implemented yet; disable channels.discord (allowFrom={:?})",
-        cfg.allow_from
-    )))
-}
-
-#[cfg(feature = "channel-discord")]
-fn discord_factory() -> Option<ChannelFactory> {
-    Some(build_discord_channel)
-}
-
-#[cfg(not(feature = "channel-discord"))]
-fn discord_factory() -> Option<ChannelFactory> {
-    None
 }
 
 async fn dispatch_outbound(
@@ -362,11 +326,14 @@ mod tests {
     #[test]
     fn manager_rejects_empty_allow_from_for_enabled_channel() {
         let mut cfg = Config::default();
-        cfg.channels.telegram.enabled = true;
-        cfg.channels.telegram.allow_from = Vec::new();
-        cfg.channels.telegram.extra.insert(
-            "token".to_string(),
-            serde_json::Value::String("x".to_string()),
+        cfg.channels.instances.insert(
+            "test_bot".into(),
+            ChannelInstanceConfig::Telegram(nanobot_config::schema::TelegramChannelConfig {
+                enabled: true,
+                allow_from: Vec::new(),
+                token: "x".to_string(),
+                ..Default::default()
+            }),
         );
 
         let bus = nanobot_bus::MessageBus::new();
@@ -383,11 +350,14 @@ mod tests {
     #[test]
     fn manager_rejects_blank_allow_from_entries() {
         let mut cfg = Config::default();
-        cfg.channels.telegram.enabled = true;
-        cfg.channels.telegram.allow_from = vec![" ".to_string()];
-        cfg.channels.telegram.extra.insert(
-            "token".to_string(),
-            serde_json::Value::String("x".to_string()),
+        cfg.channels.instances.insert(
+            "test_bot".into(),
+            ChannelInstanceConfig::Telegram(nanobot_config::schema::TelegramChannelConfig {
+                enabled: true,
+                allow_from: vec![" ".to_string()],
+                token: "x".to_string(),
+                ..Default::default()
+            }),
         );
 
         let bus = nanobot_bus::MessageBus::new();
@@ -404,11 +374,14 @@ mod tests {
     #[test]
     fn manager_rejects_wildcard_with_explicit_ids() {
         let mut cfg = Config::default();
-        cfg.channels.telegram.enabled = true;
-        cfg.channels.telegram.allow_from = vec!["*".to_string(), "123".to_string()];
-        cfg.channels.telegram.extra.insert(
-            "token".to_string(),
-            serde_json::Value::String("x".to_string()),
+        cfg.channels.instances.insert(
+            "test_bot".into(),
+            ChannelInstanceConfig::Telegram(nanobot_config::schema::TelegramChannelConfig {
+                enabled: true,
+                allow_from: vec!["*".to_string(), "123".to_string()],
+                token: "x".to_string(),
+                ..Default::default()
+            }),
         );
 
         let bus = nanobot_bus::MessageBus::new();
@@ -423,17 +396,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_channel_maps_lark_alias() {
-        assert_eq!(canonical_channel_name("lark"), "feishu");
-        assert_eq!(canonical_channel_name("feishu"), "feishu");
-        assert_eq!(canonical_channel_name("telegram"), "telegram");
-    }
-
-    #[test]
     fn manager_rejects_feishu_without_delivery_config() {
         let mut cfg = Config::default();
-        cfg.channels.feishu.enabled = true;
-        cfg.channels.feishu.allow_from = vec!["*".to_string()];
+        cfg.channels.instances.insert(
+            "test_feishu".into(),
+            ChannelInstanceConfig::Feishu(nanobot_config::schema::FeishuChannelConfig {
+                enabled: true,
+                allow_from: vec!["*".to_string()],
+                ..Default::default()
+            }),
+        );
 
         let bus = nanobot_bus::MessageBus::new();
         let out = ChannelManager::new(cfg.channels, bus);
@@ -450,8 +422,14 @@ mod tests {
     #[test]
     fn manager_rejects_enabled_feishu_when_feature_is_disabled() {
         let mut cfg = Config::default();
-        cfg.channels.feishu.enabled = true;
-        cfg.channels.feishu.allow_from = vec!["*".to_string()];
+        cfg.channels.instances.insert(
+            "test_feishu".into(),
+            ChannelInstanceConfig::Feishu(nanobot_config::schema::FeishuChannelConfig {
+                enabled: true,
+                allow_from: vec!["*".to_string()],
+                ..Default::default()
+            }),
+        );
 
         let bus = nanobot_bus::MessageBus::new();
         let out = ChannelManager::new(cfg.channels, bus);

@@ -166,12 +166,17 @@ mod tests {
             r#"{
   // comment before channels
   "channels": {
-    "sendProgress": true,
-    "lark": {
-      "enabled": true,
-      "allowFrom": ["*"], /* inline block comment */
-      "appId": "demo",
-      "appSecret": "secret"
+    "defaults": {
+      "sendProgress": true
+    },
+    "instances": {
+      "test_feishu": {
+        "channelType": "lark",
+        "enabled": true,
+        "allowFrom": ["*"], /* inline block comment */
+        "appId": "demo",
+        "appSecret": "secret"
+      }
     }
   }
 }"#,
@@ -179,16 +184,13 @@ mod tests {
         .expect("write config");
 
         let cfg = load_config(Some(&path)).expect("load config");
-        assert!(cfg.channels.send_progress);
-        assert!(cfg.channels.feishu.enabled);
-        assert_eq!(cfg.channels.feishu.allow_from, vec!["*".to_string()]);
-        assert_eq!(
-            cfg.channels
-                .feishu
-                .extra
-                .get("appId")
-                .and_then(|v| v.as_str()),
-            Some("demo")
-        );
+        assert!(cfg.channels.defaults.send_progress);
+        let feishu_instance = cfg
+            .channels
+            .instances
+            .get("test_feishu")
+            .expect("feishu instance");
+        assert!(feishu_instance.enabled());
+        assert_eq!(feishu_instance.allow_from(), &["*".to_string()]);
     }
 }

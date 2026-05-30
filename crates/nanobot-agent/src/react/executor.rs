@@ -218,6 +218,26 @@ impl ReActExecutor {
 
                     let current_call = &tool_calls[step];
 
+                    // Check cancellation before each tool execution, so long-running
+                    // tool sequences can be interrupted between calls.
+                    if context.is_cancelled() {
+                        debug!(
+                            target: TARGET,
+                            iteration,
+                            step,
+                            "ReAct loop cancelled before tool execution"
+                        );
+                        return Ok(LoopOutcome::new(
+                            None,
+                            messages,
+                            LoopExitReason::Cancelled,
+                            iterations,
+                            last_usage.clone(),
+                            loop_usage.clone(),
+                            None,
+                        ));
+                    }
+
                     if let Some(progress) = &progress {
                         progress.send_tool_hint(&format!(
                             "Executing tool: {} (id={})",
