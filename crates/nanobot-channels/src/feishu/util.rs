@@ -7,7 +7,7 @@ use crate::error::{ChannelError, ChannelResult};
 use crate::feishu::types::*;
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use nanobot_bus::{InboundMessage, MessageId, MessageMetadata};
 use nanobot_config::schema::FeishuChannelConfig;
 type HmacSha256 = Hmac<sha2::Sha256>;
