@@ -136,6 +136,7 @@ impl InboundMessage {
 pub enum InboundCommand {
     Help,
     Stop,
+    Cancel,
     New,
     Compact,
 }
@@ -145,6 +146,7 @@ impl InboundCommand {
         match self {
             Self::Help => "/help",
             Self::Stop => "/stop",
+            Self::Cancel => "/cancel",
             Self::New => "/new",
             Self::Compact => "/compact",
         }
@@ -154,6 +156,7 @@ impl InboundCommand {
         match input.trim().to_ascii_lowercase().as_str() {
             "/help" => Some(Self::Help),
             "/stop" => Some(Self::Stop),
+            "/cancel" => Some(Self::Cancel),
             "/new" => Some(Self::New),
             "/compact" => Some(Self::Compact),
             _ => None,
@@ -269,5 +272,18 @@ mod tests {
         let content: InboundContent = "/compact".into();
         assert_eq!(content.command(), Some(InboundCommand::Compact));
         assert_eq!(content.as_text(), "/compact");
+    }
+
+    #[test]
+    fn inbound_content_parses_cancel_command() {
+        let content: InboundContent = "/cancel".into();
+        assert_eq!(content.command(), Some(InboundCommand::Cancel));
+        assert_eq!(content.as_text(), "/cancel");
+    }
+
+    #[test]
+    fn inbound_content_roundtrip_cancel() {
+        let text: String = InboundContent::Command(InboundCommand::Cancel).into();
+        assert_eq!(text, "/cancel");
     }
 }

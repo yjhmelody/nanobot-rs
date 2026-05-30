@@ -211,6 +211,7 @@ impl AgentLoopBuilder {
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_locks: Arc::new(dashmap::DashMap::new()),
             active_tasks: Arc::new(dashmap::DashMap::new()),
+            cancel_signals: Arc::new(dashmap::DashMap::new()),
             last_cleanup: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
         })
     }
