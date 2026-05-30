@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 <!-- changelog-entries -->
 
+## [v0.0.12] - 2026-05-31
+
+### Added
+- feat(cli): add global --config flag for custom config path ([`ffa4fb2`](https://github.com/yjhmelody/nanobot-rs/commit/ffa4fb2966019e8ec6abb590816cf62bd7b81df0))
+- refactor: multi-instance channel support (RFC-0008) + agent cancel improvements (RFC-0006) ([`b4b4c1d`](https://github.com/yjhmelody/nanobot-rs/commit/b4b4c1d7b2a316e37c6c96ef5906165b2064cbc3))
+
+### Fixed
+- fix(feishu): prioritize user_id > union_id > open_id for stable sender id ([`5a4e433`](https://github.com/yjhmelody/nanobot-rs/commit/5a4e43394a6dad4e02b28d0f1e47c6e4984e692d))
+- fix(feishu): use union_id as stable sender identifier; reduce progress log noise ([`5624f82`](https://github.com/yjhmelody/nanobot-rs/commit/5624f827772adb41aad110451ea93418021ca1cb))
+
+
 ## [v0.0.11] - 2026-05-31
 
 ### Added
