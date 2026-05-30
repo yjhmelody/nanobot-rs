@@ -21,7 +21,9 @@ use nanobot_agent::AgentLoop;
 use nanobot_bus::MessageBus;
 use nanobot_bus::{InboundMessage, MessageMetadata, OutboundMessage};
 use nanobot_channels::ChannelManager;
-use nanobot_config::{Config, get_config_path, load_config, normalize_provider_name, save_config};
+use nanobot_config::{
+    Config, ConfigResult, get_config_path, load_config, normalize_provider_name, save_config,
+};
 use nanobot_cron::{CronJob, CronJobHandler, CronResult};
 use nanobot_types::SessionKey;
 
@@ -32,6 +34,9 @@ use nanobot_types::SessionKey;
     long_about = "nanobot command-line interface for onboarding, running the agent, and managing providers."
 )]
 pub struct Cli {
+    /// Path to config file (default: ~/.nanobot/config.json).
+    #[arg(long, global = true, help = "Path to config file.")]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -130,17 +135,25 @@ pub struct ProviderStatusArgs {
 }
 
 pub async fn run(cli: Cli) -> NanobotResult<()> {
+    let config_path = cli.config.clone();
     match cli.command {
-        Commands::Onboard(args) => onboard(args).await,
-        Commands::Agent(args) => agent(args).await,
-        Commands::Gateway(args) => gateway(args).await,
-        Commands::Status => status().await,
-        Commands::Provider(args) => provider(args).await,
+        Commands::Onboard(args) => onboard(args, config_path).await,
+        Commands::Agent(args) => agent(args, config_path.clone()).await,
+        Commands::Gateway(args) => gateway(args, config_path).await,
+        Commands::Status => status(config_path).await,
+        Commands::Provider(args) => provider(args, config_path.clone()).await,
     }
 }
 
-async fn onboard(args: OnboardArgs) -> NanobotResult<()> {
-    let config_path = get_config_path()?;
+fn resolve_config_path(explicit: Option<PathBuf>) -> ConfigResult<PathBuf> {
+    match explicit {
+        Some(p) => Ok(p),
+        None => get_config_path(),
+    }
+}
+
+async fn onboard(args: OnboardArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
+    let config_path = resolve_config_path(config_path)?;
 
     if config_path.exists() {
         if args.overwrite {
@@ -174,8 +187,8 @@ async fn onboard(args: OnboardArgs) -> NanobotResult<()> {
     Ok(())
 }
 
-async fn agent(args: AgentArgs) -> NanobotResult<()> {
-    let config = load_config(None)?;
+async fn agent(args: AgentArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
+    let config = load_config(config_path.as_deref())?;
     tracing::trace!("load config: {:#?}", config);
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
     sync_workspace_templates(&workspace, true).await?;
@@ -284,8 +297,8 @@ async fn agent(args: AgentArgs) -> NanobotResult<()> {
     Ok(())
 }
 
-async fn status() -> NanobotResult<()> {
-    let config_path = get_config_path()?;
+async fn status(config_path: Option<PathBuf>) -> NanobotResult<()> {
+    let config_path = resolve_config_path(config_path)?;
     let config = load_config(Some(&config_path))?;
     let workspace = config.workspace_path();
 
@@ -312,14 +325,17 @@ async fn status() -> NanobotResult<()> {
     Ok(())
 }
 
-async fn provider(args: ProviderArgs) -> NanobotResult<()> {
+async fn provider(args: ProviderArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
     match args.command {
-        ProviderCommands::Login(args) => provider_login(args).await,
-        ProviderCommands::Status(args) => provider_status(args).await,
+        ProviderCommands::Login(args) => provider_login(args, config_path).await,
+        ProviderCommands::Status(args) => provider_status(args, config_path).await,
     }
 }
 
-async fn provider_login(args: ProviderLoginArgs) -> NanobotResult<()> {
+async fn provider_login(
+    args: ProviderLoginArgs,
+    config_path: Option<PathBuf>,
+) -> NanobotResult<()> {
     let provider = normalize_provider_name(&args.provider);
     if provider.is_empty() {
         return Err(NanobotError::Runtime(RuntimeError::message(
@@ -333,7 +349,7 @@ async fn provider_login(args: ProviderLoginArgs) -> NanobotResult<()> {
         ))));
     }
 
-    let config = load_config(None)?;
+    let config = load_config(config_path.as_deref())?;
     let command_name = copilot_command_name(&config);
     let mut command = TokioCommand::new(&command_name);
     command.stdin(Stdio::inherit());
@@ -367,7 +383,10 @@ async fn provider_login(args: ProviderLoginArgs) -> NanobotResult<()> {
     Ok(())
 }
 
-async fn provider_status(args: ProviderStatusArgs) -> NanobotResult<()> {
+async fn provider_status(
+    args: ProviderStatusArgs,
+    _config_path: Option<PathBuf>,
+) -> NanobotResult<()> {
     let provider = normalize_provider_name(&args.provider);
     if provider != "github_copilot" {
         println!(
@@ -426,8 +445,8 @@ async fn provider_status(args: ProviderStatusArgs) -> NanobotResult<()> {
     Ok(())
 }
 
-async fn gateway(_args: GatewayArgs) -> NanobotResult<()> {
-    let config = load_config(None)?;
+async fn gateway(_args: GatewayArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
+    let config = load_config(config_path.as_deref())?;
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
     sync_workspace_templates(&workspace, true).await?;
 

@@ -1,0 +1,98 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "gpt-5.4",
+      "provider": "deepseekAnthropic",
+      "maxTokens": 16384,
+      "temperature": 0.3,
+      "maxToolIterations": 80,
+      "memoryWindow": 600,
+      "reasoningEffort": {
+        "type": "adaptive",
+        "budgetTokens": 2048,
+        "effort": "high"
+      },
+      "consolidationEnabled": true,
+      "consolidationKeepRecent": 200,
+      "consolidationMinMessages": 400,
+      "consolidationSummaryMaxTokens": 5000
+    }
+  },
+  "channels": {
+    "defaults": {
+      "sendProgress": true,
+      "sendToolHints": false,
+      "sendUsageSummary": true,
+      "streamMode": "updateAll"
+    },
+    "instances": {
+      "lark": {
+        "channelType": "feishu",
+        "enabled": true,
+        "allowFrom": [
+          "ou_98b3e1bef69556daab471043fecfea52"
+        ],
+        "appId": "cli_aa9d6a89bbb85bb7",
+        "appSecret": "W2g0T4ayrKZfAxEjx74uxglwu4ErXKjn",
+        "wsEnabled": true,
+        "streamPlaceholderEnabled": true,
+        "streamPlaceholderText": "思考中..."
+      },
+      "nanobot-小助理": {
+        "channelType": "feishu",
+        "enabled": true,
+        "allowFrom": ["ou_98b3e1bef69556daab471043fecfea52"],
+        "appId": "cli_aa9d68fa32f89be9",
+        "appSecret": "1K1VMXVsGuFLJ4E3clDj6fnHNIhMcKrY",
+        "wsEnabled": true,
+        "streamPlaceholderEnabled": true,
+        "streamPlaceholderText": "思考中..."
+      }
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "providerType": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "apiKey": "MJJWMFSG-R0S1-R29Y-U1YY-Z1T9HEFW40VT",
+      "apiBase": "https://yunyi.rdzhvip.com/claude/v1"
+    },
+    "openai": {
+      "providerType": "openai",
+      "model": "gpt-5.4",
+      "apiKey": "sk-63d9bc170453777009b7d1836add4c1134e175b8edea479a291d7967d64f0c8a",
+      "apiBase": "https://gmn.chuangzuoli.com/v1"
+    },
+    "deepseekAnthropic": {
+      "providerType": "anthropic",
+      "model": "deepseek-v4-flash",
+      "apiKey": "sk-fb8f16c3e58a459384fcccd514bcb457",
+      "apiBase": "https://api.deepseek.com/anthropic",
+      "extraHeaders": {
+        "anthropic-version": "2023-06-01"
+      }
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "timeout": 60,
+      "disableAllGuards": true
+    },
+    "restrictToWorkspace": false,
+    "mcpServers": {}
+  }
+}
