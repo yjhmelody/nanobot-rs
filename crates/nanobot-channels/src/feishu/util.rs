@@ -42,9 +42,11 @@ pub fn extract_inbound_message(
         .as_ref()
         .and_then(|s| s.sender_id.as_ref())
         .and_then(|s| {
-            // union_id is stable across all apps in the same tenant;
-            // open_id is app-specific and differs between bots, so it is intentionally skipped.
-            s.union_id.as_deref().or(s.user_id.as_deref())
+            // Priority: user_id (tenant-stable) > union_id (cross-app) > open_id (app-specific)
+            s.user_id
+                .as_deref()
+                .or(s.union_id.as_deref())
+                .or(s.open_id.as_deref())
         })
         .ok_or_else(|| ChannelError::adapter("feishu", "missing sender id"))?
         .to_string();
