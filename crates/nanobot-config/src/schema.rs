@@ -665,6 +665,10 @@ pub struct FeishuChannelConfig {
     /// Override default: streaming message behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_mode: Option<StreamMode>,
+    /// Message render mode: "raw" (text), "card" (interactive), "auto" (sniff).
+    /// Default is "raw" for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_mode: Option<String>,
 }
 
 impl Default for FeishuChannelConfig {
@@ -688,6 +692,7 @@ impl Default for FeishuChannelConfig {
             send_tool_hints: None,
             send_usage_summary: None,
             stream_mode: None,
+            render_mode: None,
         }
     }
 }

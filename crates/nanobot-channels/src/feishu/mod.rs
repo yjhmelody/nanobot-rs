@@ -26,7 +26,7 @@ use nanobot_bus::{MessageBus, OutboundMessage};
 use nanobot_config::schema::FeishuChannelConfig;
 
 const FEISHU_API_DEFAULT: &str = "https://open.feishu.cn";
-const FEISHU_TEXT_LIMIT: usize = 3000;
+const FEISHU_TEXT_LIMIT: usize = 15000;
 const FEISHU_CALLBACK_LISTEN_DEFAULT: &str = "0.0.0.0:19820";
 const FEISHU_CALLBACK_PATH_DEFAULT: &str = "/feishu/events";
 /// Minimum new content (in chars) before flushing a batched edit.
@@ -40,8 +40,10 @@ const FEISHU_EDIT_SHARD_CHARS: usize = 24000;
 const LOG_TARGET: &str = "nanobot::channels::feishu";
 
 /// Per-stream state for batching edit API calls and sharding long streams.
+pub mod card;
 pub mod types;
 pub mod util;
+use self::card::*;
 use self::types::*;
 use self::util::*;
 
@@ -61,6 +63,7 @@ pub struct FeishuChannel {
     ws_enabled: bool,
     stream_placeholder_enabled: bool,
     stream_placeholder_text: String,
+    render_mode: RenderMode,
     running: Arc<AtomicBool>,
     callback_task: Mutex<Option<JoinHandle<()>>>,
     ws_task: Mutex<Option<JoinHandle<()>>>,
@@ -130,6 +133,11 @@ impl FeishuChannel {
             .stream_placeholder_text
             .clone()
             .unwrap_or_else(|| "thinking...".to_string());
+        let render_mode = cfg
+            .render_mode
+            .as_deref()
+            .map(RenderMode::from)
+            .unwrap_or(RenderMode::Raw);
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -153,6 +161,7 @@ impl FeishuChannel {
             ws_enabled,
             stream_placeholder_enabled,
             stream_placeholder_text,
+            render_mode,
             running: Arc::new(AtomicBool::new(false)),
             callback_task: Mutex::new(None),
             ws_task: Mutex::new(None),
@@ -966,6 +975,81 @@ impl FeishuChannel {
         }
         Ok(())
     }
+
+    async fn send_interactive_by_app(
+        &self,
+        receive_id: &str,
+        content: &str,
+    ) -> ChannelResult<String> {
+        let mut last_err: Option<ChannelError> = None;
+        for attempt in 0..2 {
+            let token = if attempt == 0 {
+                self.tenant_access_token().await?
+            } else {
+                self.refresh_tenant_access_token().await?
+            };
+            match self
+                .send_im_message_by_app_with_token(receive_id, "interactive", content, &token)
+                .await
+            {
+                Ok(message_id) => return Ok(message_id),
+                Err(err) if attempt == 0 && is_retryable_auth_send_error(&err) => {
+                    warn!(target: LOG_TARGET, "feishu interactive send failed, refreshing token: {}", err);
+                    last_err = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            ChannelError::adapter("feishu", "send interactive message failed after retry")
+        }))
+    }
+
+    async fn send_card_by_webhook(&self, card: &serde_json::Value) -> ChannelResult<()> {
+        let webhook_url = self
+            .webhook_url
+            .as_deref()
+            .ok_or_else(|| ChannelError::adapter("feishu", "webhook url is not configured"))?;
+        let mut payload = serde_json::json!({
+            "msg_type": "interactive",
+            "card": card,
+        });
+        if let Some(secret) = self.secret.as_deref() {
+            let timestamp = chrono::Utc::now().timestamp().to_string();
+            let sign = build_signature(&timestamp, secret)?;
+            payload["timestamp"] = serde_json::Value::String(timestamp);
+            payload["sign"] = serde_json::Value::String(sign);
+        }
+        let response = self
+            .client
+            .post(webhook_url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| {
+                ChannelError::adapter("feishu", format!("send card webhook failed: {err}"))
+            })?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.map_err(|err| {
+            ChannelError::adapter(
+                "feishu",
+                format!("parse card webhook response failed: {err}"),
+            )
+        })?;
+        if !status.is_success() {
+            return Err(ChannelError::adapter(
+                "feishu",
+                format!("card webhook status {}: {}", status, body),
+            ));
+        }
+        if !is_success_response(&body) {
+            return Err(ChannelError::adapter(
+                "feishu",
+                format!("card webhook rejected: {}", error_message(&body)),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1058,30 +1142,45 @@ impl ChannelAdapter for FeishuChannel {
             ));
         }
 
+        let mode = self.render_mode.resolve(text);
         let mut last_message_id: Option<String> = None;
         if !text.is_empty() {
-            let chunks: Vec<_> = split_text(text, FEISHU_TEXT_LIMIT);
-            info!(
-                target: LOG_TARGET,
-                chat_id = %msg.chat_id,
-                chunks = chunks.len(),
-                content_len = text.len(),
-                "sending message"
-            );
-            for chunk in chunks {
-                if self.app_id.is_some() {
-                    let message_id = self.send_message_by_app(&msg.chat_id, &chunk).await?;
+            match mode {
+                RenderMode::Card if self.app_id.is_some() => {
+                    let card_content = build_card_content(text)?;
+                    let message_id = self
+                        .send_interactive_by_app(&msg.chat_id, &card_content)
+                        .await?;
                     if !message_id.is_empty() {
-                        info!(
-                            target: LOG_TARGET,
-                            chat_id = %msg.chat_id,
-                            %message_id,
-                            "message sent"
-                        );
+                        info!(target: LOG_TARGET, chat_id = %msg.chat_id, %message_id, "card sent");
                         last_message_id = Some(message_id);
                     }
-                } else {
-                    self.send_message_by_webhook(&chunk).await?;
+                }
+                RenderMode::Card => {
+                    let card = build_webhook_card_content(text)?;
+                    self.send_card_by_webhook(&card).await?;
+                }
+                RenderMode::Raw | RenderMode::Auto => {
+                    let raw_text = convert_markdown_tables(text);
+                    let chunks: Vec<_> = split_text(&raw_text, FEISHU_TEXT_LIMIT);
+                    info!(
+                        target: LOG_TARGET,
+                        chat_id = %msg.chat_id,
+                        chunks = chunks.len(),
+                        content_len = raw_text.len(),
+                        "sending message"
+                    );
+                    for chunk in chunks {
+                        if self.app_id.is_some() {
+                            let message_id = self.send_message_by_app(&msg.chat_id, &chunk).await?;
+                            if !message_id.is_empty() {
+                                info!(target: LOG_TARGET, chat_id = %msg.chat_id, %message_id, "message sent");
+                                last_message_id = Some(message_id);
+                            }
+                        } else {
+                            self.send_message_by_webhook(&chunk).await?;
+                        }
+                    }
                 }
             }
         }
@@ -1371,6 +1470,126 @@ mod tests {
         assert_eq!(inbound.chat_id, "oc_test");
         assert_eq!(inbound.content_text(), "[image: img_v3_test]");
         assert_eq!(inbound.media, vec!["feishu:image_key:img_v3_test"]);
+    }
+
+    // --- RenderMode tests ---
+
+    #[test]
+    fn render_mode_from_str() {
+        assert_eq!(RenderMode::from("raw"), RenderMode::Raw);
+        assert_eq!(RenderMode::from("card"), RenderMode::Card);
+        assert_eq!(RenderMode::from("auto"), RenderMode::Auto);
+        assert_eq!(RenderMode::from(""), RenderMode::Raw);
+    }
+
+    #[test]
+    fn render_mode_display() {
+        assert_eq!(RenderMode::Raw.to_string(), "raw");
+        assert_eq!(RenderMode::Card.to_string(), "card");
+        assert_eq!(RenderMode::Auto.to_string(), "auto");
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_code_block() {
+        assert_eq!(
+            RenderMode::Auto.resolve("```rust\nfn main() {}"),
+            RenderMode::Card
+        );
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_bold() {
+        assert_eq!(RenderMode::Auto.resolve("**bold** text"), RenderMode::Card);
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_inline_code() {
+        assert_eq!(RenderMode::Auto.resolve("use `foo`"), RenderMode::Card);
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_link() {
+        assert_eq!(
+            RenderMode::Auto.resolve("click [here](url)"),
+            RenderMode::Card
+        );
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_table_stays_raw() {
+        assert_eq!(
+            RenderMode::Auto.resolve("| A | B |\n|---|---|\n| 1 | 2 |"),
+            RenderMode::Raw
+        );
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_plain_stays_raw() {
+        assert_eq!(RenderMode::Auto.resolve("hello world"), RenderMode::Raw);
+    }
+
+    #[test]
+    fn render_mode_resolve_auto_emoji_bullet_triggers_card() {
+        let text = "▫️ 标普500：7,580（+0.22%）\n▲ 领涨：科技\n📊 市场情绪";
+        assert_eq!(RenderMode::Auto.resolve(text), RenderMode::Card);
+    }
+
+    #[test]
+    fn render_mode_resolve_raw_stays_raw() {
+        assert_eq!(RenderMode::Raw.resolve("```code```"), RenderMode::Raw);
+    }
+
+    #[test]
+    fn render_mode_resolve_card_stays_card() {
+        assert_eq!(RenderMode::Card.resolve("hello"), RenderMode::Card);
+    }
+
+    // --- Card builder tests ---
+
+    #[test]
+    fn card_content_includes_header_and_markdown() {
+        let r = card::build_card_content("hello\nworld").expect("build card");
+        assert!(r.contains("wide_screen_mode"));
+        assert!(r.contains("markdown"));
+        assert!(r.contains("hello"));
+    }
+
+    #[test]
+    fn card_webhook_content_is_valid() {
+        let r = card::build_webhook_card_content("**bold**").expect("build webhook card");
+        assert!(r.get("elements").is_some());
+    }
+
+    #[test]
+    fn card_title_truncates() {
+        let long = "A".repeat(150);
+        let text = format!("# {}\nbody", long);
+        let r = card::build_card_content(&text).expect("build card");
+        let json: serde_json::Value = serde_json::from_str(&r).expect("valid json");
+        let title = json["header"]["title"]["content"].as_str().expect("title");
+        assert_eq!(title.len(), 100);
+    }
+
+    // --- ASCII table conversion tests ---
+
+    #[test]
+    fn convert_markdown_tables_basic() {
+        let result = convert_markdown_tables("| A | B |\n|---|---|\n| 1 | 2 |");
+        assert_eq!(result, "A | B\n--- | ---\n1 | 2");
+    }
+
+    #[test]
+    fn convert_markdown_tables_preserves_surrounding() {
+        let result = convert_markdown_tables("Header\n\n| X |\n|---|\n| 1 |\n\nFooter");
+        assert!(result.contains("Header"));
+        assert!(result.contains("X"));
+        assert!(result.contains("Footer"));
+    }
+
+    #[test]
+    fn convert_markdown_tables_no_tables() {
+        assert_eq!(convert_markdown_tables("plain"), "plain");
+        assert_eq!(convert_markdown_tables(""), "");
     }
 
     #[tokio::test]

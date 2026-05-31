@@ -357,6 +357,7 @@ Feishu 事件中不一定包含所有 ID 类型，按优先级取第一个存在
 | `callbackPath` | `string` | 否 | 回调路径，默认 `/feishu/events` |
 | `streamPlaceholderEnabled` | `boolean` | 否 | 流式响应时发送占位提示 |
 | `streamPlaceholderText` | `string` | 否 | 占位提示文本，默认 `"thinking..."` |
+| `renderMode` | `string` | 否 | 消息渲染模式：`"raw"`（纯文本 + ASCII 表格）、`"card"`（交互卡片）、`"auto"`（自动嗅探，含格式/emoji 标记走卡片，否则纯文本）。默认 `"raw"` |
 
 配置示例：
 
