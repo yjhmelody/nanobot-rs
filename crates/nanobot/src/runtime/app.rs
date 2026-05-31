@@ -58,6 +58,7 @@ pub async fn build_runtime(config: Config) -> NanobotResult<RuntimeBundle> {
         max_tokens: defaults.max_tokens,
         memory_window: defaults.memory_window,
         reasoning_effort: defaults.reasoning_effort.clone(),
+        max_subagent_iterations: defaults.max_subagent_iterations,
     };
 
     let mut builder = AgentLoopBuilder::new(bus.clone(), provider, workspace)

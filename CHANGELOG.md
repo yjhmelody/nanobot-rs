@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 <!-- changelog-entries -->
 
+## [v0.0.13] - 2026-06-01
+
+### Added
+- feat(feishu): renderMode config for message format (raw/card/auto) + fix usage duplication ([`59e374a`](https://github.com/yjhmelody/nanobot-rs/commit/59e374a4cbc4f0f6b1e33ebcacf2db080accda4b))
+- feat(agent): make subagent max iterations configurable via agents.defaults.maxSubagentIterations ([`4ce04c1`](https://github.com/yjhmelody/nanobot-rs/commit/4ce04c1b31b58844fae7bf6ff3a9b14846807115))
+- feat(cli): add global --config flag for custom config path ([`b2f3eea`](https://github.com/yjhmelody/nanobot-rs/commit/b2f3eea2964ef582eb88a4b715f38e30a7a30616))
+
+### Fixed
+- fix(agent): route subagent completion results back to the originating channel ([`4ce04c1`](https://github.com/yjhmelody/nanobot-rs/commit/4ce04c1b31b58844fae7bf6ff3a9b14846807115))
+- fix(feishu): prioritize user_id > union_id > open_id for stable sender id ([`c04fac6`](https://github.com/yjhmelody/nanobot-rs/commit/c04fac6cb18de5a576b62d016c82f61188b27aec))
+- fix(feishu): use union_id as stable sender identifier; reduce progress log noise ([`6a4600d`](https://github.com/yjhmelody/nanobot-rs/commit/6a4600d79c7b0efd3c10b3e98b1db3efb78d2f17))
+
+### Changed
+- chore: upgrade dependencies ([`cf0b261`](https://github.com/yjhmelody/nanobot-rs/commit/cf0b2617c4f0477985a560a4d1e5d4e71dcf7f44))
+- chore: add config.local.json to .gitignore; add feishu channel logging ([`0b2d12a`](https://github.com/yjhmelody/nanobot-rs/commit/0b2d12a3ba3be50159540218722e045486be6e1e))
+
 ## [v0.0.12] - 2026-05-31
 
 ### Added

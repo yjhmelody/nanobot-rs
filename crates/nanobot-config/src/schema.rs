@@ -311,6 +311,8 @@ pub struct AgentDefaults {
     pub temperature: f32,
     /// Maximum tool iterations per turn.
     pub max_tool_iterations: usize,
+    /// Maximum iterations for subagent tasks.
+    pub max_subagent_iterations: usize,
     /// Number of recent messages to include in context.
     pub memory_window: usize,
     /// Number of recent messages kept as raw turns during consolidation.
@@ -382,6 +384,7 @@ impl Default for AgentDefaults {
             max_tokens: 8192,
             temperature: 0.1,
             max_tool_iterations: 40,
+            max_subagent_iterations: 15,
             memory_window: 100,
             consolidation_keep_recent: 10,
             reasoning_effort: None,

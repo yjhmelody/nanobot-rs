@@ -48,6 +48,7 @@
 - `maxTokens`: `8192`
 - `temperature`: `0.1`
 - `maxToolIterations`: `40`
+- `maxSubagentIterations`: `15` — subagent 单次任务的最大推理迭代次数
 - `memoryWindow`: `100`
 - `consolidationKeepRecent`: `10`
 - `consolidationMinMessages`: `20`

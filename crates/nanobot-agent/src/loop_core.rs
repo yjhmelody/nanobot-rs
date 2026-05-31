@@ -551,7 +551,10 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
-    async fn process_message(&self, msg: InboundMessage) -> AgentResult<Option<OutboundEnvelope>> {
+    async fn process_message(
+        &self,
+        mut msg: InboundMessage,
+    ) -> AgentResult<Option<OutboundEnvelope>> {
         trace!(
             target: TARGET,
             session_key = %msg.session_key(),
@@ -561,12 +564,15 @@ impl AgentLoop {
             "process_message start"
         );
         if msg.channel == "system" {
-            return self.process_system_message(msg).await.map(|msg| {
-                msg.map(|message| OutboundEnvelope {
-                    message,
-                    usage: None,
-                })
-            });
+            // System messages (e.g., subagent results) carry origin routing in chat_id
+            // Format: "origin_channel:origin_chat_id" (e.g., "telegram:12345")
+            let (origin_channel, origin_chat_id) = match msg.chat_id.split_once(':') {
+                Some((ch, id)) => (ch.to_string(), id.to_string()),
+                None => return Ok(None),
+            };
+            msg.channel = origin_channel;
+            msg.chat_id = origin_chat_id;
+            // Fall through to normal message processing
         }
 
         if let Some(command) = msg.command() {
@@ -815,13 +821,6 @@ impl AgentLoop {
                 unreachable!("cancel command should be handled before dispatch")
             }
         }
-    }
-
-    async fn process_system_message(
-        &self,
-        _msg: InboundMessage,
-    ) -> AgentResult<Option<OutboundMessage>> {
-        Ok(None)
     }
 
     async fn run_agent_loop(

@@ -28,6 +28,7 @@ struct SubagentManagerInner {
     temperature: f32,
     max_tokens: i32,
     reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
+    max_iterations: usize,
     running_tasks: DashMap<TaskId, JoinHandle<()>>,
     session_tasks: DashMap<SessionKey, DashMap<TaskId, ()>>,
 }
@@ -62,6 +63,7 @@ impl SubagentManager {
         temperature: f32,
         max_tokens: i32,
         reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
+        max_iterations: usize,
     ) -> Self {
         Self {
             inner: Arc::new(SubagentManagerInner {
@@ -73,6 +75,7 @@ impl SubagentManager {
                 temperature,
                 max_tokens,
                 reasoning_effort,
+                max_iterations,
                 running_tasks: DashMap::new(),
                 session_tasks: DashMap::new(),
             }),
@@ -192,6 +195,7 @@ impl SubagentManagerInner {
             self.temperature,
             self.max_tokens,
             self.reasoning_effort.clone(),
+            self.max_iterations,
         )
         .await;
 
@@ -280,6 +284,7 @@ async fn run_subagent_loop_impl(
     temperature: f32,
     max_tokens: i32,
     reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
+    max_iterations: usize,
 ) -> anyhow::Result<String> {
     let tool_defs = tools.definitions();
 
@@ -304,8 +309,7 @@ async fn run_subagent_loop_impl(
     ];
 
     let mut final_result = None;
-    const MAX_ITERATOR: usize = 15;
-    for _ in 0..MAX_ITERATOR {
+    for _ in 0..max_iterations {
         let response = provider
             .chat(ChatRequest {
                 session_key: Some(tool_context.session_key.clone()),

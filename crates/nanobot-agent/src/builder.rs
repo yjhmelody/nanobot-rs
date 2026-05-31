@@ -30,6 +30,7 @@ pub struct AgentConfig {
     pub max_tokens: i32,
     pub memory_window: usize,
     pub reasoning_effort: Option<ReasoningConfig>,
+    pub max_subagent_iterations: usize,
 }
 
 impl Default for AgentConfig {
@@ -41,6 +42,7 @@ impl Default for AgentConfig {
             max_tokens: 8192,
             memory_window: 100,
             reasoning_effort: None,
+            max_subagent_iterations: 15,
         }
     }
 }
@@ -181,6 +183,7 @@ impl AgentLoopBuilder {
             self.config.temperature,
             self.config.max_tokens,
             self.config.reasoning_effort.clone(),
+            self.config.max_subagent_iterations,
         ));
 
         tools.set_spawn_service(subagent_manager);
