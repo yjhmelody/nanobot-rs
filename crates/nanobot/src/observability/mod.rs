@@ -10,9 +10,9 @@ pub fn init() {
 
     INIT.get_or_init(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        let _ = tracing_subscriber::registry()
+        tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer().with_target(true))
-            .try_init();
+            .init();
     });
 }

@@ -7,7 +7,7 @@ use crate::error::{ChannelError, ChannelResult};
 use crate::feishu::types::*;
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use nanobot_bus::{InboundMessage, MessageId, MessageMetadata};
 use nanobot_config::schema::FeishuChannelConfig;
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -227,6 +227,52 @@ pub fn floor_char_boundary(input: &str, max_len: usize) -> usize {
         boundary -= 1;
     }
     boundary
+}
+
+/// Convert Markdown table syntax to plain text ASCII for raw mode.
+pub fn convert_markdown_tables(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_table = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            let cols: Vec<&str> = trimmed.split('|').filter(|c| !c.is_empty()).collect();
+            if cols.is_empty() {
+                continue;
+            }
+            let is_sep = cols
+                .iter()
+                .all(|c| c.trim().chars().all(|c| c == '-' || c == ':'));
+            if is_sep {
+                let dashes: Vec<&str> = std::iter::repeat_n("---", cols.len()).collect();
+                if in_table {
+                    result.push('\n');
+                }
+                result.push_str(&dashes.join(" | "));
+                in_table = true;
+                continue;
+            }
+            let cleaned = cols
+                .iter()
+                .map(|c| c.trim())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if in_table {
+                result.push('\n');
+            }
+            result.push_str(&cleaned);
+            in_table = true;
+        } else {
+            if in_table {
+                result.push('\n');
+                in_table = false;
+            } else if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+        }
+    }
+    result
 }
 
 pub fn is_retryable_auth_send_error(err: &ChannelError) -> bool {

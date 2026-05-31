@@ -488,27 +488,18 @@ impl AgentLoop {
         }
 
         match self.process_message(msg.clone()).await {
-            Ok(Some(out)) => {
-                if let Err(err) = self.bus.publish_outbound(out.message.clone()) {
-                    error!(target: TARGET, error = %err, "failed to publish outbound message");
-                }
+            Ok(Some(mut out)) => {
+                // Append usage summary to the main reply instead of sending
+                // a separate message, avoiding duplicate output in the chat.
                 if self.send_usage_summary
-                    && let Some(usage) = out.usage
+                    && let Some(usage) = out.usage.as_ref()
+                    && !out.message.content.contains("Tokens:")
                 {
-                    let usage_msg = OutboundMessage {
-                        channel: out.message.channel.clone(),
-                        chat_id: out.message.chat_id.clone(),
-                        content: Self::format_system_info(format!(
-                            "**{}**",
-                            Self::usage_summary_text(&usage)
-                        )),
-                        reply_to: None,
-                        media: Vec::new(),
-                        metadata: MessageMetadata::default(),
-                    };
-                    if let Err(err) = self.bus.publish_outbound(usage_msg) {
-                        error!(target: TARGET, session_key = %session_key, error = %err, "failed to publish usage summary");
-                    }
+                    let usage_text = format!("\n\n---\n_{}_", Self::usage_summary_text(usage));
+                    out.message.content.push_str(&usage_text);
+                }
+                if let Err(err) = self.bus.publish_outbound(out.message) {
+                    error!(target: TARGET, error = %err, "failed to publish outbound message");
                 }
             }
             Ok(None) => {

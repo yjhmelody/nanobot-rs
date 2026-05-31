@@ -1,10 +1,85 @@
 //! Internal types for the feishu channel adapter.
 
+use std::fmt;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use nanobot_bus::MessageBus;
 use serde::{Deserialize, Serialize};
+
+/// Message rendering mode for Feishu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// Plain text msg_type + ASCII table fallback.
+    Raw,
+    /// Interactive card with lark_md for rich rendering.
+    Card,
+    /// Content sniffing: code blocks/bold/lists → card, else → raw.
+    Auto,
+}
+
+impl RenderMode {
+    pub fn as_msg_type(self) -> &'static str {
+        match self {
+            Self::Raw => "text",
+            Self::Card => "interactive",
+            Self::Auto => "text",
+        }
+    }
+
+    pub fn resolve(self, text: &str) -> RenderMode {
+        match self {
+            Self::Auto => sniff(text),
+            other => other,
+        }
+    }
+}
+
+impl From<&str> for RenderMode {
+    fn from(s: &str) -> Self {
+        match s {
+            "card" => Self::Card,
+            "auto" => Self::Auto,
+            _ => Self::Raw,
+        }
+    }
+}
+
+impl fmt::Display for RenderMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Raw => write!(f, "raw"),
+            Self::Card => write!(f, "card"),
+            Self::Auto => write!(f, "auto"),
+        }
+    }
+}
+
+/// Sniff content: if it contains formatting that lark_md renders well,
+/// return Card. Tables stay Raw (lark_md table support is limited).
+fn sniff(text: &str) -> RenderMode {
+    // Check for markdown markers
+    if text.contains("```")
+        || text.contains("**")
+        || text.contains('`')
+        || (text.contains('[') && text.contains("]("))
+    {
+        return RenderMode::Card;
+    }
+
+    // Check line-by-line for formatting that benefits from card rendering
+    let line_triggers = [
+        "```", "# ", "## ", "### ", "- ", "* ", "▫️", "▪️", "•", "▲", "▼",
+    ];
+    if text.lines().any(|l| {
+        let t = l.trim_start();
+        line_triggers.iter().any(|pat| t.starts_with(pat))
+    }) {
+        return RenderMode::Card;
+    }
+
+    RenderMode::Raw
+}
 
 pub struct StreamEditState {
     /// The actual message_id being edited (may differ from the dispatch key after sharding).
