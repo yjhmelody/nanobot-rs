@@ -6,3 +6,4 @@ target/**
 _plans/**
 .claude/settings.local.json
 config.json
+config.local.json

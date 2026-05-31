@@ -1060,10 +1060,24 @@ impl ChannelAdapter for FeishuChannel {
 
         let mut last_message_id: Option<String> = None;
         if !text.is_empty() {
-            for chunk in split_text(text, FEISHU_TEXT_LIMIT) {
+            let chunks: Vec<_> = split_text(text, FEISHU_TEXT_LIMIT);
+            info!(
+                target: LOG_TARGET,
+                chat_id = %msg.chat_id,
+                chunks = chunks.len(),
+                content_len = text.len(),
+                "sending message"
+            );
+            for chunk in chunks {
                 if self.app_id.is_some() {
                     let message_id = self.send_message_by_app(&msg.chat_id, &chunk).await?;
                     if !message_id.is_empty() {
+                        info!(
+                            target: LOG_TARGET,
+                            chat_id = %msg.chat_id,
+                            %message_id,
+                            "message sent"
+                        );
                         last_message_id = Some(message_id);
                     }
                 } else {
@@ -1118,6 +1132,13 @@ impl ChannelAdapter for FeishuChannel {
         // Shard: if the current message has too many edits or is too long,
         // send a new message and switch to editing that one instead.
         if state.edit_count >= FEISHU_EDIT_SHARD_EDITS || content_len >= FEISHU_EDIT_SHARD_CHARS {
+            info!(
+                target: LOG_TARGET,
+                chat_id = %msg.chat_id,
+                edits = state.edit_count,
+                content_len,
+                "sharding stream to new message"
+            );
             let new_message_id = self.send_message_by_app(&msg.chat_id, &text).await?;
             state.actual_message_id = new_message_id;
             state.edit_count = 0;
@@ -1134,6 +1155,14 @@ impl ChannelAdapter for FeishuChannel {
         state.last_flushed_len = content_len;
         state.last_flush = Instant::now();
 
+        info!(
+            target: LOG_TARGET,
+            chat_id = %msg.chat_id,
+            edit = state.edit_count,
+            content_len,
+            "message updated"
+        );
+
         Ok(())
     }
 
@@ -1149,6 +1178,12 @@ impl ChannelAdapter for FeishuChannel {
         let message_id = self
             .send_message_by_app(&msg.chat_id, &self.stream_placeholder_text)
             .await?;
+        info!(
+            target: LOG_TARGET,
+            chat_id = %msg.chat_id,
+            %message_id,
+            "stream started"
+        );
         Ok(Some(SendOutcome {
             message_id: if message_id.is_empty() {
                 None
