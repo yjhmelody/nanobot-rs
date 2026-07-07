@@ -26,8 +26,25 @@ use crate::helpers::{ensure_dir_async, safe_filename};
 /// 2. Following lines: session messages
 ///
 /// Uses DashMap for high-performance concurrent caching.
+///
+/// # File format
+///
+/// ```jsonl
+/// {"_type":"metadata","key":"telegram:123","createdAt":"...","updatedAt":"...","metadata":{"tags":[]},"lastConsolidated":0}
+/// {"role":"user","content":{"text":"hello"},"timestamp":"..."}
+/// {"role":"assistant","content":{"text":"world"},"timestamp":"..."}
+/// ```
+///
+/// # Concurrency
+///
+/// `DashMap` provides lock-free concurrent reads. Writes acquire a shard-level
+/// lock, so the store handles concurrent access from multiple sessions well
+/// without a single global lock.
 pub struct JsonlSessionStore {
+    /// Directory where JSONL session files are stored.
     sessions_dir: PathBuf,
+    /// In-memory cache for fast repeated access to the same session.
+    /// Uses DashMap for sharded concurrent read access.
     cache: DashMap<String, Session>,
 }
 
@@ -228,11 +245,19 @@ impl SessionStore for JsonlSessionStore {
 /// In-memory session store for testing and ephemeral sessions.
 ///
 /// All sessions are stored in memory and will be lost when the process exits.
+/// Suitable for unit tests, demos, or any scenario where persistence is not
+/// required.
+///
+/// # Concurrency
+///
+/// Uses `DashMap` internally for the same lock-free concurrent access as
+/// `JsonlSessionStore`.
 pub struct InMemorySessionStore {
     sessions: DashMap<String, Session>,
 }
 
 impl InMemorySessionStore {
+    /// Creates a new empty in-memory session store.
     pub fn new() -> Self {
         Self {
             sessions: DashMap::new(),

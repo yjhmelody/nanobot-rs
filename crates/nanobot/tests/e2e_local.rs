@@ -1,3 +1,23 @@
+//! End-to-end integration tests for the nanobot CLI binary.
+//!
+//! These tests spawn the actual `nanobot` binary against a mock LLM API server
+//! to verify the full tool-use -> session-persistence pipeline without needing
+//! a real provider credential.
+//!
+//! ## Test strategy
+//!
+//! 1. A `MockChatServer` listens on a random local port and responds to
+//!    chat completion API calls (both `anthropic/messages` and
+//!    `custom/responses` protocols).
+//! 2. The mock server simulates a multi-turn tool-use scenario:
+//!    - First response: tool call `write_file`
+//!    - Second response: tool call `read_file`
+//!    - Third response: final text (containing "E2E_SUCCESS")
+//! 3. A temp home directory is created with a minimal config pointing at
+//!    the mock server.
+//! 4. The `nanobot` binary is invoked with `--message` (one-shot mode).
+//! 5. Assertions verify the output, generated files, and session persistence.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -12,14 +32,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 
+/// A minimal HTTP server that simulates an LLM chat API for testing.
+///
+/// Supports both Anthropic (`/messages`) and custom (`/responses`) protocol
+/// endpoints. The mock implements a deterministic multi-turn script:
+/// write_file -> read_file -> final answer containing "E2E_SUCCESS".
 struct MockChatServer {
+    /// Address the server is listening on.
     addr: SocketAddr,
+    /// Record of all received request bodies (for post-test assertions).
     requests: Arc<Mutex<Vec<Value>>>,
+    /// Sender to signal shutdown.
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Handle to the background server task.
     join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MockChatServer {
+    /// Start the mock server on a random available port.
     async fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -57,14 +87,17 @@ impl MockChatServer {
         })
     }
 
+    /// Return the base URL for the API server.
     fn api_base(&self) -> String {
         format!("http://{}", self.addr)
     }
 
+    /// Return the number of requests received.
     async fn request_count(&self) -> usize {
         self.requests.lock().await.len()
     }
 
+    /// Gracefully shut down the mock server.
     async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -75,19 +108,32 @@ impl MockChatServer {
     }
 }
 
+/// Which chat completion protocol the mock server should emulate.
 #[derive(Debug, Clone, Copy)]
 enum MockProtocol {
+    /// OpenAI-style `/responses` endpoint.
     Responses,
+    /// Anthropic-style `/messages` endpoint.
     Anthropic,
 }
 
+/// Tracks which tools the mock agent has called so far in the conversation.
+///
+/// Used by `build_response` to decide what to reply next (write_file -> read_file -> final).
 #[derive(Debug, Default)]
 struct MockToolState {
+    /// Whether `write_file` has been called by the agent.
     wrote: bool,
+    /// Whether `read_file` has been called by the agent.
     read: bool,
+    /// Content of the most recent read_file result.
     read_content: String,
 }
 
+/// Handle a single HTTP connection to the mock server.
+///
+/// Parses the HTTP request, validates the protocol, records the request body,
+/// and returns a deterministic multi-turn response simulating tool use.
 async fn handle_connection(
     stream: &mut tokio::net::TcpStream,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -199,10 +245,12 @@ async fn handle_connection(
     Ok((status, payload))
 }
 
+/// Find the end of HTTP headers (`\r\n\r\n`) in a byte buffer.
 fn find_header_end(input: &[u8]) -> Option<usize> {
     input.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+/// Determine which protocol to use based on the request URL path.
 fn mock_protocol(path: &str) -> Option<MockProtocol> {
     if path.ends_with("/responses") {
         Some(MockProtocol::Responses)
@@ -213,6 +261,7 @@ fn mock_protocol(path: &str) -> Option<MockProtocol> {
     }
 }
 
+/// Validate that the request has the required fields for the given protocol.
 fn protocol_request_valid(protocol: MockProtocol, req: &Value) -> Result<()> {
     match protocol {
         MockProtocol::Anthropic => {
@@ -230,6 +279,12 @@ fn protocol_request_valid(protocol: MockProtocol, req: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Build a deterministic multi-turn mock response.
+///
+/// Implements the state machine:
+/// 1. If `write_file` hasn't been called, respond with a `write_file` tool call.
+/// 2. If `read_file` hasn't been called, respond with a `read_file` tool call.
+/// 3. Otherwise, respond with final text containing "E2E_SUCCESS" (or "E2E_FAILURE").
 fn build_response(protocol: MockProtocol, req: &Value) -> Value {
     let state = match protocol {
         MockProtocol::Responses => tool_state_from_responses(req),
@@ -267,6 +322,7 @@ fn build_response(protocol: MockProtocol, req: &Value) -> Value {
     }
 }
 
+/// Extract tool call tracking state from an OpenAI-style `/responses` request body.
 fn tool_state_from_responses(req: &Value) -> MockToolState {
     let input = req
         .get("input")
@@ -314,6 +370,7 @@ fn tool_state_from_responses(req: &Value) -> MockToolState {
     state
 }
 
+/// Extract tool call tracking state from an Anthropic-style `/messages` request body.
 fn tool_state_from_anthropic(req: &Value) -> MockToolState {
     let messages = req
         .get("messages")
@@ -364,6 +421,7 @@ fn tool_state_from_anthropic(req: &Value) -> MockToolState {
     state
 }
 
+/// Extract the text content from an Anthropic tool result response block.
 fn anthropic_tool_result_text(content: Option<&Value>) -> &str {
     match content {
         Some(Value::String(s)) => s,
@@ -375,6 +433,7 @@ fn anthropic_tool_result_text(content: Option<&Value>) -> &str {
     }
 }
 
+/// Build a JSON response for a tool call, in the format expected by the given protocol.
 fn response_tool_call(protocol: MockProtocol, id: &str, name: &str, arguments: Value) -> Value {
     match protocol {
         MockProtocol::Responses => json!({
@@ -410,6 +469,7 @@ fn response_tool_call(protocol: MockProtocol, id: &str, name: &str, arguments: V
     }
 }
 
+/// Build a JSON response for a final text answer, in the format expected by the given protocol.
 fn response_final(protocol: MockProtocol, content: &str) -> Value {
     match protocol {
         MockProtocol::Responses => json!({
@@ -447,6 +507,10 @@ fn response_final(protocol: MockProtocol, content: &str) -> Value {
     }
 }
 
+/// Resolve the path to the `nanobot` binary for tests.
+///
+/// Uses `CARGO_BIN_EXE_nanobot` if available (set by `cargo test`), otherwise
+/// falls back to `target/debug/nanobot` relative to the workspace root.
 fn binary_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_nanobot") {
         return PathBuf::from(path);
@@ -471,6 +535,10 @@ fn binary_path() -> PathBuf {
     }
 }
 
+/// Run the `nanobot` binary as a subprocess with the given arguments and env.
+///
+/// Captures stdout and stderr, with a 120-second timeout. Both `HOME` and
+/// `USERPROFILE` are set to `home` for cross-platform home-directory resolution.
 async fn run_nanobot(
     bin: &Path,
     home: &Path,
@@ -553,12 +621,14 @@ async fn run_nanobot(
     Ok(out)
 }
 
+/// Format a process `Output` as a readable string (stdout + stderr with UTF-8 lossy).
 fn output_text(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("{}\n{}", stdout, stderr)
 }
 
+/// Assert that the subprocess exited successfully, panicking with full output on failure.
 fn assert_success(output: &Output, label: &str) {
     if !output.status.success() {
         panic!(
@@ -570,6 +640,7 @@ fn assert_success(output: &Output, label: &str) {
     }
 }
 
+/// Write a minimal config JSON file pointing to the mock server.
 fn write_config(
     config_path: &Path,
     workspace: &Path,
@@ -622,6 +693,14 @@ fn write_config(
     Ok(())
 }
 
+/// Full E2E test: onboard, status, one-shot agent with mock custom provider.
+///
+/// Verifies:
+/// - `onboard --overwrite` creates config and workspace templates.
+/// - `status` prints expected output.
+/// - One-shot agent processes a task end-to-end using tool calls.
+/// - Session file contains tool-call records.
+/// - Mock server received at least 3 requests (write_file, read_file, final).
 #[tokio::test]
 async fn e2e_cli_runtime_tools_session_offline() -> Result<()> {
     let server = MockChatServer::start().await?;
@@ -734,6 +813,7 @@ async fn e2e_cli_runtime_tools_session_offline() -> Result<()> {
     Ok(())
 }
 
+/// Same E2E test as above but using the Anthropic `/messages` API protocol.
 #[tokio::test]
 async fn e2e_cli_runtime_tools_session_offline_anthropic() -> Result<()> {
     let server = MockChatServer::start().await?;
@@ -798,6 +878,10 @@ async fn e2e_cli_runtime_tools_session_offline_anthropic() -> Result<()> {
     Ok(())
 }
 
+/// MCP connectivity smoke test: verifies the agent can connect to a `codex`
+/// MCP server.
+///
+/// Ignored by default — requires `codex` to be installed on the system PATH.
 #[tokio::test]
 #[ignore = "requires local `codex` binaries installed"]
 async fn codex_mcp_connect_smoke() -> Result<()> {

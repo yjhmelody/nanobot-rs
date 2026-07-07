@@ -1,4 +1,37 @@
-//! Simplified AgentLoop using modular ReAct engine
+//! The main agent loop — message dispatch, session management, and ReAct orchestration.
+//!
+//! [`AgentLoop`] is the central component of the nanobot agent. It listens
+//! on an inbound message bus, dispatches each message to the correct
+//! session handler, runs the ReAct (Reason-Act-Observe) loop via
+//! [`ReActExecutor`], and publishes the result as an outbound message.
+//!
+//! # Key Responsibilities
+//!
+//! * **Message routing** — Distinguishes stop/cancel commands from normal
+//!   messages and routes them accordingly.
+//! * **Session isolation** — Ensures concurrent messages for the same
+//!   session are processed serially via per-session [`tokio::sync::Mutex`]
+//!   guards.
+//! * **Cancellation** — Supports `/cancel` (graceful) and `/stop` (abort)
+//!   commands. Uses a lock-free [`AtomicBool`] signal checked at each
+//!   ReAct iteration and tool boundary.
+//! * **Session persistence** — Saves all messages and tool results to the
+//!   session store, with optional LLM-based consolidation to compress
+//!   long histories.
+//! * **Channel-specific overrides** — Per-channel configuration for memory
+//!   window, consolidation behaviour, and retrieval settings.
+//!
+//! # Thread Safety
+//!
+//! `AgentLoop` is clone-safe and designed to be wrapped in `Arc<AgentLoop>`.
+//! Shared mutable state uses:
+//! * [`DashMap`] for lock-free concurrent maps (tasks, locks, signals).
+//! * [`parking_lot::Mutex`] for short critical sections (e.g. cleanup
+//!   timestamp).
+//! * [`tokio::sync::Mutex`] for long-held locks that may cross `.await`
+//!   points (per-session serialisation).
+//! * [`AtomicBool`] for the cancellation signal (lock-free check at every
+//!   iteration).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,16 +64,26 @@ use nanobot_types::provider::{ChatMessage, MessageContent, MessageRole, UsageSta
 use nanobot_types::task::TaskId;
 use nanobot_types::text::truncate_utf8_prefix;
 
+/// Tracing target for log messages from this module.
 const TARGET: &str = "nanobot::agent";
-const INTERNAL_ERROR_PREFIX: &str = "⚠️ ";
-const SYSTEM_INFO_PREFIX: &str = "ℹ️ ";
-const SYSTEM_SUCCESS_PREFIX: &str = "✅ ";
+/// Prefix for internal/error messages shown to the user.
+const INTERNAL_ERROR_PREFIX: &str = "\u{26A0}\u{FE0F} ";
+/// Prefix for informational system messages.
+const SYSTEM_INFO_PREFIX: &str = "\u{2139}\u{FE0F} ";
+/// Prefix for success system messages.
+const SYSTEM_SUCCESS_PREFIX: &str = "\u{2705} ";
+/// Maximum time to wait for session save + consolidation after a turn
+/// (including cancelled turns). Beyond this, the error is surfaced to the
+/// user.
 const SAVE_WITH_CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Per-session cancellation signal for /cancel preemption.
+/// Per-session cancellation signal for `/cancel` preemption.
 ///
-/// Set from `handle_cancel` (no lock wait), checked by the ReAct loop
-/// at each iteration/tool boundary. Lock-free via AtomicBool.
+/// Set from [`handle_cancel`] (no lock wait), checked by the ReAct loop
+/// at each iteration/tool boundary. Lock-free via [`AtomicBool`].
+///
+/// Uses `Release`/`Acquire` ordering to ensure the cancel write is
+/// visible to the worker task without a mutex.
 #[derive(Clone)]
 pub(crate) struct CancelSignal(Arc<AtomicBool>);
 
@@ -49,50 +92,86 @@ impl CancelSignal {
         Self(Arc::new(AtomicBool::new(false)))
     }
 
+    /// Sets the cancelled flag. Safe to call from any thread.
     fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
 
+    /// Returns `true` if cancellation has been requested.
     #[allow(dead_code)]
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 
+    /// Clears the cancelled flag. Called at the start of a new message
+    /// dispatch so stale cancellations don't carry over.
     fn reset(&self) {
         self.0.store(false, Ordering::Release);
     }
 }
 
+/// The main agent loop that drives the LLM + tools interaction.
+///
+/// Holds all shared state: bus, provider, session manager, tool registry,
+/// MCP manager, context provider, and the various concurrent-access maps
+/// for tasks, locks, and signals.
+///
+/// Constructed via [`AgentLoopBuilder`](crate::builder::AgentLoopBuilder).
 pub struct AgentLoop {
+    /// Message bus for inbound/outbound communication.
     pub(crate) bus: MessageBus,
+    /// LLM provider for generating responses.
     pub(crate) provider: Arc<dyn LLMProvider>,
+    /// Model identifier (e.g. `"anthropic/claude-opus-4-6"`).
     pub(crate) model: String,
+    /// Maximum ReAct iterations per turn.
     pub(crate) max_iterations: usize,
+    /// LLM sampling temperature.
     pub(crate) temperature: f32,
+    /// Maximum output tokens per LLM call.
     pub(crate) max_tokens: i32,
+    /// Number of recent messages to include in the LLM context window.
     pub(crate) memory_window: usize,
+    /// Optional extended-thinking configuration.
     pub(crate) reasoning_effort: Option<ReasoningConfig>,
+    /// Configuration for session consolidation (LLM-summarised history).
     pub(crate) consolidation_config: ConsolidationConfig,
+    /// Whether automatic history consolidation is enabled.
     pub(crate) consolidation_enabled: bool,
+    /// Per-channel configuration overrides.
     pub(crate) channel_configs: ChannelsConfig,
+    /// Whether to append a token-usage summary to the final message.
     pub(crate) send_usage_summary: bool,
+    /// The tool registry holding all available built-in and dynamic tools.
     pub(crate) tools: Arc<ToolRegistry>,
+    /// Optional MCP (Model Context Protocol) manager for external tool servers.
     pub(crate) mcp: Option<Arc<MCPManager>>,
+    /// Context provider for building system prompts and message history.
     pub(crate) context: Arc<dyn ContextProvider>,
+    /// Retrieval service for fetching context from configured sources.
     pub(crate) retrieval: Arc<RetrievalService>,
+    /// Session manager — backs conversation history and memory.
     pub sessions: Arc<SessionManager>,
+    /// Atomic flag indicating whether the loop should keep running.
     pub(crate) running: Arc<AtomicBool>,
+    /// Per-session locks for serialising concurrent dispatches.
     pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-session map of in-flight task IDs to their `AbortHandle`s.
     pub(crate) active_tasks: Arc<DashMap<SessionKey, DashMap<TaskId, AbortHandle>>>,
+    /// Per-session cancellation signals for `/cancel`.
     pub(crate) cancel_signals: Arc<DashMap<SessionKey, CancelSignal>>,
+    /// Tracks the last cleanup time (for periodic lock-map pruning).
     pub(crate) last_cleanup: Arc<Mutex<Instant>>,
 }
 
+/// Internal envelope combining an outbound message with optional usage data.
 struct OutboundEnvelope {
     message: OutboundMessage,
     usage: Option<UsageStats>,
 }
 
+/// Resolved runtime settings for a single message turn, taking channel
+/// overrides into account.
 #[derive(Debug, Clone)]
 struct AgentRuntimeSettings {
     memory_window: usize,
@@ -102,8 +181,13 @@ struct AgentRuntimeSettings {
 }
 
 impl AgentLoop {
+    /// How often to clean up stale session locks (every 5 minutes).
     const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 
+    /// Prefixes a message with the internal-error indicator.
+    ///
+    /// Idempotent — if the message already starts with the prefix it is
+    /// returned unchanged.
     pub(crate) fn format_internal_error(message: impl AsRef<str>) -> String {
         let message = message.as_ref().trim();
         if message.starts_with(INTERNAL_ERROR_PREFIX) {
@@ -113,6 +197,10 @@ impl AgentLoop {
         }
     }
 
+    /// Prefixes a message with the system-info indicator.
+    ///
+    /// Idempotent — if the message already starts with the prefix it is
+    /// returned unchanged.
     pub(crate) fn format_system_info(message: impl AsRef<str>) -> String {
         let message = message.as_ref().trim();
         if message.starts_with(SYSTEM_INFO_PREFIX) {
@@ -122,6 +210,10 @@ impl AgentLoop {
         }
     }
 
+    /// Prefixes a message with the system-success indicator.
+    ///
+    /// Idempotent — if the message already starts with the prefix it is
+    /// returned unchanged.
     pub(crate) fn format_system_success(message: impl AsRef<str>) -> String {
         let message = message.as_ref().trim();
         if message.starts_with(SYSTEM_SUCCESS_PREFIX) {
@@ -131,6 +223,9 @@ impl AgentLoop {
         }
     }
 
+    /// Formats a usage-summary string from [`UsageStats`].
+    ///
+    /// Produces text like `Tokens: 100 in / 50 out / 150 total`.
     fn usage_summary_text(usage: &UsageStats) -> String {
         let prompt_tokens = usage.prompt_tokens.unwrap_or(0);
         let completion_tokens = usage.completion_tokens.unwrap_or(0);
@@ -149,6 +244,8 @@ impl AgentLoop {
         )
     }
 
+    /// Returns the resolved [`AgentRuntimeSettings`] for the given channel,
+    /// merging defaults with any per-channel overrides from the config.
     fn runtime_settings_for_channel(&self, channel: &str) -> AgentRuntimeSettings {
         let overrides = self
             .channel_configs
@@ -163,6 +260,8 @@ impl AgentLoop {
         )
     }
 
+    /// Merges global defaults with optional per-channel overrides into a
+    /// single [`AgentRuntimeSettings`].
     fn merge_runtime_settings(
         default_memory_window: usize,
         default_consolidation_enabled: bool,
@@ -202,6 +301,8 @@ impl AgentLoop {
         settings
     }
 
+    /// Connects to configured MCP servers if they are not already connected.
+    /// Logs a non-fatal error on failure (will retry on the next message).
     async fn ensure_mcp_connected(&self) {
         if let Some(mcp) = &self.mcp
             && let Err(err) = mcp.connect_if_needed(&self.tools).await
@@ -214,6 +315,8 @@ impl AgentLoop {
         }
     }
 
+    /// Gracefully closes all MCP server connections and unregisters their
+    /// tools from the registry.
     pub async fn close_mcp(&self) {
         if let Some(mcp) = &self.mcp {
             debug!(target: TARGET, "closing MCP manager");
@@ -222,12 +325,24 @@ impl AgentLoop {
         }
     }
 
+    /// Closes the underlying LLM provider connection (if the provider
+    /// supports it).
     pub async fn close_provider(&self) {
         debug!(target: TARGET, "closing provider");
         self.provider.close().await;
         debug!(target: TARGET, "provider closed");
     }
 
+    /// The main event loop: subscribes to the inbound message bus and
+    /// dispatches each message to the appropriate handler.
+    ///
+    /// Runs until [`stop`] is called (which sets `running` to `false`).
+    ///
+    /// # Message routing
+    ///
+    /// * `/stop` commands → [`handle_stop`] (abort all tasks for session)
+    /// * `/cancel` commands → [`handle_cancel`] (set cancellation signal)
+    /// * Everything else → spawns a tokio task calling [`dispatch`]
     pub async fn run(&self) {
         self.running.store(true, Ordering::Release);
         self.ensure_mcp_connected().await;
@@ -295,6 +410,13 @@ impl AgentLoop {
         info!(target: TARGET, "agent loop stopped");
     }
 
+    /// Initiates a graceful shutdown.
+    ///
+    /// 1. Sets `running` to `false` so the main loop stops receiving new
+    ///    messages.
+    /// 2. Publishes a stop sentinel message to unblock any current
+    ///    `inbound_rx.recv()` call.
+    /// 3. Aborts all in-flight tasks tracked in `active_tasks`.
     pub async fn stop(&self) {
         self.running.store(false, Ordering::Release);
         info!(target: TARGET, "stopping agent loop");
@@ -321,6 +443,27 @@ impl AgentLoop {
         debug!(target: TARGET, aborted, "cleared active task registry during shutdown");
     }
 
+    /// Processes a single message synchronously (bypassing the bus) and
+    /// returns the response text.
+    ///
+    /// Useful for CLI or direct-programmatic invocation rather than the
+    /// event-driven loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `content` — The message text.
+    /// * `session_key` — Which session to use/create.
+    /// * `channel` — The origin channel label.
+    /// * `chat_id` — The origin chat identifier.
+    ///
+    /// # Returns
+    ///
+    /// The agent's response text. If `send_usage_summary` is enabled, a
+    /// token-usage footer is appended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] if the underlying message processing fails.
     pub async fn process_direct(
         &self,
         content: &str,
@@ -373,6 +516,8 @@ impl AgentLoop {
         Ok(content)
     }
 
+    /// Registers a spawned task's `AbortHandle` under the given session key
+    /// and task ID, enabling cancellation via `/stop`.
     async fn register_task(&self, session_key: &SessionKey, task_id: TaskId, handle: AbortHandle) {
         self.active_tasks
             .entry(session_key.clone())
@@ -380,6 +525,7 @@ impl AgentLoop {
             .insert(task_id, handle);
     }
 
+    /// Removes the task from the tracking maps after it completes.
     async fn unregister_task(&self, session_key: &SessionKey, task_id: &TaskId) {
         if let Some(tasks) = self.active_tasks.get(session_key) {
             tasks.remove(task_id);
@@ -390,6 +536,8 @@ impl AgentLoop {
         }
     }
 
+    /// Handles a `/stop` command — aborts all in-flight tasks for the
+    /// session (including subagents) and replies with a summary.
     async fn handle_stop(&self, msg: InboundMessage) {
         let session_key = msg.session_key();
 
@@ -425,14 +573,22 @@ impl AgentLoop {
         });
     }
 
+    /// Entry point for dispatching an inbound message.
+    ///
+    /// Currently delegates to [`dispatch_normal`]; this indirection exists
+    /// for future dispatch variants.
     async fn dispatch(&self, msg: InboundMessage) {
         self.dispatch_normal(msg).await;
     }
 
+    /// Handles a `/cancel` command.
+    ///
+    /// Aborts all pending tasks for the session and sets a cancellation
+    /// signal that the ReAct loop checks at each iteration/tool boundary.
     async fn handle_cancel(&self, msg: InboundMessage) {
         let session_key = msg.session_key();
 
-        // 清除所有 pending 任务（消息队列），打断正在执行的 ReAct 循环
+        // Clear all pending tasks (message queue) and abort the running ReAct loop
         let cancelled_main = if let Some((_, handles)) = self.active_tasks.remove(&session_key) {
             let mut count = 0usize;
             for entry in handles.iter() {
@@ -450,7 +606,9 @@ impl AgentLoop {
         let cancelled_sub = self.tools.cancel_spawn_by_session(&session_key).await;
         let total = cancelled_main + cancelled_sub;
 
-        // 即使 task 被 abort，设置 signal 以防有仍在运行的 task 在下一轮检查到
+        // Even if the task was aborted, set the signal so any remaining
+        // running code in the ReAct loop detects cancellation on its next
+        // check point.
         if total > 0 {
             self.cancel_signals
                 .entry(session_key.clone())
@@ -474,9 +632,16 @@ impl AgentLoop {
         });
     }
 
+    /// Dispatches a normal (non-command) message to the processor.
+    ///
+    /// Acquires the per-session lock so that concurrent messages for the
+    /// same session are serialised, then calls [`process_message`].
+    ///
+    /// Resets the cancellation signal on entry so stale signals from a
+    /// previous `/cancel` don't preemptively abort this turn.
     async fn dispatch_normal(&self, msg: InboundMessage) {
         let session_key = msg.session_key();
-        // 同一 session 串行执行，避免并发回合同时改写会话状态导致上下文错乱。
+        // Serialise to avoid concurrent turns corrupting session state
         let lock = self
             .session_locks
             .entry(session_key.clone())
@@ -487,7 +652,8 @@ impl AgentLoop {
         let _guard = lock.lock().await;
         let lock_wait = lock_wait_start.elapsed();
 
-        // 获取 lock 后 reset 取消信号，确保本次处理不受之前 /cancel 影响
+        // Reset cancel signal so this turn isn't preemptively cancelled
+        // by a previous /cancel that was already handled.
         if let Some(entry) = self.cancel_signals.get(&session_key) {
             entry.value().reset();
         }
@@ -535,6 +701,12 @@ impl AgentLoop {
         self.maybe_cleanup().await;
     }
 
+    /// Periodically prunes stale session locks from the lock map.
+    ///
+    /// A lock entry is stale when only the map holds a reference (i.e.
+    /// `Arc::strong_count == 1`, meaning no task currently holds the lock).
+    ///
+    /// Runs at most once every [`CLEANUP_INTERVAL`] (5 minutes).
     async fn maybe_cleanup(&self) {
         let now = Instant::now();
         let mut last = self.last_cleanup.lock();
@@ -558,6 +730,7 @@ impl AgentLoop {
         }
     }
 
+    /// Returns `true` if there are any in-flight tasks for the given session.
     pub fn has_active_tasks(&self, session_key: &SessionKey) -> bool {
         self.active_tasks
             .get(session_key)
@@ -565,6 +738,15 @@ impl AgentLoop {
             .unwrap_or(false)
     }
 
+    /// Processes a single inbound message through the full pipeline:
+    ///
+    /// 1. System-message routing (subagent results).
+    /// 2. Built-in command handling (`/help`, `/new`, `/compact`).
+    /// 3. Retrieval pre-fetch (inject context into user message).
+    /// 4. Build system prompt + message history via [`ContextProvider`].
+    /// 5. Run the ReAct loop ([`ReActExecutor`]).
+    /// 6. Save the turn to the session store with optional consolidation.
+    /// 7. Publish the final outbound message.
     async fn process_message(
         &self,
         mut msg: InboundMessage,
@@ -577,9 +759,9 @@ impl AgentLoop {
             message_id = ?msg.metadata.message_id,
             "process_message start"
         );
+        // System messages (e.g., subagent results) carry origin routing in chat_id
+        // Format: "origin_channel:origin_chat_id" (e.g., "telegram:12345")
         if msg.channel == "system" {
-            // System messages (e.g., subagent results) carry origin routing in chat_id
-            // Format: "origin_channel:origin_chat_id" (e.g., "telegram:12345")
             let (origin_channel, origin_chat_id) = match msg.chat_id.split_once(':') {
                 Some((ch, id)) => (ch.to_string(), id.to_string()),
                 None => return Ok(None),
@@ -627,11 +809,15 @@ impl AgentLoop {
                 Some(&runtime_settings.retrieval),
             )
             .await;
+
+        // Inject retrieved context before the user message, or use the raw
+        // message if nothing was retrieved.
         let current_message = if retrieved.text.trim().is_empty() {
             msg.content_text().to_string()
         } else {
             format!("{}\n\n{}", retrieved.text, msg.content_text())
         };
+
         let messages = self
             .context
             .build_messages(
@@ -649,7 +835,8 @@ impl AgentLoop {
             )
             .await;
 
-        // 新一轮输入插入在“历史尾部”，保存时从这里开始截取新增消息，避免重复落盘旧历史。
+        // The new turn input is appended after history; `start_index`
+        // points to the first new message so we only save the delta.
         let start_index = messages.len() - 1 - history_len;
 
         let reply_to = msg
@@ -697,6 +884,8 @@ impl AgentLoop {
                     ))
                 })??;
 
+                // If the turn already sent a message via the `message` tool,
+                // skip the default final reply to avoid duplicates.
                 if self.tools.message_sent_in_turn().await {
                     return Ok(None);
                 }
@@ -750,7 +939,8 @@ impl AgentLoop {
             ))
         })??;
 
-        // 如果本轮已经显式调用 message 工具发消息，则跳过默认最终回复，避免重复发送。
+        // If the turn already sent a message via the `message` tool,
+        // skip the default final reply to avoid duplicates.
         if self.tools.message_sent_in_turn().await {
             return Ok(None);
         }
@@ -773,6 +963,10 @@ impl AgentLoop {
         }))
     }
 
+    /// Handles built-in slash commands (`/help`, `/new`, `/compact`).
+    ///
+    /// `/stop` and `/cancel` are handled earlier in the dispatch pipeline
+    /// and should never reach this function (they'd be unreachable).
     async fn process_builtin_command(
         &self,
         msg: InboundMessage,
@@ -853,6 +1047,11 @@ impl AgentLoop {
         }
     }
 
+    /// Creates a [`ReActExecutor`] and runs it with the given messages and
+    /// toolbar definitions.
+    ///
+    /// Passes the cancellation signal from `cancel_signals` so the loop
+    /// can be interrupted by `/cancel`.
     async fn run_agent_loop(
         &self,
         messages: Vec<ChatMessage>,
@@ -874,6 +1073,8 @@ impl AgentLoop {
             iteration: 0,
         };
 
+        // Obtain the atomic bool behind the CancelSignal so the ReAct
+        // loop can poll it without a DashMap lookup each time.
         let cancelled: Arc<AtomicBool> = self
             .cancel_signals
             .get(session_key)
@@ -897,6 +1098,13 @@ impl AgentLoop {
             .await
     }
 
+    /// Saves new messages from the current turn into the session.
+    ///
+    /// Applies the following filters during persistence:
+    /// * **Empty assistant messages** — skipped (no content, no tool calls).
+    /// * **Empty user messages** — skipped (blank text or `None`).
+    /// * **Tool results** — truncated to `MAX_TOOL_RESULT_CHARS` to
+    ///   prevent session-file bloat.
     fn save_turn(&self, session: &mut Session, all_msgs: Vec<ChatMessage>, start_index: usize) {
         let before = session.messages.len();
         let mut skipped_empty_assistant = 0usize;
@@ -925,8 +1133,10 @@ impl AgentLoop {
                 }
             }
 
+            // Tool results may be very large; truncate before persisting to
+            // keep session files manageable and reduce load time on future
+            // turns.
             const MAX_TOOL_RESULT_CHARS: usize = 8000;
-            // 工具返回可能很长，写入会话前截断，防止会话文件膨胀导致后续上下文加载变慢。
             let content = msg.content.map(|c| match c {
                 MessageContent::Text(t) => {
                     if msg.role == MessageRole::Tool && t.len() > MAX_TOOL_RESULT_CHARS {
@@ -973,6 +1183,8 @@ impl AgentLoop {
     }
 }
 
+/// Manual `Clone` implementation — all fields are cheaply cloneable
+/// (Arcs, atomics, and clone-on-write types).
 impl Clone for AgentLoop {
     fn clone(&self) -> Self {
         Self {
@@ -1481,14 +1693,14 @@ mod tests {
         let signal_clone = signal.clone();
 
         let handle = tokio::spawn(async move {
-            // 等待取消信号
+            // Wait for cancellation signal
             while !signal_clone.is_cancelled() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             true
         });
 
-        // 确保 task 已开始运行
+        // Ensure task has started
         tokio::time::sleep(Duration::from_millis(5)).await;
         signal.cancel();
 

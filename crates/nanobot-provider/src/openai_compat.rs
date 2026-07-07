@@ -1,3 +1,38 @@
+//! OpenAI-compatible provider implementation.
+//!
+//! This module implements [`LLMProvider`] for any LLM API that uses the OpenAI wire format,
+//! including OpenAI itself, OpenRouter, DeepSeek, AIHubMix, and many others.
+//!
+//! # Wire APIs
+//!
+//! The provider supports two distinct OpenAI wire protocols, selected via
+//! [`ProviderWireApi`] in the configuration:
+//!
+//! | Wire API              | Endpoint                        | Status          |
+//! |-----------------------|---------------------------------|-----------------|
+//! | `Responses` (default) | `POST /v1/responses`             | Recommended     |
+//! | `ChatCompletions`     | `POST /v1/chat/completions`      | Legacy fallback |
+//!
+//! # Model Name Resolution
+//!
+//! When the provider name is "openai", the `openai/` prefix is stripped from model names
+//! (e.g., `openai/gpt-4o` becomes `gpt-4o`). For other providers, model names are
+//! canonicalized using [`ProviderSpec`](crate::registry::ProviderSpec) from the registry,
+//! which adds the appropriate `litellm_prefix` unless the name already has a known prefix.
+//!
+//! # Message Format Translation
+//!
+//! - For **Responses API**: Messages are mapped to [`ResponseInputItem`] variants
+//!   (Message, FunctionCall, FunctionCallOutput). Tool calls become inline `function_call`
+//!   items and tool results become `function_call_output` items.
+//! - For **Chat Completions API**: Messages use the traditional role/content/tool_calls
+//!   structure with tool results using the `tool` role.
+//!
+//! # Streaming
+//!
+//! True streaming is only supported for the Responses wire API. The Chat Completions
+//! API falls back to a non-streaming response wrapped in a single-event stream.
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -26,18 +61,50 @@ use crate::{
 };
 use crate::{ProviderError, ProviderResult};
 
+/// Provider for any LLM API that speaks the OpenAI wire format.
+///
+/// Supports both the newer Responses API (`/v1/responses`) and the legacy
+/// Chat Completions API (`/v1/chat/completions`). The wire format is selected
+/// at construction time via [`ProviderWireApi`].
+///
+/// # Model Resolution
+///
+/// Model names are canonicalized per-provider using [`ProviderSpec`](crate::registry::ProviderSpec),
+/// which handles litellm-style prefixes and name stripping.
+///
+/// # Thread Safety
+///
+/// Like all providers in this crate, this struct is `Send + Sync` and designed
+/// to be shared as `Arc<dyn LLMProvider>`.
 #[derive(Debug)]
 pub struct OpenAICompatProvider {
+    /// API key (sent as `Authorization: Bearer <key>`).
     api_key: String,
+    /// Optional base URL override (defaults to `https://api.openai.com/v1`).
     api_base: Option<String>,
+    /// Default model identifier.
     default_model: String,
+    /// Provider name from configuration (e.g. "openai", "deepseek", "openrouter").
     provider_name: String,
+    /// Wire format variant (Responses or ChatCompletions).
     wire_api: ProviderWireApi,
+    /// Additional HTTP headers.
     extra_headers: HashMap<String, String>,
+    /// Internal helper for proxy fallback logic.
     proxy_helper: ProxyFallbackHelper,
 }
 
 impl OpenAICompatProvider {
+    /// Creates a new OpenAI-compatible provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - API key (sent as `Authorization: Bearer <key>`)
+    /// * `api_base` - Optional base URL override
+    /// * `default_model` - Default model identifier
+    /// * `provider_name` - Provider name from config (used for model resolution rules)
+    /// * `wire_api` - Wire format variant (Responses or ChatCompletions)
+    /// * `extra_headers` - Additional HTTP headers
     pub fn new(
         api_key: String,
         api_base: Option<String>,
@@ -57,7 +124,15 @@ impl OpenAICompatProvider {
         }
     }
 
+    /// Resolves the effective model name for this provider.
+    ///
+    /// For the "openai" provider, the `openai/` prefix is stripped.
+    /// For other providers with a [`ProviderSpec`](crate::registry::ProviderSpec), the
+    /// model name is canonicalized: a `litellm_prefix` is prepended unless the model
+    /// already carries a known prefix (from `skip_prefixes`).
     fn resolve_model(&self, model: &str) -> String {
+        // Special case: "openai" provider strips the openai/ prefix
+        // because the upstream OpenAI API does not expect it.
         if self.provider_name == "openai"
             && let Some(stripped) = model.strip_prefix("openai/")
         {
@@ -78,6 +153,7 @@ impl OpenAICompatProvider {
 
             let canonical =
                 canonicalize_explicit_prefix(&resolved, &self.provider_name, spec.litellm_prefix);
+            // If the model already has one of the known skip prefixes, don't add the litellm_prefix.
             if spec
                 .skip_prefixes
                 .iter()
@@ -92,6 +168,9 @@ impl OpenAICompatProvider {
         }
     }
 
+    /// Constructs the Responses API endpoint URL.
+    ///
+    /// Handles trailing slashes and avoids duplicating the `/responses` suffix.
     fn responses_endpoint(&self) -> String {
         let base = self
             .api_base
@@ -108,6 +187,9 @@ impl OpenAICompatProvider {
         format!("{}/responses", trimmed)
     }
 
+    /// Constructs the Chat Completions API endpoint URL.
+    ///
+    /// Handles trailing slashes and avoids duplicating the `/chat/completions` suffix.
     fn chat_completions_endpoint(&self) -> String {
         let base = self
             .api_base
@@ -122,6 +204,11 @@ impl OpenAICompatProvider {
         format!("{}/chat/completions", trimmed)
     }
 
+    /// Builds the HTTP headers for an OpenAI-compatible API request.
+    ///
+    /// Includes `Content-Type: application/json` and `Authorization: Bearer <key>`.
+    /// Extra headers from configuration are appended, with invalid header names silently
+    /// skipped (e.g., names containing spaces).
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -144,6 +231,11 @@ impl OpenAICompatProvider {
         headers
     }
 
+    /// Replaces empty text content with placeholders.
+    ///
+    /// Same logic as [`crate::anthropic::AnthropicProvider::sanitize_messages`]:
+    /// assistant messages with tool calls get `content = None`, other messages get
+    /// `content = "(empty)"`.
     fn sanitize_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         messages
             .into_iter()
@@ -167,6 +259,9 @@ impl OpenAICompatProvider {
             .collect()
     }
 
+    /// Sends an HTTP request to the provider with tracing.
+    ///
+    /// Headers and body are logged at `trace` level with sensitive fields redacted.
     async fn send_request(
         &self,
         client: &reqwest::Client,
@@ -193,6 +288,12 @@ impl OpenAICompatProvider {
             .await
     }
 
+    /// Sends a request with automatic proxy fallback on failure.
+    ///
+    /// Same strategy as [`crate::anthropic::AnthropicProvider::send_request_with_proxy_fallback`]:
+    /// 1. Try via proxy-respecting client.
+    /// 2. On gateway error (502/503/504) or connection failure, retry via direct client.
+    /// 3. If both fail, return a combined error message.
     async fn send_request_with_proxy_fallback(
         &self,
         endpoint: &str,
@@ -249,6 +350,10 @@ impl OpenAICompatProvider {
         }
     }
 
+    /// Builds a Responses API payload from the unified `ChatRequest`.
+    ///
+    /// Tools are mapped to `ResponseToolDefinition` with a flat structure (no `function`
+    /// wrapper), matching the Responses API schema.
     fn build_responses_payload(&self, model: String, req: ChatRequest) -> ResponsesPayload {
         let messages = Self::sanitize_messages(req.messages);
         let tool_choice = req
@@ -279,6 +384,10 @@ impl OpenAICompatProvider {
         }
     }
 
+    /// Builds a Chat Completions API payload from the unified `ChatRequest`.
+    ///
+    /// Tools are wrapped in a `{"type":"function","function":{...}}` structure matching
+    /// the legacy chat completions schema.
     fn build_chat_completions_payload(
         &self,
         model: String,
@@ -434,6 +543,10 @@ impl LLMProvider for OpenAICompatProvider {
     }
 }
 
+/// Canonicalizes a model name by replacing the spec name prefix with the canonical prefix.
+///
+/// If `model` is `"github-copilot/gpt-4o"` and `spec_name` is `"github_copilot"`,
+/// the result is `"github_copilot/gpt-4o"` (hyphens replaced with underscores).
 fn canonicalize_explicit_prefix(model: &str, spec_name: &str, canonical_prefix: &str) -> String {
     if let Some((prefix, tail)) = model.split_once('/')
         && prefix.replace('-', "_") == spec_name
@@ -443,6 +556,15 @@ fn canonicalize_explicit_prefix(model: &str, spec_name: &str, canonical_prefix: 
     model.to_string()
 }
 
+/// Converts an [`OpenAIResponsesResponse`] into the unified [`LLMResponse`] format.
+///
+/// Distribution of output blocks:
+/// - `Message` blocks → text content (all `OutputText`/`InputText` blocks joined)
+/// - `FunctionCall` blocks → `tool_calls`
+/// - `Reasoning` blocks → `thinking_blocks`
+///
+/// If the response contains an error message, it is returned as content text rather
+/// than propagating as a `ProviderError`, for backward compatibility.
 fn parse_responses_response(resp: OpenAIResponsesResponse) -> LLMResponse {
     if let Some(error) = resp.error.and_then(|err| err.message)
         && !error.trim().is_empty()
@@ -529,6 +651,7 @@ fn parse_responses_response(resp: OpenAIResponsesResponse) -> LLMResponse {
     }
 }
 
+/// Maps Responses API usage data to unified `UsageStats`.
 fn map_responses_usage(usage: Option<ResponsesUsage>) -> UsageStats {
     match usage {
         Some(usage) => UsageStats {
@@ -540,6 +663,10 @@ fn map_responses_usage(usage: Option<ResponsesUsage>) -> UsageStats {
     }
 }
 
+/// Converts a [`ChatCompletionsResponse`] into the unified [`LLMResponse`] format.
+///
+/// Takes the first choice (if any) and extracts text content, tool calls,
+/// reasoning content, and usage stats.
 fn parse_chat_completions_response(resp: ChatCompletionsResponse) -> LLMResponse {
     let Some(choice) = resp.choices.into_iter().next() else {
         return LLMResponse {
@@ -597,6 +724,11 @@ fn parse_chat_completions_response(resp: ChatCompletionsResponse) -> LLMResponse
     }
 }
 
+/// Converts nanobot's unified message list into Chat Completions API messages.
+///
+/// - `Tool` messages → role `"tool"` with `tool_call_id`
+/// - `Assistant` messages → role `"assistant"` with optional `reasoning_content` and `tool_calls`
+/// - Other messages → role mapped via [`role_to_responses_role`]
 fn chat_completions_messages_from_chat_messages(
     messages: Vec<ChatMessage>,
 ) -> Vec<ChatCompletionsRequestMessage> {
@@ -656,6 +788,10 @@ fn chat_completions_messages_from_chat_messages(
     out
 }
 
+/// Parses chat completions message content, which can be either plain text or
+/// a list of content blocks (text + thinking blocks for reasoning models).
+///
+/// Returns `(text_content, thinking_blocks)`.
 fn parse_chat_completions_message_content(
     content: Option<ChatCompletionsResponseContent>,
 ) -> (Option<String>, Vec<ThinkingBlock>) {
@@ -699,6 +835,13 @@ fn parse_chat_completions_message_content(
     }
 }
 
+/// Converts nanobot's unified message list into Responses API input items.
+///
+/// - System/User/Assistant messages → `ResponseInputItem::Message` with `input_text` content
+/// - Assistant tool calls → `ResponseInputItem::FunctionCall`
+/// - Tool results → `ResponseInputItem::FunctionCallOutput`
+///
+/// Empty messages are skipped.
 fn responses_input_from_messages(messages: Vec<ChatMessage>) -> Vec<ResponseInputItem> {
     let mut input = Vec::new();
 
@@ -747,6 +890,7 @@ fn responses_input_from_messages(messages: Vec<ChatMessage>) -> Vec<ResponseInpu
     input
 }
 
+/// Maps nanobot message roles to OpenAI-compatible role strings.
 fn role_to_responses_role(role: &MessageRole) -> &'static str {
     match role {
         MessageRole::System => "system",
@@ -756,6 +900,10 @@ fn role_to_responses_role(role: &MessageRole) -> &'static str {
     }
 }
 
+/// Creates a debug-friendly representation of headers with the `Authorization` header redacted.
+///
+/// Shows only `Bearer <redacted:XXXXXX>` for the authorization header.
+/// Used in trace logging to avoid leaking API keys.
 fn redacted_header_map(headers: &HeaderMap) -> HashMap<String, String> {
     headers
         .iter()
@@ -773,6 +921,9 @@ fn redacted_header_map(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
+/// Redacts an `Authorization: Bearer` header for logging, revealing only the last 6 characters.
+///
+/// Example output: `Bearer <redacted:AbCdEf>`
 fn redact_authorization_header(value: &HeaderValue) -> String {
     let raw = value.to_str().unwrap_or("<non-utf8>");
     if let Some(token) = raw.strip_prefix("Bearer ") {
@@ -789,10 +940,14 @@ fn redact_authorization_header(value: &HeaderValue) -> String {
     "<redacted>".to_string()
 }
 
+/// Pretty-prints a JSON value for trace logging.
 fn format_request_body(payload: &serde_json::Value) -> String {
     serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
 }
 
+/// Extracts plain text content from an optional `MessageContent`.
+///
+/// Same logic as [`crate::anthropic::message_content_text`].
 fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
     match content {
         Some(MessageContent::Text(text)) => Some(text.clone()),

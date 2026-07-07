@@ -1,3 +1,44 @@
+//! Core configuration types for the nanobot framework.
+//!
+//! This module defines the top-level [`Config`] struct along with all nested
+//! configuration types for agents, channels, providers, tools, retrieval, the
+//! gateway, and ACP integration. It also provides validation logic and
+//! provider name normalization.
+//!
+//! # Design
+//!
+//! - **Flat hierarchy with composition**: [`Config`] contains sub-configs
+//!   (e.g., [`AgentsConfig`], [`ChannelsConfig`], [`ToolsConfig`]) as named
+//!   fields rather than a deeply nested tree, keeping JSON structure intuitive.
+//! - **Serde `#[serde(default)]`****: Every sub-config and field uses
+//!   `#[serde(default)]`, so partial config files merge with defaults rather
+//!   than requiring every field to be present.
+//! - **camelCase JSON keys**: The `#[serde(rename_all = "camelCase")]` attribute
+//!   on all structs produces `maxTokens` not `max_tokens` in JSON, while Rust
+//!   code uses idiomatic snake_case.
+//! - **Validation explicit, not automatic**: [`Config::validate`] must be
+//!   called explicitly after loading; it is not run during deserialization.
+//!   This keeps deserialization fast and allows partial configs to round-trip.
+//! - **Provider name aliasing**: The [`normalize_provider_name`] function and
+//!   the [`ProvidersConfig`] wrapper allow providers to be referenced by
+//!   multiple name forms (e.g., `github-copilot`, `githubCopilot`, `github_copilot`).
+//!
+//! # Validation
+//!
+//! The `validate` methods on [`Config`] and its sub-types check for:
+//! - Positive ranges for counts, tokens, and timeouts
+//! - Temperature in the valid range `[0.0, 2.0]`
+//! - Cross-field consistency (e.g., `consolidation_keep_recent <= memory_window`)
+//! - MCP server requiring either `command` or `url`
+//! - Retrieval source configuration completeness by kind
+//!
+//! # Relationships
+//!
+//! - Referenced by [`crate::loader`] for deserialization.
+//! - Re-exported at the crate root via `pub use schema::*`.
+//! - Types like [`ProviderConfig`] and [`AgentDefaults`] are consumed by
+//!   `nanobot-agent` and `nanobot-provider` at runtime.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -48,6 +89,19 @@ impl Config {
     }
 }
 
+/// Expands a leading `~/` to the user's home directory.
+///
+/// If the path does not start with `~/`, it is returned as-is.
+///
+/// # Errors
+///
+/// Returns a `String` error if the home directory cannot be resolved.
+///
+/// # Why not use a library?
+///
+/// This is intentionally kept as a simple utility rather than pulling in
+/// `shellexpand` or similar. The only expansion needed is `~` for the
+/// workspace path, and this simple implementation covers that.
 fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
     if let Some(rest) = raw.strip_prefix("~/") {
         let home =
@@ -128,11 +182,14 @@ impl Config {
     /// assert_eq!(provider.as_deref(), Some("anthropic"));
     /// ```
     pub fn get_provider_name(&self, model: Option<&str>) -> Option<String> {
+        // Step 1: If the user explicitly forced a provider (and it's not "auto"), use it.
         let forced = normalize_provider_name(&self.agents.defaults.provider);
         if !forced.is_empty() && forced != "auto" {
             return Some(forced);
         }
 
+        // Step 2: Check if the model name has a "provider/model" prefix (e.g.,
+        // "openai/gpt-4") and that provider exists in our config.
         let target_model = model.unwrap_or(&self.agents.defaults.model).to_lowercase();
         if let Some((prefix, _)) = target_model.split_once('/') {
             let normalized_prefix = normalize_provider_name(prefix);
@@ -141,6 +198,8 @@ impl Config {
             }
         }
 
+        // Step 3: Fall back to the first configured non-OAuth provider that has
+        // an API key. Sort alphabetically for deterministic selection.
         let mut candidates = self
             .providers
             .iter()
@@ -256,16 +315,50 @@ impl Config {
     }
 }
 
+/// Normalizes provider names to a canonical snake_case form.
+///
+/// This function allows provider names to be specified in multiple formats
+/// (kebab-case, camelCase, snake_case, space-separated) and resolves them
+/// to a single canonical representation. For example:
+///
+/// | Input              | Output             |
+/// |--------------------|--------------------|
+/// | `github-copilot`   | `github_copilot`   |
+/// | `githubCopilot`    | `github_copilot`   |
+/// | `github_copilot`   | `github_copilot`   |
+/// | `GitHub Copilot`   | `github_copilot`   |
+/// | `auto`             | `auto`             |
+///
+/// # How it works
+///
+/// 1. Trims leading/trailing whitespace.
+/// 2. Returns empty string for empty input.
+/// 3. Returns `"auto"` unchanged (case-insensitive).
+/// 4. Iterates character-by-character:
+///    - Hyphens, spaces, and other non-alphanumeric characters are treated
+///      as separators and replaced with `_` (deduplicated).
+///    - Uppercase ASCII letters trigger a `_` before the letter (except at
+///      the start or after another separator), then lowercased.
+///    - Existing underscores pass through directly.
+/// 5. Leading and trailing `_` characters are trimmed.
+///
+/// # Motivation
+///
+/// This normalization exists to allow the config file to accept provider
+/// names in any common naming convention, making it easier to migrate from
+/// external tools and configs that use different styles.
 pub fn normalize_provider_name(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
+    // Preserve the literal "auto" value as-is (case-insensitive)
     if trimmed.eq_ignore_ascii_case("auto") {
         return "auto".to_string();
     }
 
+    // Pre-allocate with the input length — the output will be at most this long.
     let mut out = String::with_capacity(trimmed.len());
     let mut prev_is_sep = false;
     for ch in trimmed.chars() {
@@ -403,6 +496,16 @@ pub struct PromptConfig {
     pub custom: Option<String>,
 }
 
+/// Default values for agent configuration.
+///
+/// These defaults provide a sensible starting configuration for most
+/// use cases. The workspace points to `~/.nanobot/workspace`, the model
+/// is Claude Sonnet 4-5 via Anthropic's API, and the provider resolution
+/// is set to `"auto"` (infer from model prefix).
+///
+/// Session consolidation is enabled by default with a memory window of
+/// 100 turns, triggering after 20 unconsolidated messages and keeping
+/// the 10 most recent turns as raw text during consolidation.
 impl Default for AgentDefaults {
     fn default() -> Self {
         Self {
@@ -427,6 +530,30 @@ impl Default for AgentDefaults {
 
 impl AgentDefaults {
     /// Validates agent default configuration.
+    ///
+    /// Checks the following constraints:
+    /// - `max_tokens` must be positive.
+    /// - `temperature` must be in range `[0.0, 2.0]`.
+    /// - `max_tool_iterations` must be positive.
+    /// - `memory_window` must be positive.
+    /// - `consolidation_keep_recent` must be positive.
+    /// - `consolidation_keep_recent` must not exceed `memory_window`.
+    /// - `consolidation_min_messages` must be positive.
+    /// - `consolidation_summary_max_tokens` must be positive.
+    /// - `workspace` and `model` must not be empty or whitespace-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if any of the above constraints are violated.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nanobot_config::schema::AgentDefaults;
+    ///
+    /// let defaults = AgentDefaults::default();
+    /// assert!(defaults.validate().is_ok());
+    /// ```
     pub fn validate(&self) -> ConfigResult<()> {
         if self.max_tokens <= 0 {
             return Err(ConfigError::invalid(format!(
@@ -488,6 +615,28 @@ impl AgentDefaults {
     }
 
     /// Validates a channel-specific override set against these defaults.
+    ///
+    /// For fields that are `None` in the overrides, the corresponding default
+    /// value from `self` is used for validation. This ensures that overrides
+    /// are validated in the context of the full effective configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `overrides` — The [`AgentRuntimeOverrides`] to validate.
+    /// * `scope` — A dot-separated path string used in error messages to
+    ///   identify where the override is located (e.g.,
+    ///   `"channels.instances.telegram.agentOverrides"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if:
+    /// - `memory_window` (or its default) is zero.
+    /// - `consolidation_keep_recent` (or its default) is zero.
+    /// - `consolidation_keep_recent > memory_window`.
+    /// - `consolidation_min_messages` is zero.
+    /// - `consolidation_summary_max_tokens` is non-positive.
+    /// - `retrieval_max_hits` is `Some(0)`.
+    /// - `retrieval_max_context_tokens` is `Some(0)`.
     pub fn validate_overrides(
         &self,
         overrides: &AgentRuntimeOverrides,
@@ -575,6 +724,11 @@ pub struct ChannelDefaults {
     pub stream_mode: StreamMode,
 }
 
+/// Default channel settings.
+///
+/// By default, progress events are sent, tool hints and usage summaries are
+/// not, and streaming mode uses [`StreamMode::UpdateAll`] (edit the same
+/// message for progress and final output).
 impl Default for ChannelDefaults {
     fn default() -> Self {
         Self {
@@ -640,6 +794,10 @@ pub struct TelegramChannelConfig {
     pub agent_overrides: Option<AgentRuntimeOverrides>,
 }
 
+/// Default Telegram channel configuration.
+///
+/// Enabled, no sender allowlist restrictions, empty token (must be set
+/// by the user), and per-instance overrides inherit from channel defaults.
 impl Default for TelegramChannelConfig {
     fn default() -> Self {
         Self {
@@ -720,6 +878,11 @@ pub struct FeishuChannelConfig {
     pub agent_overrides: Option<AgentRuntimeOverrides>,
 }
 
+/// Default Feishu channel configuration.
+///
+/// Enabled, no sender allowlist restrictions, empty credentials (must be
+/// set by the user), WebSocket mode not explicitly configured, and
+/// per-instance overrides inherit from channel defaults.
 impl Default for FeishuChannelConfig {
     fn default() -> Self {
         Self {
@@ -748,6 +911,9 @@ impl Default for FeishuChannelConfig {
 }
 
 impl ChannelInstanceConfig {
+    /// Returns whether this channel instance is enabled.
+    ///
+    /// Delegates to the inner variant's `enabled` field.
     pub fn enabled(&self) -> bool {
         match self {
             Self::Telegram(c) => c.enabled,
@@ -755,6 +921,10 @@ impl ChannelInstanceConfig {
         }
     }
 
+    /// Returns the list of allowed sender IDs or chat IDs.
+    ///
+    /// An empty or `["*"]` list typically means all senders are allowed.
+    /// Delegates to the inner variant's `allow_from` field.
     pub fn allow_from(&self) -> &[String] {
         match self {
             Self::Telegram(c) => &c.allow_from,
@@ -762,6 +932,11 @@ impl ChannelInstanceConfig {
         }
     }
 
+    /// Returns the optional per-channel agent runtime overrides.
+    ///
+    /// These overrides let channel instances customize agent behavior
+    /// (e.g., memory window, consolidation settings) without modifying
+    /// the global agent defaults.
     pub fn agent_overrides(&self) -> Option<&AgentRuntimeOverrides> {
         match self {
             Self::Telegram(c) => c.agent_overrides.as_ref(),
@@ -830,16 +1005,51 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// Returns `true` if the provider has a non-empty API key configured.
+    ///
+    /// A provider is considered "authed" when `api_key` is non-empty after
+    /// trimming whitespace. This is used by [`Config::get_provider_name`] to
+    /// select the first configured provider with authentication.
     pub fn has_auth(&self) -> bool {
         !self.api_key.trim().is_empty()
     }
 }
 
 /// Collection of all configured providers.
+///
+/// This is a newtype wrapper around `HashMap<String, ProviderConfig>` that
+/// provides name normalization: all provider lookups go through
+/// [`normalize_provider_name`], so providers can be referenced by any naming
+/// convention (kebab-case, camelCase, snake_case).
+///
+/// # Defaults
+///
+/// The default instance pre-populates three well-known providers:
+///
+/// | Key              | Type            |
+/// |------------------|-----------------|
+/// | `anthropic`      | Anthropic       |
+/// | `openai`         | OpenAI-compatible|
+/// | `github_copilot` | OAuth           |
+///
+/// # Serde behaviour
+///
+/// The transparent serialization (`#[serde(transparent)]`) means the JSON
+/// representation is a flat object `{ "providerName": { ... }, ... }`, the
+/// same as a regular `HashMap<String, ProviderConfig>`.
+///
+/// During deserialization, all provider names are normalized, so keys like
+/// `"github-copilot"` or `"githubCopilot"` both become `"github_copilot"` in
+/// memory.
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
 pub struct ProvidersConfig(pub HashMap<String, ProviderConfig>);
 
+/// Default providers built into the configuration.
+///
+/// Sets up three providers: Anthropic (Anthropic protocol), OpenAI
+/// (OpenAI-compatible), and GitHub Copilot (OAuth). Users can override
+/// these or add new ones via the config file.
 impl Default for ProvidersConfig {
     fn default() -> Self {
         let mut providers = HashMap::new();
@@ -863,26 +1073,55 @@ impl Default for ProvidersConfig {
 }
 
 impl ProvidersConfig {
+    /// Returns a reference to the provider config for the given name.
+    ///
+    /// The name is normalized before lookup, so `"github-copilot"`,
+    /// `"githubCopilot"`, and `"github_copilot"` all match the same entry.
     pub fn get(&self, name: &str) -> Option<&ProviderConfig> {
         let normalized = normalize_provider_name(name);
         self.0.get(&normalized)
     }
 
+    /// Returns a mutable reference to the provider config for the given name.
+    ///
+    /// The name is normalized before lookup, matching any naming convention.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut ProviderConfig> {
         let normalized = normalize_provider_name(name);
         self.0.get_mut(&normalized)
     }
 
+    /// Inserts a provider configuration under the given name.
+    ///
+    /// The name is normalized before storage, so subsequent lookups with
+    /// any naming convention for the same provider will succeed.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — The provider name (e.g., `"my-custom-provider"`).
+    /// * `config` — The [`ProviderConfig`] to associate with this name.
     pub fn insert(&mut self, name: impl Into<String>, config: ProviderConfig) {
         let normalized = normalize_provider_name(&name.into());
         self.0.insert(normalized, config);
     }
 
+    /// Returns an iterator over all (name, config) pairs.
+    ///
+    /// The names are in their normalized (snake_case) form.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &ProviderConfig)> {
         self.0.iter()
     }
 }
 
+/// Custom deserialization that normalizes all provider names.
+///
+/// Without this custom impl, serde would store provider keys as-is from
+/// the JSON file, which could be `"github-copilot"` or `"githubCopilot"`.
+/// This deserializer normalizes every key via [`normalize_provider_name`],
+/// ensuring that all providers are stored in canonical snake_case form.
+///
+/// The default providers (Anthropic, OpenAI, GitHub Copilot) are merged
+/// first, then any user-specified providers from the config file are added
+/// or override them.
 impl<'de> Deserialize<'de> for ProvidersConfig {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -911,6 +1150,9 @@ pub struct GatewayConfig {
     pub heartbeat: HeartbeatConfig,
 }
 
+/// Default gateway configuration.
+///
+/// Binds to `0.0.0.0:18790` with heartbeats enabled at a 30-minute interval.
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -923,6 +1165,13 @@ impl Default for GatewayConfig {
 
 impl GatewayConfig {
     /// Validates gateway configuration.
+    ///
+    /// Currently delegates to [`HeartbeatConfig::validate`]. The `host` and
+    /// `port` fields are reserved for future use and are not validated yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if heartbeat validation fails.
     pub fn validate(&self) -> ConfigResult<()> {
         // Gateway host/port endpoint is reserved and currently unused.
         // Keep fields for config compatibility, but skip endpoint validation for now.
@@ -943,6 +1192,9 @@ pub struct HeartbeatConfig {
     pub interval_s: u64,
 }
 
+/// Default heartbeat configuration.
+///
+/// Enabled with a 30-minute (1800-second) polling interval.
 impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
@@ -954,6 +1206,13 @@ impl Default for HeartbeatConfig {
 
 impl HeartbeatConfig {
     /// Validates heartbeat configuration.
+    ///
+    /// Checks that `interval_s` is non-zero when heartbeats are enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if `enabled` is `true` and
+    /// `interval_s` is zero.
     pub fn validate(&self) -> ConfigResult<()> {
         if self.enabled && self.interval_s == 0 {
             return Err(ConfigError::invalid(
@@ -981,6 +1240,17 @@ pub struct ToolsConfig {
 
 impl ToolsConfig {
     /// Validates tools configuration.
+    ///
+    /// Checks the following:
+    /// - Web tool configuration (see [`WebToolsConfig::validate`]).
+    /// - Exec tool configuration (see [`ExecToolConfig::validate`]).
+    /// - All MCP server configurations: each must have either `command` or
+    ///   `url` set, and `tool_timeout` must be positive. Server names must
+    ///   not be empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if any sub-validation fails.
     pub fn validate(&self) -> ConfigResult<()> {
         self.web.validate()?;
         self.exec.validate()?;
@@ -1015,6 +1285,10 @@ pub struct RetrievalConfig {
     pub sources: HashMap<String, RetrievalSourceConfig>,
 }
 
+/// Default retrieval configuration.
+///
+/// Disabled by default. When enabled, auto-inject is on, with up to 8 hits
+/// and a 3000-token context budget. Each source has a 1500ms timeout.
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
@@ -1030,6 +1304,15 @@ impl Default for RetrievalConfig {
 
 impl RetrievalConfig {
     /// Validates retrieval configuration.
+    ///
+    /// Checks the following:
+    /// - `max_hits`, `max_context_tokens`, and `source_timeout_ms` must be positive.
+    /// - All source names must be non-empty.
+    /// - Each source must pass its own validation (see [`RetrievalSourceConfig::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if any constraint is violated.
     pub fn validate(&self) -> ConfigResult<()> {
         if self.max_hits == 0 {
             return Err(ConfigError::invalid("retrieval max_hits must be positive"));
@@ -1057,12 +1340,29 @@ impl RetrievalConfig {
 }
 
 /// Retrieval source adapter kind.
+///
+/// Identifies which type of retrieval backend a source uses.
+///
+/// # Variants
+///
+/// * `Memory` — Retrieves from the agent's conversation history (session
+///   memory). No additional configuration required.
+/// * `Workspace` — Retrieves from workspace files, using glob patterns
+///   defined in `include`/`exclude`.
+/// * `McpTool` — Retrieves by invoking an MCP tool. Requires `server`
+///   and `tool` to be set.
+/// * `McpResource` — Retrieves from an MCP resource template. Requires
+///   `server` and `template` to be set.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RetrievalSourceKind {
+    /// Retrieves from agent conversation history.
     Memory,
+    /// Retrieves from workspace files using glob patterns.
     Workspace,
+    /// Retrieves by invoking an MCP tool.
     McpTool,
+    /// Retrieves from an MCP resource template.
     McpResource,
 }
 
@@ -1092,6 +1392,10 @@ pub struct RetrievalSourceConfig {
     pub allow_anonymous_citation: bool,
 }
 
+/// Default retrieval source configuration.
+///
+/// A `Memory` kind source that is enabled, with no limits, globs, or MCP
+/// references.
 impl Default for RetrievalSourceConfig {
     fn default() -> Self {
         Self {
@@ -1110,6 +1414,22 @@ impl Default for RetrievalSourceConfig {
 }
 
 impl RetrievalSourceConfig {
+    /// Validates this retrieval source configuration.
+    ///
+    /// Checks:
+    /// - `max_hits` and `max_context_tokens` are not `Some(0)`.
+    /// - For `McpTool`: `server` and `tool` must be non-empty.
+    /// - For `McpResource`: `server` and `template` must be non-empty.
+    /// - `Memory` and `Workspace` kinds require no additional fields.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — The source name, used in error messages for context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if any of the above constraints
+    /// are violated for the given source kind.
     fn validate(&self, name: &str) -> ConfigResult<()> {
         if self.max_hits == Some(0) {
             return Err(ConfigError::invalid(format!(
@@ -1164,6 +1484,12 @@ pub struct WebToolsConfig {
 
 impl WebToolsConfig {
     /// Validates web tools configuration.
+    ///
+    /// Delegates to [`WebSearchConfig::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if web search validation fails.
     pub fn validate(&self) -> ConfigResult<()> {
         self.search.validate()?;
         Ok(())
@@ -1176,10 +1502,11 @@ impl WebToolsConfig {
 pub struct WebSearchConfig {
     /// API key for search provider.
     pub api_key: String,
-    /// Maximum results to return.
+    /// Maximum results to return from a search query.
     pub max_results: usize,
 }
 
+/// Default web search: empty API key, 5 max results.
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
@@ -1191,6 +1518,12 @@ impl Default for WebSearchConfig {
 
 impl WebSearchConfig {
     /// Validates web search configuration.
+    ///
+    /// Checks that `max_results` is positive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if `max_results` is zero.
     pub fn validate(&self) -> ConfigResult<()> {
         if self.max_results == 0 {
             return Err(ConfigError::invalid(
@@ -1215,6 +1548,9 @@ pub struct ExecToolConfig {
     pub disable_all_guards: bool,
 }
 
+/// Default exec tool configuration.
+///
+/// 60-second timeout, no PATH suffix, all guards enabled.
 impl Default for ExecToolConfig {
     fn default() -> Self {
         Self {
@@ -1228,6 +1564,12 @@ impl Default for ExecToolConfig {
 
 impl ExecToolConfig {
     /// Validates exec tool configuration.
+    ///
+    /// Checks that `timeout` is positive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if `timeout` is zero.
     pub fn validate(&self) -> ConfigResult<()> {
         if self.timeout == 0 {
             return Err(ConfigError::invalid("exec timeout must be positive"));
@@ -1254,6 +1596,10 @@ pub struct MCPServerConfig {
     pub tool_timeout: u64,
 }
 
+/// Default MCP server configuration.
+///
+/// Empty command/URL (must be set by the user), no arguments or environment
+/// variables, and a 30-second tool execution timeout.
 impl Default for MCPServerConfig {
     fn default() -> Self {
         Self {
@@ -1269,6 +1615,15 @@ impl Default for MCPServerConfig {
 
 impl MCPServerConfig {
     /// Validates MCP server configuration.
+    ///
+    /// Checks the following:
+    /// - At least one of `command` or `url` must be non-empty.
+    /// - `tool_timeout` must be positive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] if neither `command` nor `url` is
+    /// set, or if `tool_timeout` is zero.
     pub fn validate(&self) -> ConfigResult<()> {
         // Either command or url must be specified
         let has_command = !self.command.trim().is_empty();

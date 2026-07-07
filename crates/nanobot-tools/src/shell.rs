@@ -1,3 +1,29 @@
+//! Shell execution tool with safety guards.
+//!
+//! Provides the `exec` tool that allows the LLM to run shell commands.
+//! This is one of the most powerful (and dangerous) tools in the system,
+//! so it includes multiple layers of safety guards.
+//!
+//! ## Safety Architecture
+//!
+//! Commands pass through three guard layers before execution:
+//!
+//! 1. **Pattern-based safety guard** (default: enabled, controlled by
+//!    `disable_safety_guard`): Blocks destructive patterns like `rm -rf`,
+//!    `mkfs`, `dd`, `shutdown`, etc. Uses regex matching on the command.
+//! 2. **Workspace boundary guard** (default: enabled, controlled by
+//!    `restrict_to_workspace`): Blocks path traversal (`../`), home path
+//!    references (`~/`), and absolute paths that point outside the workspace.
+//! 3. **Master switch** (`disable_all_guards`): When true, bypasses all
+//!    guards entirely (for trusted environments).
+//!
+//! ## Execution model
+//!
+//! Commands are executed through `/bin/sh -lc` on Unix or `cmd /C` on
+//! Windows for consistent behavior across platforms. Output is capped at
+//! 10,000 bytes to keep LLM token usage manageable. Commands time out
+//! after a configurable duration.
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -22,15 +48,24 @@ const EXEC_COMMAND_DESC: &str = "The shell command to execute";
 const EXEC_WORKING_DIR_DESC: &str = "Optional working directory for the command";
 const TARGET: &str = "nanobot::tools::exec";
 
+/// Tool for executing shell commands.
+///
+/// Wraps the underlying shell and enforces safety guards, timeouts,
+/// and output size limits.
 pub struct ShellTool {
     config: SharedToolConfig,
 }
 
 impl ShellTool {
+    /// Creates a new `ShellTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
 }
+
+/// Returns the static tool definition (name: "exec").
+///
+/// Uses a `OnceLock` to cache the definition after first construction.
 pub fn definition() -> Arc<ToolDefinition> {
     static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
     DEF.get_or_init(|| {
@@ -85,6 +120,32 @@ impl Tool for ShellTool {
     }
 }
 
+/// Executes a shell command with the given configuration.
+///
+/// This is the main execution function, made public for use in tests and
+/// direct invocation outside the [`Tool`] trait.
+///
+/// # Arguments
+///
+/// * `args_json` - JSON-serialized [`ExecArgs`].
+/// * `default_working_dir` - Default working directory (usually workspace root).
+/// * `allowed_dir` - If set, restricts command to this directory tree.
+/// * `timeout_secs` - Maximum execution time in seconds.
+/// * `restrict_to_workspace` - If true, enforces workspace boundary checks.
+/// * `disable_safety_guard` - If true, skips pattern-based danger detection.
+/// * `disable_all_guards` - If true, skips all safety checks.
+/// * `path_append` - Additional PATH entries to append.
+///
+/// # Returns
+///
+/// Combined stdout and stderr output, capped at 10,000 bytes.
+///
+/// # Errors
+///
+/// Returns a tool error if:
+/// - The command fails safety guard checks.
+/// - The command cannot be spawned.
+/// - The command times out.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     args_json: &str,
@@ -206,6 +267,7 @@ pub async fn execute(
         parts.join("\n")
     };
 
+    // Cap output at 10KB to avoid blowing the LLM context window.
     const MAX_LEN: usize = 10_000;
     if result.len() > MAX_LEN {
         let remaining = truncate_utf8_in_place(&mut result, MAX_LEN);
@@ -215,6 +277,10 @@ pub async fn execute(
     Ok(result)
 }
 
+/// Returns the platform-appropriate shell command.
+///
+/// - Unix: `/bin/sh -lc <command>` (login shell with PATH).
+/// - Windows: `cmd /C <command>` (lowest common denominator).
 fn platform_shell(command: &str) -> (&'static str, Vec<&str>) {
     #[cfg(target_os = "windows")]
     {
@@ -229,6 +295,10 @@ fn platform_shell(command: &str) -> (&'static str, Vec<&str>) {
     }
 }
 
+/// Joins an existing PATH with additional entries in a cross-platform way.
+///
+/// Uses `std::env::join_paths` for proper platform-specific path separator
+/// handling, falling back to colon-joined strings if that fails.
 fn join_path_env(existing: &str, append: &str) -> String {
     let existing_paths = std::env::split_paths(existing).collect::<Vec<_>>();
     let append_paths = std::env::split_paths(append).collect::<Vec<_>>();
@@ -248,6 +318,14 @@ fn join_path_env(existing: &str, append: &str) -> String {
         })
 }
 
+/// Applies safety guards to a command before execution.
+///
+/// The guard checks are applied in order:
+/// 1. Master switch: if `disable_all_guards`, return immediately.
+/// 2. Pattern guard: if `disable_safety_guard` is false, check against
+///    known dangerous patterns.
+/// 3. Workspace guard: if `restrict_to_workspace`, check for path
+///    traversal, home references, and absolute paths outside the workspace.
 fn guard_command(
     command: &str,
     cwd: &Path,
@@ -260,6 +338,7 @@ fn guard_command(
         return Ok(());
     }
 
+    // Pattern list for obviously destructive commands.
     let deny_patterns = [
         r"\brm\s+-[rf]{1,2}\b",
         r"\bdel\s+/[fq]\b",
@@ -290,12 +369,14 @@ fn guard_command(
     }
 
     if restrict_to_workspace {
+        // Block path traversal patterns.
         if command.contains("../") || command.contains("..\\") {
             return Err(ToolError::execution(
                 "exec",
                 anyhow::anyhow!("command blocked by safety guard (path traversal detected)"),
             ));
         }
+        // Block home path references.
         if command.contains("~/") || command.contains("~\\") {
             return Err(ToolError::execution(
                 "exec",
@@ -349,6 +430,10 @@ fn guard_command(
     Ok(())
 }
 
+/// Extracts absolute paths from a shell command string.
+///
+/// Handles both Windows-style (`C:\path`) and POSIX-style (`/path`)
+/// absolute path syntaxes.
 fn extract_absolute_paths(command: &str) -> Vec<String> {
     let mut paths = Vec::new();
 
@@ -369,6 +454,14 @@ fn extract_absolute_paths(command: &str) -> Vec<String> {
     paths
 }
 
+/// Resolves the working directory for a command.
+///
+/// If `working_dir` is provided and absolute, uses it directly.
+/// If relative, joins it against the workspace. Falls back to
+/// the workspace if no `working_dir` is specified.
+///
+/// When `allowed_dir` is set, validates that the resolved directory
+/// is within the allowed boundary.
 fn resolve_working_dir(
     working_dir: Option<&str>,
     workspace: &Path,

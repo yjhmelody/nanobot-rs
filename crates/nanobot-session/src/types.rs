@@ -15,8 +15,17 @@ use nanobot_provider::{
 };
 
 /// Arbitrary metadata attached to a session.
+///
+/// This is a flexible key-value container that allows callers to tag or annotate
+/// sessions without extending the core `Session` struct. Future versions may
+/// migrate to a `HashMap<String, Value>` for truly arbitrary metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Derive notes:
+// - `Debug` for logging and inspection
+// - `Clone` for cheap read-side access from caches
+// - `Default` for the `serde(default)` attribute on `Session.metadata`
+// - `Serialize`/`Deserialize` for JSONL persistence
 pub struct SessionMetadata {
     /// User-defined tags for filtering and categorisation.
     #[serde(default)]
@@ -24,7 +33,19 @@ pub struct SessionMetadata {
 }
 
 /// A single persisted message turn within a session.
+///
+/// Each `SessionEntry` corresponds to one message in the conversation history,
+/// whether from the user, the assistant (including tool-call requests), a tool
+/// result, or a system-level message. It serializes to a line in the JSONL file.
+///
+/// The struct mirrors `nanobot_provider::ChatMessage` but adds a `timestamp`
+/// field for persistence tracking. The two are kept separate so that the provider
+/// layer (which drives LLM I/O) does not depend on session-specific fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Derive notes:
+// - `Debug` for logging and inspection
+// - `Clone` so that cache lookups and message-passing are cheap
+// - `Serialize`/`Deserialize` for JSONL persistence
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
     /// Role of the message author (user, assistant, tool, system).
@@ -60,7 +81,22 @@ impl SessionEntry {
 }
 
 /// A conversation session holding its full message history.
+///
+/// This is the central aggregate for a single conversation. Each session:
+/// - Is identified by a unique `key` (typically `"channel:chat_id"`)
+/// - Contains an ordered list of `SessionEntry` messages
+/// - Tracks creation and last-update timestamps
+/// - Maintains a `last_consolidated` pointer for incremental summarisation
+///
+/// # Concurrency
+///
+/// `Session` itself is not `Sync`; concurrent access is managed at the
+/// `SessionManager` level via per-session locks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Derive notes:
+// - `Debug` for logging and inspection
+// - `Clone` for non-destructive reads from caches and session store
+// - `Serialize`/`Deserialize` for JSONL persistence
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     /// Unique session key (`channel:chat_id`).
@@ -144,7 +180,15 @@ impl Session {
 }
 
 /// Lightweight summary of a session used for listing.
+///
+/// Unlike `Session`, this type does not contain the full message history.
+/// It is returned by `SessionStore::list_sessions()` for display in UIs or
+/// CLI output without having to load every session in its entirety.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Derive notes:
+// - `Debug` for logging and inspection
+// - `Clone` so a listing can be passed around freely
+// - `Serialize`/`Deserialize` for potential API serialisation
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     /// Session key.
@@ -155,7 +199,17 @@ pub struct SessionSummary {
     pub path: String,
 }
 
+/// The result of a consolidation operation.
+///
+/// Returned by [`SessionManager::consolidate_now`] to inform callers whether
+/// compression actually happened, was skipped, or is not configured at all.
+///
+/// [`SessionManager::consolidate_now`]: crate::session_manager::SessionManager::consolidate_now
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Derive notes:
+// - `Debug` for logging
+// - `Clone`/`Copy` for cheap return values
+// - `PartialEq`/`Eq` for test assertions and comparison logic
 pub enum ConsolidationOutcome {
     /// Consolidation is not configured.
     Disabled,
@@ -165,15 +219,42 @@ pub enum ConsolidationOutcome {
     Consolidated { removed: usize },
 }
 
+/// First-line metadata in the JSONL session file.
+///
+/// Every session JSONL file begins with this line (identified by `"_type": "metadata"`)
+/// so that listing operations can extract timestamps and key without parsing every
+/// subsequent message entry.
+///
+/// # Format
+///
+/// ```json
+/// {"_type": "metadata", "key": "telegram:123", "createdAt": "...", ...}
+/// {"role": "user", "content": ...}
+/// {"role": "assistant", "content": ...}
+/// ```
+///
+/// This separation allows the JSONL format to remain simple while keeping the
+/// session-level metadata available for fast scans.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Derive notes:
+// - `Debug` for logging
+// - `Clone` for test helpers
+// - `Serialize`/`Deserialize` for JSONL I/O
 pub(crate) struct SessionMetadataLine {
+    /// Discriminant field set to `"metadata"` so the loader can distinguish
+    /// this line from regular message entries.
     #[serde(rename = "_type")]
     pub(crate) line_type: String,
+    /// Session key (e.g. `"telegram:123"`).
     pub(crate) key: String,
+    /// When the session was created.
     pub(crate) created_at: DateTime<Utc>,
+    /// When the session was last modified.
     pub(crate) updated_at: DateTime<Utc>,
+    /// Arbitrary session metadata.
     #[serde(default)]
     pub(crate) metadata: SessionMetadata,
+    /// Index of the first message that has not yet been consolidated.
     #[serde(default)]
     pub(crate) last_consolidated: usize,
 }

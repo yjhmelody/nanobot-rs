@@ -1,3 +1,25 @@
+//! SSE streaming adapter for Anthropic's streaming format.
+//!
+//! Anthropic uses standard Server-Sent Events (SSE) with typed event names:
+//!
+//! ```text
+//! event: content_block_delta
+//! data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+//!
+//! event: content_block_stop
+//! data: {"type":"content_block_stop","index":0}
+//! ```
+//!
+//! The adapter parses raw SSE lines, deserializes JSON payloads into
+//! [`AnthropicStreamEvent`], and emits unified [`StreamEvent`] values.
+//!
+//! # State Management
+//!
+//! The [`SseParser`] maintains a buffer for partial SSE lines and a map of
+//! content block states to associate tool call ids with their argument deltas.
+//!
+//! Spec source: <https://docs.anthropic.com/en/docs/build-with-claude/streaming>
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -49,24 +71,37 @@ impl StreamAdapter for SseAdapter {
 }
 
 /// SSE parser (state machine).
+///
+/// Processes raw SSE byte streams and emits [`StreamEvent`] values.
+/// Maintains a buffer for partial lines and content block state for tool call routing.
 struct SseParser {
+    /// Buffer for incomplete lines across chunk boundaries.
     buffer: String,
+    /// Partially constructed SSE event (across multiple data lines).
     current_event: Option<SseEvent>,
-    /// Tracks currently processing content blocks for associating tool call IDs.
+    /// Tracks currently processing content blocks for associating tool call IDs
+    /// with their argument deltas.
     content_blocks: HashMap<usize, ContentBlockState>,
 }
 
+/// A partially parsed SSE event, before the empty-line terminator.
 #[derive(Debug)]
 struct SseEvent {
+    /// Event type from the `event:` line (e.g., "content_block_delta").
     event_type: Option<String>,
+    /// Accumulated data from `data:` lines.
     data: String,
 }
 
+/// Tracks the state of a content block for associating tool call IDs.
 #[derive(Debug, Clone)]
 struct ContentBlockState {
+    /// Block type string (e.g., "tool_use", "text", "thinking").
     #[allow(dead_code)]
     block_type: String,
+    /// Tool call id for tool_use blocks; `None` for text/thinking blocks.
     tool_call_id: Option<String>,
+    /// Tool name for tool_use blocks; `None` for text/thinking blocks.
     #[allow(dead_code)]
     tool_call_name: Option<String>,
 }
@@ -129,6 +164,10 @@ impl SseParser {
     }
 }
 
+/// Extension trait for converting [`AnthropicStreamEvent`] into unified [`StreamEvent`] values.
+///
+/// This trait exists to keep the conversion logic close to the event type definition
+/// while allowing the [`SseParser`] to provide mutable context (content block state).
 trait AnthropicEventExt {
     fn to_stream_events(&self, parser: &mut SseParser) -> Vec<Result<StreamEvent, StreamError>>;
 }

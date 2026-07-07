@@ -1,3 +1,34 @@
+//! Anthropic Claude provider implementation.
+//!
+//! This module implements [`LLMProvider`] for Anthropic's Messages API, supporting:
+//!
+//! - Non-streaming and streaming (SSE) chat completions
+//! - System prompts (extracted from `MessageRole::System` messages)
+//! - Tool/function calling via Anthropic's native `tool_use` content blocks
+//! - Extended thinking (thinking/signature content blocks) for reasoning models
+//! - Proxy fallback (retry without proxy on gateway errors)
+//!
+//! # Wire Format
+//!
+//! The provider translates nanobot's unified [`ChatMessage`] types into Anthropic's
+//! `messages` API format. Notable translations:
+//!
+//! | nanobot Type          | Anthropic Equivalent                  |
+//! |-----------------------|---------------------------------------|
+//! | `System` messages     | Top-level `system` field (joined)     |
+//! | `User` messages       | `{"role": "user", "content": [...]}`   |
+//! | `Assistant` messages  | `{"role": "assistant", "content": [...]}` |
+//! | `Tool` messages       | `{"role": "user"}` with `tool_result` blocks |
+//! | Thinking blocks       | `thinking` content block               |
+//! | Reasoning content     | `thinking` content block (no signature)|
+//!
+//! # Endpoint
+//!
+//! Defaults to `https://api.anthropic.com/v1/messages`. The API version header is
+//! hard-coded to `2026-02-15`.
+//!
+//! Spec source: <https://docs.anthropic.com/en/docs/api/messages>
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -21,12 +52,33 @@ use crate::{ProviderError, ProviderResult};
 const DEFAULT_API_BASE: &str = "https://api.anthropic.com/v1";
 const DEFAULT_ANTHROPIC_VERSION: &str = "2026-02-15";
 
+/// Provider for Anthropic's Claude models via the Messages API.
+///
+/// Handles authentication (x-api-key + Bearer headers), endpoint construction,
+/// message format translation, error classification, and SSE-based streaming.
+///
+/// # Proxy Fallback
+///
+/// If environment proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, etc.) are detected,
+/// the provider will automatically retry failed requests without the proxy. This is
+/// handled by the internal [`ProxyFallbackHelper`].
+///
+/// # Thread Safety
+///
+/// The provider is fully `Send + Sync` and designed to be shared as `Arc<dyn LLMProvider>`.
+/// All state is either immutable (configuration) or lock-free (no mutable shared state).
 #[derive(Debug)]
 pub struct AnthropicProvider {
     api_key: String,
     api_base: Option<String>,
+
+    /// Default model identifier (e.g. "claude-sonnet-4-20250514").
     default_model: String,
+
+    /// Arbitrary extra HTTP headers injected into every request.
     extra_headers: HashMap<String, String>,
+
+    /// Internal helper for proxy fallback logic.
     proxy_helper: ProxyFallbackHelper,
 }
 
@@ -57,6 +109,14 @@ fn anthropic_messages_include_reasoning_content_as_thinking() {
 }
 
 impl AnthropicProvider {
+    /// Creates a new Anthropic provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - Anthropic API key (set as both `x-api-key` and `Bearer` auth headers)
+    /// * `api_base` - Optional base URL override (defaults to `https://api.anthropic.com/v1`)
+    /// * `default_model` - Model identifier used when `ChatRequest.model` is `None`
+    /// * `extra_headers` - Additional HTTP headers to include in every request
     pub fn new(
         api_key: String,
         api_base: Option<String>,
@@ -68,10 +128,15 @@ impl AnthropicProvider {
             api_base,
             default_model,
             extra_headers,
+            // ProxyFallbackHelper is constructed eagerly; it checks env vars at
+            // init time rather than on every request.
             proxy_helper: ProxyFallbackHelper::new(),
         }
     }
 
+    /// Constructs the `/messages` endpoint URL.
+    ///
+    /// Handles trailing slashes and avoids duplicating the `/messages` suffix.
     fn endpoint(&self) -> String {
         let base = self
             .api_base
@@ -86,10 +151,19 @@ impl AnthropicProvider {
         format!("{}/messages", trimmed)
     }
 
+    /// Builds the HTTP headers for an Anthropic API request.
+    ///
+    /// Includes:
+    /// - `Content-Type: application/json`
+    /// - `x-api-key` and `Authorization: Bearer` (both set from `api_key`)
+    /// - `anthropic-version: 2026-02-15`
+    /// - Any extra headers from configuration
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
+        // Anthropic accepts both x-api-key and Bearer auth; we send both for
+        // compatibility with proxies and gateways.
         if !self.api_key.trim().is_empty()
             && let Ok(value) = HeaderValue::from_str(self.api_key.trim())
         {
@@ -116,6 +190,11 @@ impl AnthropicProvider {
         headers
     }
 
+    /// Replaces empty text content with placeholders to satisfy Anthropic's API
+    /// requirement that content fields be non-empty strings.
+    ///
+    /// For assistant messages with tool calls, the content is set to `None` (omitted).
+    /// For all other messages with empty text, content becomes `"(empty)"`.
     fn sanitize_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         messages
             .into_iter()
@@ -141,6 +220,10 @@ impl AnthropicProvider {
             .collect()
     }
 
+    /// Builds the Anthropic Messages API request payload from the unified `ChatRequest`.
+    ///
+    /// Temperature is clamped to `[0.0, 1.0]` per Anthropic's range. System messages
+    /// are extracted into the top-level `system` field.
     fn build_payload(&self, model: String, req: ChatRequest) -> AnthropicMessagesPayload {
         let temperature = req.temperature.clamp(0.0, 1.0);
         let messages = Self::sanitize_messages(req.messages);
@@ -170,6 +253,9 @@ impl AnthropicProvider {
         }
     }
 
+    /// Sends an HTTP request to the Anthropic API with tracing.
+    ///
+    /// Headers and body are logged at `trace` level with sensitive fields redacted.
     async fn send_request<T: serde::Serialize + std::fmt::Debug>(
         &self,
         client: &reqwest::Client,
@@ -196,6 +282,13 @@ impl AnthropicProvider {
             .await
     }
 
+    /// Sends a request with automatic proxy fallback on failure.
+    ///
+    /// The retry strategy is:
+    /// 1. Send via the proxy-respecting client.
+    /// 2. If the response is a gateway error (502/503/504), retry via direct client.
+    /// 3. If the request fails entirely (connection error, timeout), retry via direct client.
+    /// 4. If both attempts fail, return a combined error message.
     async fn send_request_with_proxy_fallback<T: serde::Serialize + std::fmt::Debug>(
         &self,
         endpoint: &str,
@@ -224,6 +317,7 @@ impl AnthropicProvider {
                     Ok(retry_response) => Ok(retry_response),
                     Err(err) => {
                         self.proxy_helper.log_retry_failed(endpoint, &err);
+                        // Return the original response rather than failing entirely
                         Ok(response)
                     }
                 }
@@ -330,6 +424,22 @@ impl LLMProvider for AnthropicProvider {
     }
 }
 
+/// Converts nanobot's unified message list into Anthropic's input format.
+///
+/// Rules applied:
+/// - `System` messages are concatenated (with double newline) into the top-level `system` string.
+/// - `User` messages become `AnthropicInputMessage` with role `User`.
+/// - `Assistant` messages with reasoning content, thinking blocks, tool calls, and text are
+///   mapped to corresponding Anthropic content blocks (Thinking, Text, ToolUse).
+/// - `Tool` messages are buffered and flushed as `ToolResult` content blocks attached to the
+///   next `User` or `Assistant` message. This is required because Anthropic's API does not
+///   support a standalone `tool` role — results must be merged into a user message.
+///
+/// # Pending Tool Results
+///
+/// The `pending_tool_results` buffer accumulates consecutive `Tool` messages. When a
+/// `User` or `Assistant` message follows, the buffered results are prepended to its content.
+/// Any remaining results at the end are flushed as a synthetic User message.
 fn anthropic_messages_from_chat(
     messages: Vec<ChatMessage>,
 ) -> (Option<String>, Vec<AnthropicInputMessage>) {
@@ -434,11 +544,23 @@ fn anthropic_messages_from_chat(
     (system, anthropic_messages)
 }
 
+/// Parses tool call arguments from a JSON string into a `serde_json::Value`.
+///
+/// If the arguments are not valid JSON, they are wrapped as a plain string value
+/// to preserve the original text. This is a fallback for malformed tool call payloads.
 fn parse_tool_arguments(tool_call: &AssistantToolCall) -> serde_json::Value {
     serde_json::from_str(&tool_call.function.arguments)
         .unwrap_or_else(|_| serde_json::Value::String(tool_call.function.arguments.clone()))
 }
 
+/// Converts an [`AnthropicMessagesResponse`] into the unified [`LLMResponse`] format.
+///
+/// Distribution of content across `LLMResponse` fields:
+/// - `Text` blocks → joined into `content` (double newline separated)
+/// - `ToolUse` blocks → `tool_calls`
+/// - `Thinking` blocks → `thinking_blocks`
+/// - `stop_reason` → mapped to "tool_calls", "stop", or "length"
+/// - `usage` → mapped to `UsageStats`
 fn parse_messages_response(resp: AnthropicMessagesResponse) -> LLMResponse {
     let mut content_blocks = Vec::new();
     let mut tool_calls = Vec::new();
@@ -483,6 +605,14 @@ fn parse_messages_response(resp: AnthropicMessagesResponse) -> LLMResponse {
     }
 }
 
+/// Maps Anthropic stop reasons to unified finish reason strings.
+///
+/// | Anthropic          | Unified    |
+/// |--------------------|------------|
+/// | `tool_use`         | `tool_calls` |
+/// | `end_turn`         | `stop`     |
+/// | `stop_sequence`    | `stop`     |
+/// | `max_tokens`       | `length`   |
 fn map_stop_reason(stop_reason: Option<&str>) -> String {
     match stop_reason {
         Some("tool_use") => "tool_calls".to_string(),
@@ -493,6 +623,9 @@ fn map_stop_reason(stop_reason: Option<&str>) -> String {
     }
 }
 
+/// Maps Anthropic usage data to unified `UsageStats`.
+///
+/// Computes `total_tokens` as `input_tokens + output_tokens` when both are available.
 fn map_usage(usage: Option<AnthropicUsage>) -> UsageStats {
     match usage {
         Some(usage) => {
@@ -511,6 +644,10 @@ fn map_usage(usage: Option<AnthropicUsage>) -> UsageStats {
     }
 }
 
+/// Extracts the human-readable error message from an Anthropic error response body.
+///
+/// If the body is valid JSON matching [`AnthropicErrorResponse`], the `.error.message`
+/// field is returned. Otherwise the raw body text is returned as-is.
 fn format_error_body(body_text: &str) -> String {
     match serde_json::from_str::<AnthropicErrorResponse>(body_text) {
         Ok(parsed) => parsed
@@ -521,6 +658,10 @@ fn format_error_body(body_text: &str) -> String {
     }
 }
 
+/// Creates a debug-friendly representation of headers with sensitive values redacted.
+///
+/// Redacts `x-api-key` and `authorization` headers, showing only the last 6 characters.
+/// This is used in trace logging to avoid leaking API keys.
 fn redacted_header_map(headers: &HeaderMap) -> HashMap<String, String> {
     headers
         .iter()
@@ -537,6 +678,9 @@ fn redacted_header_map(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
+/// Redacts an API key header value for logging, revealing only the last 6 characters.
+///
+/// Example output: `<redacted:AbCdEf>`
 fn redact_api_key(value: &HeaderValue) -> String {
     let raw = value.to_str().unwrap_or("<non-utf8>");
     let suffix: String = raw
@@ -550,10 +694,18 @@ fn redact_api_key(value: &HeaderValue) -> String {
     format!("<redacted:{}>", suffix)
 }
 
+/// Pretty-prints a serializable payload for trace logging.
+///
+/// If serialization fails, returns `<unprintable>`.
 fn format_request_body<T: serde::Serialize>(payload: &T) -> String {
     serde_json::to_string_pretty(payload).unwrap_or_else(|_| "<unprintable>".to_string())
 }
 
+/// Extracts plain text content from an optional `MessageContent`.
+///
+/// For `MessageContent::Text`, returns the text directly.
+/// For `MessageContent::Parts`, concatenates all text parts (non-text parts are skipped).
+/// Returns `None` if content is absent or the result is empty.
 fn message_content_text(content: Option<&MessageContent>) -> Option<String> {
     match content {
         Some(MessageContent::Text(text)) => Some(text.clone()),

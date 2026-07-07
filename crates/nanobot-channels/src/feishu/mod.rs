@@ -1,3 +1,38 @@
+//! Feishu / Lark channel adapter.
+//!
+//! This module implements the [`ChannelAdapter`] trait for the
+//! [Feishu Open Platform](https://open.feishu.cn/).  It supports two
+//! delivery modes (app-based and webhook) and two inbound modes
+//! (HTTP callback and WebSocket).
+//!
+//! # Modes
+//!
+//! | Mode | Direction | Config |
+//! |------|-----------|--------|
+//! | **App (IM API)** | inbound + outbound | `appId` + `appSecret` |
+//! | **Webhook** | outbound only | `webhookUrl` / `botKey` (optionally with `secret`) |
+//!
+//! # Inbound Events
+//!
+//! Inbound messages can arrive via:
+//! - **HTTP callback** — starts a local Axum server listening on
+//!   `callbackListen:callbackPath`.
+//! - **WebSocket** — uses `open_lark` WS client for persistent connection
+//!   (auto-reconnect with exponential backoff).
+//!
+//! # Streaming
+//!
+//! When `appId`/`appSecret` are configured, the adapter supports streaming
+//! message updates: a placeholder is created via `begin_stream`, then
+//! subsequent chunks update the same message via `update`.  Batching and
+//! sharding protect against Feishu's per-message edit limits.
+//!
+//! # Rendering
+//!
+//! Outbound text can be rendered as plain text or as an interactive card
+//! (controlled by the `renderMode` config).  The `Auto` mode heuristically
+//! sniffs the content to choose the best format.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -25,9 +60,13 @@ use crate::error::{ChannelError, ChannelResult};
 use nanobot_bus::{MessageBus, OutboundMessage};
 use nanobot_config::schema::FeishuChannelConfig;
 
+/// Default Feishu Open API base URL.
 const FEISHU_API_DEFAULT: &str = "https://open.feishu.cn";
+/// Maximum byte length for a single Feishu text message.
 const FEISHU_TEXT_LIMIT: usize = 15000;
+/// Default address for the HTTP callback listener.
 const FEISHU_CALLBACK_LISTEN_DEFAULT: &str = "0.0.0.0:19820";
+/// Default path for the HTTP callback endpoint.
 const FEISHU_CALLBACK_PATH_DEFAULT: &str = "/feishu/events";
 /// Minimum new content (in chars) before flushing a batched edit.
 const FEISHU_EDIT_BATCH_NEW_CHARS: usize = 500;
@@ -47,32 +86,91 @@ use self::card::*;
 use self::types::*;
 use self::util::*;
 
+/// Feishu / Lark channel adapter.
+///
+/// Implements [`ChannelAdapter`] for the Feishu Open Platform.
+/// Supports both app-based (IM API) and webhook delivery modes.
+///
+/// # Lifecycle
+///
+/// 1. **Construction** ([`new`](FeishuChannel::new)) — validates config,
+///    builds the reqwest client, and resolves delivery/event modes.
+/// 2. **Start** ([`ChannelAdapter::start`]) — runs connectivity checks,
+///    then starts either a WebSocket client or an HTTP callback server
+///    for inbound events.
+/// 3. **Runtime** — outbound messages are delivered via `send` / `update`;
+///    inbound events are parsed and published to the `MessageBus`.
+/// 4. **Stop** ([`ChannelAdapter::stop`]) — sets the running flag to false
+///    and aborts background tasks.
+///
+/// # Thread Safety
+///
+/// Mutable state (callbacks, WebSocket, token cache, edit tracking) is
+/// protected by `tokio::sync::Mutex` because operations cross `.await`
+/// points.  The `running` flag is an `Arc<AtomicBool>` shared with
+/// background tasks.
 pub struct FeishuChannel {
+    /// Channel instance name (from config).
     name: String,
+    /// Reusable HTTP client shared across all API calls.
     client: Client,
+    /// Shared message bus for publishing inbound messages.
     bus: MessageBus,
+    /// Access-control list for inbound message filtering.
     allow_from: Vec<String>,
+    /// Feishu Open API base URL (defaults to `FEISHU_API_DEFAULT`).
     api_base: String,
+    /// Webhook URL for outbound-only mode (or `None` when using app mode).
     webhook_url: Option<String>,
+    /// HMAC secret for webhook signature verification.
     secret: Option<String>,
+    /// Feishu app ID (required for app mode).
     app_id: Option<String>,
+    /// Feishu app secret (required for app mode).
     app_secret: Option<String>,
+    /// Optional verification token for callback authentication.
     verify_token: Option<String>,
+    /// Address for the HTTP callback server (e.g. `"0.0.0.0:19820"`).
     callback_listen: Option<String>,
+    /// Path for the HTTP callback endpoint.
     callback_path: String,
+    /// Whether to use WebSocket (instead of HTTP callback) for inbound events.
     ws_enabled: bool,
+    /// Whether to send a placeholder message at the start of a stream.
     stream_placeholder_enabled: bool,
+    /// Text for the stream placeholder message.
     stream_placeholder_text: String,
+    /// Message rendering mode (Raw, Card, or Auto).
     render_mode: RenderMode,
+    /// Whether the channel is currently running (shared with background tasks).
     running: Arc<AtomicBool>,
+    /// Handle for the HTTP callback server task.
     callback_task: Mutex<Option<JoinHandle<()>>>,
+    /// Handle for the WebSocket client task.
     ws_task: Mutex<Option<JoinHandle<()>>>,
+    /// Cached tenant access token with expiration tracking.
     tenant_access_token: Mutex<Option<CachedTenantAccessToken>>,
     /// Per-stream edit state for batching + sharding.
     edit_states: Mutex<HashMap<String, StreamEditState>>,
 }
 
 impl FeishuChannel {
+    /// Construct a new `FeishuChannel` from configuration.
+    ///
+    /// Validates the configuration:
+    /// - `appId` and `appSecret` must be provided together.
+    /// - At least one delivery method must be configured (webhook URL or app
+    ///   credentials).
+    /// - Resolves callback vs. WebSocket event listening mode.
+    ///
+    /// Does **not** start any listeners or verify credentials — call
+    /// [`ChannelAdapter::start`] for that.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Config`] if:
+    /// - Only one of `appId` / `appSecret` is present.
+    /// - Neither a webhook URL nor app credentials are configured.
+    /// - The reqwest client cannot be built.
     pub fn new(name: String, cfg: FeishuChannelConfig, bus: MessageBus) -> ChannelResult<Self> {
         let api_base = cfg
             .api_base
@@ -170,6 +268,11 @@ impl FeishuChannel {
         })
     }
 
+    /// Build the `open_lark` WebSocket client configuration from app credentials.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Config`] if `appId` or `appSecret` are missing,
+    /// or if the `open_lark` builder fails.
     fn build_openlark_ws_config(&self) -> ChannelResult<OpenLarkConfig> {
         let app_id = self
             .app_id
@@ -189,6 +292,13 @@ impl FeishuChannel {
             })
     }
 
+    /// Verify that the Feishu API is reachable and credentials are valid.
+    ///
+    /// Fetches a tenant access token.  Called during [`start`](ChannelAdapter::start)
+    /// before enabling inbound listeners.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Adapter`] if the token fetch fails.
     async fn verify_auth_connectivity(&self) -> ChannelResult<()> {
         self.fetch_tenant_access_token().await.map_err(|err| {
             ChannelError::adapter(
@@ -201,6 +311,10 @@ impl FeishuChannel {
         Ok(())
     }
 
+    /// Verify that the Feishu IM API is usable by listing chats.
+    ///
+    /// This is a best-effort check — failures are logged as warnings but do
+    /// not prevent startup (the issue may be transient or permissions-related).
     async fn verify_im_readiness(&self) -> ChannelResult<()> {
         let access_token = self.tenant_access_token().await.map_err(|err| {
             ChannelError::adapter("feishu", format!("startup IM readiness auth failed: {err}"))
@@ -258,6 +372,15 @@ impl FeishuChannel {
         Ok(())
     }
 
+    /// Start the Feishu WebSocket event subscription client.
+    ///
+    /// Spawns a background task that:
+    /// 1. Opens a persistent WebSocket connection via `open_lark`.
+    /// 2. Feeds received payloads through a channel to a parser task.
+    /// 3. Parses events, verifies tokens, and publishes inbound messages
+    ///    to the `MessageBus`.
+    ///
+    /// On disconnect, reconnects with exponential backoff (1s .. 60s).
     async fn start_websocket(&self) -> ChannelResult<()> {
         let ws_config = Arc::new(self.build_openlark_ws_config()?);
         let name = self.name.clone();
@@ -364,12 +487,24 @@ impl FeishuChannel {
         Ok(())
     }
 
+    /// Build the Axum router for the HTTP callback endpoint.
     fn callback_router(state: FeishuCallbackState, path: &str) -> Router {
         Router::new()
             .route(path, post(feishu_event_handler))
             .with_state(state)
     }
 
+    /// Send a text message to a chat using the IM API.
+    ///
+    /// Retries once with a fresh token if the first attempt fails with an
+    /// auth error.
+    ///
+    /// # Arguments
+    /// * `receive_id` — The chat ID to send to.
+    /// * `text` — Message text content.
+    ///
+    /// # Returns
+    /// The platform-assigned `message_id` on success.
     async fn send_message_by_app(&self, receive_id: &str, text: &str) -> ChannelResult<String> {
         let content = serialize_text_content(text)?;
 
@@ -402,6 +537,7 @@ impl FeishuChannel {
         }))
     }
 
+    /// Send text using the IM API with an explicit access token (no retry).
     async fn send_message_by_app_with_token(
         &self,
         receive_id: &str,
@@ -412,6 +548,10 @@ impl FeishuChannel {
             .await
     }
 
+    /// Send an IM message of any `msg_type` using the IM API with a token.
+    ///
+    /// This is the low-level API call used by text, image, and interactive
+    /// message senders.
     async fn send_im_message_by_app_with_token(
         &self,
         receive_id: &str,
@@ -479,6 +619,9 @@ impl FeishuChannel {
             .unwrap_or_default())
     }
 
+    /// Send an image message to a chat using the IM API.
+    ///
+    /// Retries once with a fresh token on auth errors.
     async fn send_image_by_app(&self, receive_id: &str, media_ref: &str) -> ChannelResult<String> {
         let mut last_err: Option<ChannelError> = None;
         for attempt in 0..2 {
@@ -509,6 +652,10 @@ impl FeishuChannel {
         }))
     }
 
+    /// Send an image using the IM API with an explicit access token.
+    ///
+    /// If `media_ref` is a Feishu image key (`feishu:image_key:{key}`), uses
+    /// it directly. Otherwise, downloads/uploads the image first.
     async fn send_image_by_app_with_token(
         &self,
         receive_id: &str,
@@ -531,6 +678,10 @@ impl FeishuChannel {
             .await
     }
 
+    /// Upload an image to Feishu and return its `image_key`.
+    ///
+    /// Resolves the image (download from URL or read from local file), then
+    /// uploads it via the Feishu IM API.
     async fn upload_image_and_get_key(
         &self,
         media_ref: &str,
@@ -613,6 +764,9 @@ impl FeishuChannel {
             })
     }
 
+    /// Resolve an image reference into bytes, filename, and MIME type.
+    ///
+    /// Supports URLs (`http://`, `https://`) and local file paths.
     async fn resolve_image(&self, media_ref: &str) -> ChannelResult<(Vec<u8>, String, String)> {
         if media_ref.starts_with("http://") || media_ref.starts_with("https://") {
             return self.resolve_image_from_url(media_ref).await;
@@ -620,6 +774,7 @@ impl FeishuChannel {
         self.resolve_image_from_file(media_ref).await
     }
 
+    /// Download an image from a URL and infer its MIME type from headers and extension.
     async fn resolve_image_from_url(
         &self,
         media_ref: &str,
@@ -683,6 +838,7 @@ impl FeishuChannel {
         Ok((bytes.to_vec(), file_name, mime))
     }
 
+    /// Read an image from a local file and infer its MIME type from the extension.
     async fn resolve_image_from_file(
         &self,
         media_ref: &str,
@@ -718,6 +874,10 @@ impl FeishuChannel {
         Ok((bytes, file_name, mime.to_string()))
     }
 
+    /// Get a cached tenant access token, refreshing if expired or absent.
+    ///
+    /// Uses a 60-second safety margin before the actual expiry.
+    /// Tokens are cached inside a `tokio::sync::Mutex`.
     async fn tenant_access_token(&self) -> ChannelResult<String> {
         {
             let cached = self.tenant_access_token.lock().await;
@@ -731,6 +891,7 @@ impl FeishuChannel {
         self.refresh_tenant_access_token().await
     }
 
+    /// Force-refresh the tenant access token from the Feishu API and cache it.
     async fn refresh_tenant_access_token(&self) -> ChannelResult<String> {
         let token = self.fetch_tenant_access_token().await?;
         let access_token = token.access_token.clone();
@@ -738,6 +899,9 @@ impl FeishuChannel {
         Ok(access_token)
     }
 
+    /// Actually call the Feishu tenant token endpoint (up to 3 retries).
+    ///
+    /// Uses linear backoff: 250ms * attempt number between retries.
     async fn fetch_tenant_access_token(&self) -> ChannelResult<CachedTenantAccessToken> {
         let app_id = self
             .app_id
@@ -822,6 +986,12 @@ impl FeishuChannel {
             .unwrap_or_else(|| ChannelError::adapter("feishu", "request tenant token failed")))
     }
 
+    /// Update a previously sent message by appending/setting new text content.
+    ///
+    /// If the new text exceeds the Feishu limit, sends the first chunk as an
+    /// update and remaining chunks as new messages.
+    ///
+    /// Retries once with a fresh token on auth errors.
     async fn update_message_by_app(
         &self,
         message_id: &str,
@@ -866,6 +1036,7 @@ impl FeishuChannel {
         }))
     }
 
+    /// Update a message via the IM API with an explicit access token (no retry).
     async fn update_message_by_app_with_token(
         &self,
         message_id: &str,
@@ -929,6 +1100,9 @@ impl FeishuChannel {
         Ok(())
     }
 
+    /// Send a text message via the Feishu webhook URL.
+    ///
+    /// Adds HMAC signature if a `secret` is configured.
     async fn send_message_by_webhook(&self, text: &str) -> ChannelResult<()> {
         let webhook_url = self
             .webhook_url
@@ -976,6 +1150,9 @@ impl FeishuChannel {
         Ok(())
     }
 
+    /// Send an interactive card message via the IM API.
+    ///
+    /// Retries once with a fresh token on auth errors.
     async fn send_interactive_by_app(
         &self,
         receive_id: &str,
@@ -1005,6 +1182,9 @@ impl FeishuChannel {
         }))
     }
 
+    /// Send an interactive card via the webhook URL.
+    ///
+    /// Adds HMAC signature if a `secret` is configured.
     async fn send_card_by_webhook(&self, card: &serde_json::Value) -> ChannelResult<()> {
         let webhook_url = self
             .webhook_url
@@ -1058,6 +1238,16 @@ impl ChannelAdapter for FeishuChannel {
         &self.name
     }
 
+    /// Start the Feishu channel.
+    ///
+    /// 1. Runs auth connectivity and IM readiness checks if `appId` is set.
+    /// 2. Starts either a WebSocket client or an HTTP callback server
+    ///    for inbound events.
+    /// 3. In outbound-only mode (no listener), logs a notice.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Adapter`] if auth connectivity fails or
+    /// the callback listener cannot bind.
     async fn start(&self) -> ChannelResult<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -1119,6 +1309,10 @@ impl ChannelAdapter for FeishuChannel {
         Ok(())
     }
 
+    /// Stop the Feishu channel.
+    ///
+    /// Sets the running flag and aborts any background tasks
+    /// (callback server and/or WebSocket client).
     async fn stop(&self) -> ChannelResult<()> {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.callback_task.lock().await.take() {
@@ -1130,6 +1324,17 @@ impl ChannelAdapter for FeishuChannel {
         Ok(())
     }
 
+    /// Send an outbound message to Feishu.
+    ///
+    /// Supports three content paths:
+    /// - **Text** — via webhook or app mode, split into chunks if needed.
+    /// - **Card** — interactive card rendering (app or webhook).
+    /// - **Images** — uploaded and sent via app mode.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Adapter`] if any API call fails.
+    /// Returns an error if media is included but the adapter is in
+    /// webhook-only mode.
     async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome> {
         let text = msg.content.trim();
         if text.is_empty() && msg.media.is_empty() {
@@ -1199,6 +1404,19 @@ impl ChannelAdapter for FeishuChannel {
         self.running.load(Ordering::SeqCst)
     }
 
+    /// Update a previously sent message (streaming edit).
+    ///
+    /// Uses batching and sharding to respect Feishu's per-message edit limits:
+    ///
+    /// - **Batch**: if the new content since last flush is below
+    ///   `FEISHU_EDIT_BATCH_NEW_CHARS` chars **and** less than
+    ///   `FEISHU_EDIT_BATCH_INTERVAL` has passed, the update is skipped.
+    /// - **Shard**: if the current message has been edited more than
+    ///   `FEISHU_EDIT_SHARD_EDITS` times **or** the content exceeds
+    ///   `FEISHU_EDIT_SHARD_CHARS` chars, a new message is sent and
+    ///   the edit state switches to that new message.
+    ///
+    /// In webhook mode (no `app_id`), falls back to `send` (new message).
     async fn update(&self, message_id: &str, msg: OutboundMessage) -> ChannelResult<()> {
         let text = msg.content.trim().to_string();
         if text.is_empty() {
@@ -1265,10 +1483,21 @@ impl ChannelAdapter for FeishuChannel {
         Ok(())
     }
 
+    /// Whether the adapter supports streaming message updates.
+    /// Returns `true` when `appId` is configured (IM API mode).
+    /// Webhook mode cannot edit messages.
     fn supports_stream_updates(&self) -> bool {
         self.app_id.is_some()
     }
 
+    /// Send a placeholder message to begin a streaming response.
+    ///
+    /// Only applies when `stream_placeholder_enabled` is true AND `appId`
+    /// is configured.  The placeholder text is configurable via
+    /// `stream_placeholder_text` (default: "thinking...").
+    ///
+    /// Returns the `SendOutcome` with the message ID of the placeholder,
+    /// which the dispatcher uses for subsequent `update` calls.
     async fn begin_stream(&self, msg: &OutboundMessage) -> ChannelResult<Option<SendOutcome>> {
         if !self.stream_placeholder_enabled || self.app_id.is_none() {
             return Ok(None);
@@ -1293,6 +1522,25 @@ impl ChannelAdapter for FeishuChannel {
     }
 }
 
+/// Axum request handler for Feishu HTTP callbacks.
+///
+/// Handles two kinds of requests:
+///
+/// 1. **URL verification** — responds to the `url_verification` challenge
+///    by echoing back the challenge string.
+/// 2. **Message events** — parses `im.message.receive_v1` events, verifies
+///    the `verify_token` (if configured), checks the allow-from list,
+///    and publishes the extracted [`InboundMessage`](nanobot_bus::InboundMessage)
+///    to the [`MessageBus`].
+///
+/// # Returns
+/// - `200 OK` with `{"challenge": "..."}` for URL verification.
+/// - `200 OK` with `{"code": 0}` for successfully handled message events.
+/// - `401 Unauthorized` with `{"code": 401, "msg": "invalid token"}` if
+///   the verification token does not match.
+///
+/// # Non-message events
+/// Events of other types are silently acknowledged with `200 OK`.
 async fn feishu_event_handler(
     State(state): State<FeishuCallbackState>,
     Json(payload): Json<FeishuIncomingEnvelope>,

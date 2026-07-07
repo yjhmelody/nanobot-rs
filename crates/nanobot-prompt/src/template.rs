@@ -1,4 +1,21 @@
-//! Simple template engine for variable substitution
+//! Simple template engine for variable substitution in prompts.
+//!
+//! Provides the `TemplateEngine` which supports:
+//!
+//! - `{{variable}}` placeholder syntax for substitution from a `HashMap`.
+//! - Environment variable resolution via `render_env`.
+//! - Recursive environment variable substitution in `serde_json::Value` trees
+//!   via `render_json_env`.
+//!
+//! # Design
+//!
+//! - The regex `\{\{(\w+)\}\}` is compiled once in `new()` and reused across
+//!   all render calls for performance.
+//! - Unresolved variables are kept verbatim (e.g. `{{unknown}}` stays as-is)
+//!   rather than erroring, making partial substitution safe.
+//! - `render_json_env` walks the JSON tree recursively, mutating only string
+//!   leaves. Non-string values are left untouched, which avoids unnecessary
+//!   allocations.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -6,31 +23,66 @@ use std::collections::HashMap;
 use crate::PromptResult;
 use regex::Regex;
 
-/// Template engine for rendering prompts with variables
+/// Template engine for rendering prompts with variable substitution.
+///
+/// Uses a compiled regex (`\{\{(\w+)\}\}`) to find `{{variable}}` placeholders
+/// in template strings and replace them with provided values.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashMap;
+/// use nanobot_prompt::TemplateEngine;
+///
+/// let engine = TemplateEngine::new();
+/// let template = "Hello {{name}}, welcome to {{project}}!";
+///
+/// let mut vars = HashMap::new();
+/// vars.insert("name".to_string(), "Alice".to_string());
+/// vars.insert("project".to_string(), "nanobot".to_string());
+///
+/// let result = engine.render(template, &vars).unwrap();
+/// assert_eq!(result, "Hello Alice, welcome to nanobot!");
+/// ```
 pub struct TemplateEngine {
+    /// Compiled regex matching `{{variable}}` patterns.
+    ///
+    /// Capture group 1 isolates the variable name for lookup.
     var_regex: Regex,
 }
 
 impl TemplateEngine {
-    /// Create a new template engine
+    /// Create a new template engine with the default `{{variable}}` syntax.
+    ///
+    /// The regex pattern `\{\{(\w+)\}\}` matches word characters only between
+    /// double curly braces, so `{{foo_bar}}` is valid but `{{foo bar}}` is not.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the regex pattern is invalid. Since the pattern is a compile-time
+    /// constant, this panic will always occur at startup if the regex is malformed.
     pub fn new() -> Self {
         Self {
             var_regex: Regex::new(r"\{\{(\w+)\}\}").expect("invalid regex"),
         }
     }
 
-    /// Render a template with variables
+    /// Render a template string by substituting `{{variable}}` placeholders.
     ///
-    /// Supports {{variable}} syntax for variable substitution.
+    /// For each placeholder found, the engine looks up the variable name in
+    /// `vars`. If found, it is replaced with the corresponding value. If not
+    /// found, the original placeholder (e.g. `{{unknown}}`) is left unchanged.
     ///
     /// # Arguments
     ///
-    /// * `template` - The template string with {{variable}} placeholders
-    /// * `vars` - HashMap of variable names to values
+    /// * `template` - The template string containing `{{variable}}` placeholders.
+    /// * `vars` - A map of variable names to their substitution values.
     ///
     /// # Returns
     ///
-    /// Rendered string with all variables substituted
+    /// `PromptResult<String>` containing the template with all known variables
+    /// substituted. This method is infallible under normal operation — errors
+    /// only occur if the regex replacement itself fails.
     ///
     /// # Examples
     ///
@@ -39,20 +91,21 @@ impl TemplateEngine {
     /// use nanobot_prompt::TemplateEngine;
     ///
     /// let engine = TemplateEngine::new();
-    /// let template = "Hello {{name}}, welcome to {{project}}!";
-    ///
     /// let mut vars = HashMap::new();
     /// vars.insert("name".to_string(), "Alice".to_string());
-    /// vars.insert("project".to_string(), "nanobot".to_string());
     ///
-    /// let result = engine.render(template, &vars).unwrap();
-    /// assert_eq!(result, "Hello Alice, welcome to nanobot!");
+    /// let result = engine.render("Hello {{name}}!", &vars).unwrap();
+    /// assert_eq!(result, "Hello Alice!");
     /// ```
     pub fn render(&self, template: &str, vars: &HashMap<String, String>) -> PromptResult<String> {
+        // Use replace_all with a closure to avoid building an intermediate
+        // iterator of matches. Each match is resolved immediately.
         let result = self
             .var_regex
             .replace_all(template, |caps: &regex::Captures| {
                 let var_name = &caps[1];
+                // Borrow from vars; if the key is missing, return the original
+                // match text (caps[0]) so the placeholder survives.
                 if let Some(value) = vars.get(var_name) {
                     Cow::Owned(value.clone())
                 } else {
@@ -63,15 +116,29 @@ impl TemplateEngine {
         Ok(result.to_string())
     }
 
-    /// Extract all variable names from a template
+    /// Extract all unique variable names from a template string.
+    ///
+    /// Scans the template for `{{variable}}` patterns and returns the variable
+    /// names in the order they appear (duplicates are not deduplicated; callers
+    /// that need uniqueness should collect into a `HashSet`).
     ///
     /// # Arguments
     ///
-    /// * `template` - The template string
+    /// * `template` - The template string to scan.
     ///
     /// # Returns
     ///
-    /// Vector of variable names found in the template
+    /// A `Vec<String>` of variable names found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nanobot_prompt::TemplateEngine;
+    ///
+    /// let engine = TemplateEngine::new();
+    /// let vars = engine.extract_variables("Hello {{name}}, welcome to {{project}}!");
+    /// assert_eq!(vars, vec!["name", "project"]);
+    /// ```
     pub fn extract_variables(&self, template: &str) -> Vec<String> {
         self.var_regex
             .captures_iter(template)
@@ -79,29 +146,29 @@ impl TemplateEngine {
             .collect()
     }
 
-    /// Render a template with environment variables
+    /// Render a template string substituting `{{VAR}}` with environment variables.
     ///
-    /// Substitutes {{VAR}} with the value of environment variable VAR.
-    /// If the environment variable is not set, replaces with empty string.
+    /// For each `{{variable}}` placeholder, the engine reads the environment
+    /// variable with that name. If the environment variable is set, it replaces
+    /// the placeholder with its value. If unset, the placeholder is replaced
+    /// with an empty string.
     ///
     /// # Arguments
     ///
-    /// * `template` - The template string with {{variable}} placeholders
+    /// * `template` - The template string with `{{variable}}` placeholders.
     ///
     /// # Returns
     ///
-    /// Rendered string with environment variables substituted
+    /// `PromptResult<String>` containing the rendered template.
     ///
     /// # Examples
     ///
-    /// ```no_compile
+    /// ```no_run
     /// use nanobot_prompt::TemplateEngine;
-    ///
     /// std::env::set_var("API_HOST", "api.example.com");
     ///
     /// let engine = TemplateEngine::new();
-    /// let template = "https://{{API_HOST}}/v1";
-    /// let result = engine.render_env(template).unwrap();
+    /// let result = engine.render_env("https://{{API_HOST}}/v1").unwrap();
     /// assert_eq!(result, "https://api.example.com/v1");
     /// ```
     pub fn render_env(&self, template: &str) -> PromptResult<String> {
@@ -109,40 +176,51 @@ impl TemplateEngine {
             .var_regex
             .replace_all(template, |caps: &regex::Captures| {
                 let var_name = &caps[1];
+                // Replace missing environment variables with empty string
+                // rather than leaving the placeholder — secrets/tokens that
+                // reference env vars should not leak the template syntax.
                 std::env::var(var_name).unwrap_or_default()
             });
         Ok(result.to_string())
     }
 
-    /// Render a JSON value recursively with environment variables
+    /// Recursively substitute `{{VAR}}` placeholders with environment variables
+    /// in a `serde_json::Value` tree.
     ///
-    /// Traverses the JSON structure and substitutes {{VAR}} placeholders
-    /// in all string values with environment variable values.
+    /// Walks every node in the JSON value:
+    /// - String values are rendered through `render_env`.
+    /// - Arrays have each element processed recursively.
+    /// - Objects have each value processed recursively.
+    /// - Numbers, booleans, and nulls are left unchanged.
     ///
     /// # Arguments
     ///
-    /// * `value` - Mutable reference to a serde_json::Value
+    /// * `value` - A mutable reference to a `serde_json::Value` whose string
+    ///   leaves will be mutated in place.
+    ///
+    /// # Returns
+    ///
+    /// `PromptResult<()>`. Errors are propagated from `render_env` if the
+    /// regex replacement fails.
     ///
     /// # Examples
     ///
-    /// ```no_compile
+    /// ```no_run
     /// use nanobot_prompt::TemplateEngine;
     /// use serde_json::json;
     ///
     /// std::env::set_var("API_KEY", "sk-test-123");
     ///
     /// let engine = TemplateEngine::new();
-    /// let mut config = json!({
-    ///     "apiKey": "{{API_KEY}}",
-    ///     "apiBase": "https://{{API_HOST}}/v1"
-    /// });
-    ///
+    /// let mut config = json!({ "apiKey": "{{API_KEY}}" });
     /// engine.render_json_env(&mut config).unwrap();
     /// assert_eq!(config["apiKey"], "sk-test-123");
     /// ```
     pub fn render_json_env(&self, value: &mut serde_json::Value) -> PromptResult<()> {
+        // Recursive descent — match on the variant to avoid cloning.
         match value {
             serde_json::Value::String(s) => {
+                // Replace in place to avoid rebuilding the entire Value tree.
                 *s = self.render_env(s)?;
             }
             serde_json::Value::Array(items) => {
@@ -155,6 +233,7 @@ impl TemplateEngine {
                     self.render_json_env(item)?;
                 }
             }
+            // Numbers, booleans, null: nothing to substitute.
             _ => {}
         }
         Ok(())

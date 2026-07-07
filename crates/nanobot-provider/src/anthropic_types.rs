@@ -1,3 +1,31 @@
+//! Type definitions for the Anthropic Messages API wire format.
+//!
+//! This module contains request and response types serialized to/from JSON when
+//! communicating with the Anthropic Claude API.
+//!
+//! # Organization
+//!
+//! | Section               | Types                                     |
+//! |-----------------------|-------------------------------------------|
+//! | Request payloads      | `AnthropicMessagesPayload`, `AnthropicInputMessage`, `AnthropicInputContentBlock` |
+//! | Tool definitions      | `AnthropicToolDefinition`                  |
+//! | Response payloads     | `AnthropicMessagesResponse`, `AnthropicContentBlock` |
+//! | Usage metadata        | `AnthropicUsage`                           |
+//! | Error responses       | `AnthropicErrorResponse`, `AnthropicErrorDetail` |
+//! | Stream events         | `AnthropicStreamEvent*`                    |
+//!
+//! # Spec References
+//!
+//! - Messages API: <https://docs.anthropic.com/en/docs/api/messages>
+//! - Streaming: <https://docs.anthropic.com/en/docs/build-with-claude/streaming>
+//! - Extended thinking: <https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking>
+//!
+//! # Notes
+//!
+//! - All types are `pub(crate)` — they are internal to the provider crate.
+//! - Streaming event types use `#[serde(other)]` on the `Unknown` variant to gracefully
+//!   handle new or undocumented event types without deserialization failures.
+
 use serde::{Deserialize, Serialize};
 
 use nanobot_types::tools::{JsonSchema, ToolDefinition};
@@ -115,6 +143,10 @@ pub(crate) struct AnthropicToolDefinition {
     pub(crate) input_schema: JsonSchema,
 }
 
+/// Converts a generic [`ToolDefinition`] into the Anthropic-specific format.
+///
+/// Anthropic uses a flat schema where `name`, `description`, and `input_schema` are
+/// top-level fields (no outer `function` wrapper like OpenAI's chat completions format).
 impl From<ToolDefinition> for AnthropicToolDefinition {
     fn from(value: ToolDefinition) -> Self {
         Self {

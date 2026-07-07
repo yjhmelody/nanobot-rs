@@ -1,3 +1,20 @@
+//! Top-level error types for the nanobot application binary.
+//!
+//! `NanobotError` is a unified error enum that wraps errors from every
+//! sub-crate (provider, tools, channels, bus, sessions, config, cron, agent,
+//! heartbeat, runtime) as well as standard I/O and serialisation errors.
+//!
+//! ## Design
+//!
+//! All sub-crate errors are converted via `#[from]` derives so that the `?`
+//! operator works seamlessly across crate boundaries. The `Other` variant
+//! captures any error not otherwise covered via `anyhow::Error`.
+//!
+//! ## Retryability
+//!
+//! `NanobotError::is_retryable()` indicates whether the operation may succeed
+//! on retry (provider rate-limits, timeouts, and I/O errors).
+
 use std::io;
 
 use thiserror::Error;
@@ -14,66 +31,78 @@ use crate::heartbeat::HeartbeatError;
 use crate::runtime::error::RuntimeError;
 use nanobot_channels::ChannelError;
 
-/// Result type alias using NanobotError.
+/// Convenience alias for `Result<T, NanobotError>`.
+///
+/// Used as the return type for most top-level fallible operations in the
+/// application binary so that the `?` operator can convert any sub-crate
+/// error into the unified `NanobotError` via the `From` impls.
 pub type NanobotResult<T> = std::result::Result<T, NanobotError>;
 
-/// Core error types for nanobot.
+/// Unified error type that aggregates errors from all sub-crates.
+///
+/// Each variant corresponds to a distinct subsystem. Most are transparent
+/// wrappers around the sub-crate's own error type, enabled by `#[from]`
+/// so that the `?` operator converts automatically.
 #[derive(Debug, Error)]
 pub enum NanobotError {
-    /// LLM provider error.
+    /// Error from the LLM provider (e.g., Anthropic, OpenAI).
     #[error(transparent)]
     Provider(#[from] ProviderError),
 
-    /// Tool error.
+    /// Error during tool execution.
     #[error(transparent)]
     Tool(#[from] ToolError),
 
-    /// Channel error.
+    /// Error from a messaging channel (Feishu, Slack, etc.).
     #[error(transparent)]
     Channel(#[from] ChannelError),
 
-    /// Message bus error.
+    /// Error from the internal message bus.
     #[error(transparent)]
     Bus(#[from] BusError),
 
-    /// Session error.
+    /// Error from the session store (persistence / retrieval).
     #[error(transparent)]
     Session(#[from] SessionError),
 
-    /// Configuration error.
+    /// Error reading or writing configuration.
     #[error(transparent)]
     Config(#[from] ConfigError),
 
-    /// Cron subsystem error.
+    /// Error from the cron scheduler subsystem.
     #[error(transparent)]
     Cron(#[from] CronError),
 
-    /// Heartbeat subsystem error.
+    /// Error from the heartbeat subsystem.
     #[error(transparent)]
     Heartbeat(#[from] HeartbeatError),
 
-    /// Agent error.
+    /// Error from the agent loop.
     #[error(transparent)]
     Agent(#[from] AgentError),
 
-    /// Runtime error.
+    /// Error from runtime bootstrapping.
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
 
-    /// I/O error.
+    /// Standard I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
-    /// JSON serialization/deserialization error.
+    /// JSON serialisation / deserialisation error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Generic error for cases not covered by specific variants.
+    /// Generic fallback for errors without a dedicated variant.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
 impl NanobotError {
+    /// Returns `true` if the error is potentially transient and may succeed on retry.
+    ///
+    /// Currently considers provider rate-limits, timeouts, API request failures,
+    /// and I/O errors as retryable.
     #[allow(unused)]
     pub fn is_retryable(&self) -> bool {
         matches!(

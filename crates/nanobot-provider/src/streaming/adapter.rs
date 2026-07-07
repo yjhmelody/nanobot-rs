@@ -1,3 +1,8 @@
+//! Stream adapter trait for converting HTTP responses to unified event streams.
+//!
+//! Defines [`StreamAdapter`], which abstracts over the different streaming wire formats
+//! used by various LLM providers. Each provider-specific module implements this trait.
+
 use async_trait::async_trait;
 
 use super::events::{StreamError, StreamResponse};

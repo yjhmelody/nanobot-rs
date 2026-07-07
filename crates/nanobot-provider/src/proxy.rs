@@ -1,8 +1,25 @@
+//! Proxy fallback helper for LLM provider HTTP requests.
+//!
+//! This module provides [`ProxyFallbackHelper`], which implements a common pattern for
+//! environments where a system proxy may be unreliable:
+//!
+//! 1. Send the request through the normally configured proxy (respecting env vars
+//!    like `HTTP_PROXY`, `HTTPS_PROXY`, etc.).
+//! 2. If the request fails with a gateway error (502, 503, 504) or a connection error,
+//!    retry the request directly (bypassing the proxy).
+//!
+//! # When It Activates
+//!
+//! The helper only enables fallback logic when any standard proxy environment variable
+//! is detected (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and their lowercase variants).
+//! If no proxy is configured, all requests go through the primary client with no retries.
+
 use std::env;
 
 use reqwest::StatusCode;
 use tracing::warn;
 
+/// Logging target for provider-related trace messages.
 pub const TARGET: &str = "nanobot::provider";
 
 /// Helper for implementing proxy fallback logic in LLM providers.
@@ -119,7 +136,9 @@ impl Default for ProxyFallbackHelper {
     }
 }
 
-/// Check if any proxy environment variables are configured.
+/// Checks whether any standard proxy environment variable is set (upper and lower case).
+///
+/// Checks: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `http_proxy`, `https_proxy`, `all_proxy`.
 fn has_proxy_env_configured() -> bool {
     [
         "HTTP_PROXY",
@@ -133,7 +152,8 @@ fn has_proxy_env_configured() -> bool {
     .any(|key| env::var_os(key).is_some())
 }
 
-/// Check if a status code indicates a gateway error that should trigger proxy retry.
+/// Returns `true` if the HTTP status code is a gateway error (502, 503, 504)
+/// that might be caused by a misconfigured or broken proxy.
 fn should_retry_without_proxy_status(status: StatusCode) -> bool {
     (502..=504).contains(&status.as_u16())
 }

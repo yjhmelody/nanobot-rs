@@ -1,3 +1,21 @@
+//! Cron scheduling tool for reminders and recurring tasks.
+//!
+//! Provides the `cron` tool that lets the LLM schedule reminders, recurring
+//! jobs, and one-shot tasks. It wraps the [`CronService`] backend from
+//! `nanobot-cron` and exposes four actions: `add`, `once`, `list`, `remove`.
+//!
+//! ## Schedule types
+//!
+//! - **every** (`every_seconds`): Recurring interval in seconds.
+//! - **cron** (`cron_expr` + optional `tz`): Standard cron expression
+//!   (e.g., `"0 9 * * *"` for daily at 9 AM).
+//! - **at** (`at`): One-shot execution at a specific ISO datetime.
+//!
+//! ## Session context
+//!
+//! The tool requires a valid `ToolContext` (channel + chat_id) to route
+//! the scheduled message back to the right destination.
+
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -20,15 +38,23 @@ const CRON_TZ_DESC: &str = "IANA timezone for cron expressions (e.g. 'America/Va
 const CRON_AT_DESC: &str = "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')";
 const CRON_JOB_ID_DESC: &str = "Job ID (for remove)";
 
+/// The cron scheduling tool.
+///
+/// Provides the LLM with ability to schedule messages for future delivery.
+/// Wraps a [`CronService`] and translates tool arguments into job parameters.
 pub struct CronTool {
     service: Arc<CronService>,
 }
 
 impl CronTool {
+    /// Creates a new `CronTool` backed by the given cron service.
     pub fn new(service: Arc<CronService>) -> Self {
         Self { service }
     }
 
+    /// Returns the tool's static definition (name: "cron").
+    ///
+    /// Uses a `OnceLock` to cache the definition after first construction.
     pub fn definition() -> Arc<ToolDefinition> {
         static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
@@ -78,6 +104,14 @@ impl CronTool {
         .clone()
     }
 
+    /// Executes a cron action with strongly-typed arguments.
+    ///
+    /// # Actions
+    ///
+    /// * `add` - Creates a recurring or cron-scheduled job.
+    /// * `once` - Creates a one-shot job (fires once then deletes itself).
+    /// * `list` - Lists all active jobs.
+    /// * `remove` - Removes a job by ID.
     pub(crate) async fn execute_typed(
         &self,
         args: CronArgs,
@@ -190,6 +224,7 @@ impl CronTool {
 
                 let at_ms = match args.at {
                     Some(at_value) => parse_at_to_ms(&at_value)?,
+                    // Default to 1 second from now if no `at` specified.
                     None => Utc::now().timestamp_millis() + 1000,
                 };
                 let schedule = CronSchedule {
@@ -274,11 +309,21 @@ impl Tool for CronTool {
     }
 }
 
+/// Parses an ISO datetime string into milliseconds since Unix epoch.
+///
+/// Accepts the following formats:
+/// - RFC 3339 / ISO 8601: `"2026-02-12T10:30:00+00:00"`
+/// - Local datetime: `"%Y-%m-%dT%H:%M:%S"` or `"%Y-%m-%d %H:%M:%S"` (assumes local timezone)
+///
+/// This is necessary because the cron service works in milliseconds for
+/// precise scheduling.
 fn parse_at_to_ms(input: &str) -> ToolResult<i64> {
+    // Try RFC 3339 first (includes timezone offset).
     if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
         return Ok(dt.timestamp_millis());
     }
 
+    // Try common local datetime formats (no timezone = local time).
     for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(input, fmt)
             && let Some(local_dt) = Local.from_local_datetime(&naive).single()

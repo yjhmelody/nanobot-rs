@@ -1,28 +1,54 @@
+//! Task identifier type for sub-agent and background task tracking.
+//!
+//! This module provides [`TaskId`], a newtype wrapper around `uuid::Uuid`
+//! used to uniquely identify spawned sub-agents and background operations.
+//!
+//! # Design
+//!
+//! - Uses v4 (random) UUIDs for globally unique, non-sequential identifiers.
+//! - The `Display` implementation shows an 8-character short form for
+//!   concise logging, while [`as_str`](TaskId::as_str) provides the
+//!   full UUID string.
+//! - Conversions to/from `uuid::Uuid` are provided for interop with
+//!   storage backends.
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// A task identifier wrapping a UUID.
+/// A unique identifier for a spawned sub-agent or background task.
+///
+/// Wraps a `uuid::Uuid` (v4, random) for global uniqueness. The short
+/// display format (first 8 hex chars) is used in user-facing messages
+/// to keep identifiers scannable.
+///
+/// # Derive rationale
+///
+/// - `Clone + Copy`: small identifier (128 bits) passed by value.
+/// - `PartialEq + Eq + Hash`: used as keys in `DashMap` for task lookup.
+/// - `Serialize + Deserialize`: stored in task records and session files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(uuid::Uuid);
 
 impl TaskId {
-    /// Generate a new random task ID.
+    /// Generates a new random task ID (UUID v4).
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
 
-    /// Get the full UUID string representation.
+    /// Returns the full UUID string representation (36 characters,
+    /// hyphen-separated).
     pub fn as_str(&self) -> String {
         self.0.to_string()
     }
 
-    /// Get the short (8-character) representation for display.
+    /// Returns the short (8-character) hex prefix for display in logs
+    /// and user-facing messages.
     pub fn short(&self) -> String {
         self.0.to_string().chars().take(8).collect()
     }
 
-    /// Get the inner UUID.
+    /// Returns the inner `uuid::Uuid` value.
     pub fn inner(&self) -> uuid::Uuid {
         self.0
     }

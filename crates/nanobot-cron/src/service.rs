@@ -1,3 +1,32 @@
+//! Background cron scheduler with JSONL persistence and 1-second ticker loop.
+//!
+//! This module provides [`CronService`], the central scheduler, and [`CronJobHandler`],
+//! the callback trait for job execution.
+//!
+//! ## How it works
+//!
+//! 1. On startup, the store file is loaded synchronously in [`CronService::new`].
+//! 2. [`CronService::start`] spawns a tokio task that ticks every second.
+//! 3. Each tick, [`CronService::on_timer`] gathers job IDs whose
+//!    `next_run_at_ms <= now`, then executes each one via [`CronService::execute_job`].
+//! 4. After execution, the job's state is updated and the store is persisted.
+//!
+//! ## Concurrency model
+//!
+//! - **Store access** is guarded by a `tokio::sync::RwLock` because writes may need
+//!   to hold the lock across await points (file I/O).
+//! - **Last-modified tracking** uses `parking_lot::Mutex` for short, synchronous
+//!   comparisons.
+//! - **Running flag** is an `AtomicBool` for lock-free status checks from the ticker.
+//! - **Timer task handle** is in a `tokio::sync::Mutex` since it can be replaced
+//!   across await points.
+//!
+//! ## External modification support
+//!
+//! The store file's mtime is checked on every tick. If an external process has
+//! modified the file, the in-memory store is reloaded automatically. This enables
+//! hot-reloading of jobs without restarting the service.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +47,7 @@ use nanobot_types::cron::{
     CronJob, CronJobState, CronPayload, CronScheduleKind, CronStatus, CronStore, now_ms,
 };
 
+/// Logging target used for all cron-related trace events.
 const TARGET: &str = "nanobot::cron";
 
 /// Callback invoked by `CronService` when a scheduled job fires.
@@ -31,17 +61,63 @@ pub trait CronJobHandler: Send + Sync {
 }
 
 /// Background scheduler that reads/writes a JSONL store and fires jobs on schedule.
+///
+/// `CronService` runs a background tokio task (started via [`start`](CronService::start))
+/// that ticks every 1 second. On each tick, it:
+///
+/// 1. Reloads the store if the file's mtime changed (enabling hot-reload).
+/// 2. Collects all enabled jobs whose `next_run_at_ms <= now`.
+/// 3. Executes each due job in sequence via the registered [`CronJobHandler`].
+/// 4. Updates the job state (last_run, next_run) and persists the store.
+///
+/// # Concurrency
+///
+/// - **`store`**: `tokio::sync::RwLock` — held across async file I/O.
+/// - **`last_mtime`**: `parking_lot::Mutex` — short synchronous compare-and-swap.
+/// - **`running`**: `AtomicBool` — lock-free flag for the ticker loop.
+/// - **`timer_task`**: `tokio::sync::Mutex` — updated across await boundaries.
+/// - **`on_job`**: `tokio::sync::RwLock` — read on every tick, write on registration.
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use nanobot_cron::CronService;
+///
+/// let svc = Arc::new(CronService::new("/tmp/cron_store.json".into()));
+/// svc.register_on_job_handler(my_handler).await;
+/// svc.start().await.unwrap();
+/// ```
 pub struct CronService {
+    /// Path to the JSONL store file on disk.
     store_path: PathBuf,
+    /// In-memory store of all cron jobs, protected by a tokio RwLock.
     store: RwLock<CronStore>,
+    /// Last-known modification time of the store file, used to detect external changes.
     last_mtime: Mutex<Option<SystemTime>>,
+    /// Whether the background ticker loop is active.
     running: AtomicBool,
+    /// Handle to the spawned ticker task, so it can be cancelled on stop.
     timer_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Optional callback invoked for each due job.
     on_job: RwLock<Option<Arc<dyn CronJobHandler>>>,
 }
 
 impl CronService {
     /// Creates a new `CronService` backed by the given store file path.
+    ///
+    /// The store file is loaded synchronously during construction. If the file
+    /// does not exist or fails to parse, an empty store is used (with a warning
+    /// logged).
+    ///
+    /// # Arguments
+    ///
+    /// * `store_path` — Absolute or relative path to the JSONL store file.
+    ///
+    /// # Returns
+    ///
+    /// A new `CronService` in the stopped state. Call [`start`](CronService::start)
+    /// to begin the background ticker loop.
     pub fn new(store_path: PathBuf) -> Self {
         let (store, last_mtime) = load_store_sync(&store_path);
         Self {
@@ -55,11 +131,47 @@ impl CronService {
     }
 
     /// Registers the handler that will be called each time a job fires.
+    ///
+    /// Call this before [`start`](CronService::start) or at any point during
+    /// runtime. Only one handler can be registered at a time; calling this
+    /// replaces any previously registered handler.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler` — An `Arc`-wrapped implementation of [`CronJobHandler`].
+    ///
+    /// # Locking
+    ///
+    /// Acquires the `on_job` write lock. Safe to call while the service is running.
     pub async fn register_on_job_handler(&self, handler: Arc<dyn CronJobHandler>) {
         *self.on_job.write().await = Some(handler);
     }
 
     /// Starts the background ticker loop. Returns immediately if already running.
+    ///
+    /// On first start, this method:
+    /// 1. Reloads the store from disk (in case an external process modified it).
+    /// 2. Recomputes `next_run_at_ms` for all enabled jobs.
+    /// 3. Persists the updated store.
+    /// 4. Spawns a tokio task with a 1-second interval ticker.
+    ///
+    /// The ticker uses [`MissedTickBehavior::Delay`] to avoid burst-firing when
+    /// the system is under load.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — `Arc<Self>` is required because the spawned task must own a
+    ///   reference to the service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store file cannot be read or written during the
+    /// initial reload/save cycle.
+    ///
+    /// # Locking
+    ///
+    /// Acquires the `store` write lock during initialisation, then only the
+    /// `running` atomic flag during the ticker loop.
     pub async fn start(self: &Arc<Self>) -> CronResult<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -94,6 +206,14 @@ impl CronService {
     }
 
     /// Stops the background ticker and aborts the timer task.
+    ///
+    /// Sets the `running` flag to `false` (so the ticker loop exits on its next
+    /// iteration) and aborts the spawned tokio task. This is safe to call even if
+    /// the service was never started or already stopped.
+    ///
+    /// # Locking
+    ///
+    /// Acquires the `timer_task` mutex to take and abort the join handle.
     pub async fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.timer_task.lock().await.take() {
@@ -102,6 +222,18 @@ impl CronService {
     }
 
     /// Returns a snapshot of the current scheduler status.
+    ///
+    /// The result includes whether the service is enabled, the total number of jobs
+    /// in the store, and the earliest upcoming wake time across all enabled jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store file cannot be read during reload.
+    ///
+    /// # Locking
+    ///
+    /// Acquires the `store` write lock (to reload-if-modified) and reads the
+    /// `running` atomic flag.
     pub async fn status(&self) -> CronResult<CronStatus> {
         let mut store = self.write_store().await;
         self.reload_if_modified_locked(&mut store).await?;
@@ -113,6 +245,19 @@ impl CronService {
     }
 
     /// Lists all jobs, optionally including disabled ones, sorted by next run time.
+    ///
+    /// Jobs are sorted by their `next_run_at_ms` in ascending order. Disabled jobs
+    /// and jobs with no next run are placed at the end (using `i64::MAX` as the
+    /// sort key for `None` values).
+    ///
+    /// # Arguments
+    ///
+    /// * `include_disabled` — If `true`, returns both enabled and disabled jobs.
+    ///   If `false`, only enabled jobs are returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store file cannot be read during reload.
     pub async fn list_jobs(&self, include_disabled: bool) -> CronResult<Vec<CronJob>> {
         let mut store = self.write_store().await;
         self.reload_if_modified_locked(&mut store).await?;
@@ -133,6 +278,23 @@ impl CronService {
     }
 
     /// Validates and adds a new cron job, persisting it to the store.
+    ///
+    /// The job is assigned a UUID v4 identifier and added with `enabled: true`.
+    /// Its `next_run_at_ms` is computed immediately based on the schedule.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` — Builder-style parameters (name, schedule, message, etc.).
+    ///
+    /// # Errors
+    ///
+    /// - Returns an error if the schedule fails validation (e.g., `tz` set without
+    ///   a cron expression).
+    /// - Returns an error if the store file cannot be written.
+    ///
+    /// # Locking
+    ///
+    /// Acquires the `store` write lock for the duration of reload, insert, and save.
     pub async fn add_job(&self, params: AddJobParams) -> CronResult<CronJob> {
         params.schedule.validate_for_add()?;
         let now = now_ms();
@@ -147,6 +309,9 @@ impl CronService {
             enabled: true,
             schedule: params.schedule,
             payload: CronPayload {
+                // The payload kind is hardcoded to "agent_turn" because cron jobs are
+                // currently only used to schedule agent interactions. This could be
+                // made configurable if other payload types are needed in the future.
                 kind: "agent_turn".to_string(),
                 message: params.message,
                 deliver: params.deliver,
@@ -168,6 +333,17 @@ impl CronService {
     }
 
     /// Removes the job with the given ID. Returns `true` if the job was found and removed.
+    ///
+    /// The store is only saved to disk if a job was actually removed. If no job
+    /// matched the provided ID, `false` is returned and no write occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `job_id` — The UUID of the job to remove (as a string).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store file cannot be read or written.
     pub async fn remove_job(&self, job_id: &str) -> CronResult<bool> {
         let mut store = self.write_store().await;
         self.reload_if_modified_locked(&mut store).await?;
@@ -183,6 +359,12 @@ impl CronService {
         Ok(removed)
     }
 
+    // Called on every 1-second tick. Collects job IDs whose scheduled time has
+    // passed, then executes each one sequentially.
+    //
+    // Due IDs are gathered upfront so the store lock is released before any
+    // callbacks run — this avoids holding the lock across the
+    // `CronJobHandler::on_job` await point.
     async fn on_timer(&self) -> CronResult<()> {
         // Collect due ids first to avoid holding the store lock while executing callbacks.
         let due_ids = {
@@ -206,6 +388,20 @@ impl CronService {
         Ok(())
     }
 
+    // Executes a single cron job by ID.
+    //
+    // 1. Takes a snapshot of the job (under the store lock).
+    // 2. Calls the registered `CronJobHandler::on_job` (outside the store lock).
+    // 3. Re-acquires the store lock to update the job's state (last run, next run).
+    // 4. For `At` schedules: either disables or deletes the job depending on
+    //    `delete_after_run`.
+    // 5. Persists the store.
+    //
+    // If the handler returns an error, the job status is set to "error" and the
+    // error message is recorded. The job is not removed on failure.
+    //
+    // If the job was deleted externally between snapshot and state update, the
+    // update is silently skipped.
     async fn execute_job(&self, job_id: &str) -> CronResult<()> {
         let job_snapshot = {
             let mut store = self.write_store().await;
@@ -272,10 +468,24 @@ impl CronService {
         Ok(())
     }
 
+    // Acquires the write lock on the in-memory cron store.
+    //
+    // This is a thin wrapper to avoid repeating `.store.write().await` and to make
+    // lock-acquisition sites more readable.
     async fn write_store(&self) -> RwLockWriteGuard<'_, CronStore> {
         self.store.write().await
     }
 
+    // Checks whether the store file's mtime has changed since the last load.
+    // If so, the file is re-read and parsed, replacing the in-memory store.
+    //
+    // This enables hot-reload: external processes can modify the store file and
+    // the scheduler picks up changes on the next tick without restarting.
+    //
+    // # Locking
+    //
+    // Caller must already hold the `store` write lock. This method also acquires
+    // the `last_mtime` mutex (short, synchronous).
     async fn reload_if_modified_locked(&self, store: &mut CronStore) -> CronResult<()> {
         let metadata = match async_fs::metadata(&self.store_path).await {
             Ok(metadata) => metadata,
@@ -303,6 +513,17 @@ impl CronService {
         Ok(())
     }
 
+    // Persists the in-memory cron store to disk as a pretty-printed JSON file.
+    //
+    // The parent directory is created if it does not exist. After writing, the
+    // file's mtime is refreshed in `self.last_mtime` so that the next
+    // `reload_if_modified_locked` call does not immediately re-read what we just
+    // wrote.
+    //
+    // # Locking
+    //
+    // Caller must already hold the `store` write lock. This method also acquires
+    // the `last_mtime` mutex.
     async fn save_store_locked(&self, store: &CronStore) -> CronResult<()> {
         if let Some(parent) = self.store_path.parent() {
             async_fs::create_dir_all(parent)
@@ -315,6 +536,7 @@ impl CronService {
             .await
             .with_context(|| format!("failed to write {}", self.store_path.display()))?;
 
+        // Refresh the mtime so our own write doesn't trigger a false reload.
         let modified = async_fs::metadata(&self.store_path)
             .await
             .ok()
@@ -326,6 +548,8 @@ impl CronService {
     }
 }
 
+// Recomputes `next_run_at_ms` for all enabled jobs based on the current time.
+// Used during service start to re-sync schedules after a restart.
 fn recompute_next_runs(jobs: &mut [CronJob]) {
     let now = now_ms();
     for job in jobs.iter_mut() {
@@ -335,6 +559,8 @@ fn recompute_next_runs(jobs: &mut [CronJob]) {
     }
 }
 
+// Returns the earliest `next_run_at_ms` across all enabled jobs, or `None` if
+// there are no enabled jobs scheduled.
 fn next_wake(jobs: &[CronJob]) -> Option<i64> {
     jobs.iter()
         .filter(|j| j.enabled)
@@ -342,6 +568,11 @@ fn next_wake(jobs: &[CronJob]) -> Option<i64> {
         .min()
 }
 
+// Synchronously loads the cron store from disk at construction time.
+//
+// Returns a default (empty) store if the file does not exist or fails to parse.
+// Parse failures are logged as warnings rather than errors, since the file may
+// have been written by a newer version of the schema.
 fn load_store_sync(path: &Path) -> (CronStore, Option<SystemTime>) {
     if !path.exists() {
         return (CronStore::default(), None);
@@ -364,6 +595,10 @@ fn load_store_sync(path: &Path) -> (CronStore, Option<SystemTime>) {
     }
 }
 
+// Synchronously reads and parses a cron store file.
+//
+// If the stored `version` field is <= 0, it is bumped to version 1 as a
+// migration step for older store files that predate the version field.
 fn read_store_file(path: &Path) -> CronResult<CronStore> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read cron store {}", path.display()))?;
@@ -375,6 +610,8 @@ fn read_store_file(path: &Path) -> CronResult<CronStore> {
     Ok(store)
 }
 
+// Async version of `read_store_file`, used by the runtime reload path.
+// Performs the same parsing and version migration as the sync counterpart.
 async fn read_store_file_async(path: &Path) -> CronResult<CronStore> {
     let raw = async_fs::read_to_string(path)
         .await
@@ -387,12 +624,17 @@ async fn read_store_file_async(path: &Path) -> CronResult<CronStore> {
     Ok(store)
 }
 
+// Unit and integration tests for `CronService`.
+//
+// Tests use temporary files in the system temp directory with UUID names to
+// avoid collisions. Each test cleans up its temp file on completion.
 #[cfg(test)]
 mod tests {
     use super::*;
     use nanobot_types::cron::CronSchedule;
     use std::sync::atomic::AtomicUsize;
 
+    // Creates a unique temporary file path for a test case.
     fn temp_store_path(case: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "nanobot-cron-{}-{}.json",
@@ -401,6 +643,7 @@ mod tests {
         ))
     }
 
+    // A test-only `CronJobHandler` that counts how many times it was invoked.
     struct TestCronJobHandler {
         called: Arc<AtomicUsize>,
     }
@@ -413,6 +656,7 @@ mod tests {
         }
     }
 
+    /// Verifies that a schedule with `tz` but without a cron expression is rejected.
     #[test]
     fn validate_schedule_rejects_tz_without_cron() {
         let schedule = CronSchedule {
@@ -427,6 +671,8 @@ mod tests {
         assert!(err.to_string().contains("tz can only be used"));
     }
 
+    /// Verifies that `compute_next_run` produces correct results for all three
+    /// schedule kinds (At, Every, Cron).
     #[test]
     fn compute_next_run_handles_at_every_cron() {
         let now = 1_700_000_000_000i64;
@@ -456,6 +702,8 @@ mod tests {
         assert!(next > now);
     }
 
+    /// Verifies the full add-list-remove lifecycle of a cron job, including
+    /// persistence to disk (raw file content is checked for the job ID).
     #[tokio::test]
     async fn add_list_remove_job_roundtrip() {
         let path = temp_store_path("roundtrip");
@@ -501,6 +749,8 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Verifies that executing a job invokes the registered callback and updates
+    /// the job's state (`last_run_at_ms`, `last_status`, `next_run_at_ms`).
     #[tokio::test]
     async fn execute_job_invokes_callback_and_updates_state() {
         let path = temp_store_path("execute");

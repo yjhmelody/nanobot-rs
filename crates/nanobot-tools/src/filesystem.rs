@@ -1,3 +1,25 @@
+//! Filesystem tools for reading, writing, editing, and listing files.
+//!
+//! Provides four built-in tools:
+//!
+//! - [`ReadFileTool`] -- Read a file's contents as text.
+//! - [`WriteFileTool`] -- Write content to a file (creates parent dirs).
+//! - [`EditFileTool`] -- String-replace within a file (single occurrence only).
+//! - [`ListDirTool`] -- List directory contents.
+//!
+//! ## Security
+//!
+//! All tools enforce workspace boundaries via [`resolve_path`]. If the
+//! configuration restricts operations to the workspace, paths outside the
+//! allowed directory are rejected. Paths are canonicalized where possible
+//! to prevent symlink-based escapes.
+//!
+//! ## Concurrency
+//!
+//! These tools use `tokio::fs` for async I/O and snapshot the shared
+//! configuration at the start of each execution, so they never hold locks
+//! across await points.
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -31,11 +53,17 @@ const EDIT_FILE_NEW_TEXT_DESC: &str = "The text to replace with";
 const LIST_DIR_DESC: &str = "List files and directories in the given directory path.";
 const LIST_DIR_PATH_DESC: &str = "The directory path to list";
 
+/// Tool for reading file contents.
+///
+/// Reads a file from disk and returns its full text content. The path is
+/// resolved relative to the workspace and checked against the allowed
+/// directory boundary.
 pub struct ReadFileTool {
     config: SharedToolConfig,
 }
 
 impl ReadFileTool {
+    /// Creates a new `ReadFileTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -82,11 +110,17 @@ impl Tool for ReadFileTool {
     }
 }
 
+/// Tool for writing content to files.
+///
+/// Creates parent directories if they don't exist. The path is resolved
+/// relative to the workspace and checked against the allowed directory
+/// boundary.
 pub struct WriteFileTool {
     config: SharedToolConfig,
 }
 
 impl WriteFileTool {
+    /// Creates a new `WriteFileTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -137,11 +171,19 @@ impl Tool for WriteFileTool {
     }
 }
 
+/// Tool for in-place string replacement within a file.
+///
+/// Replaces the **first** occurrence of `old_text` with `new_text` in
+/// the given file. If `old_text` appears multiple times, the tool returns
+/// a warning instead of modifying the file, to avoid ambiguous edits.
+/// This is a safety design: the LLM can refine the `old_text` to be more
+/// specific and retry.
 pub struct EditFileTool {
     config: SharedToolConfig,
 }
 
 impl EditFileTool {
+    /// Creates a new `EditFileTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -196,11 +238,15 @@ impl Tool for EditFileTool {
     }
 }
 
+/// Tool for listing directory contents.
+///
+/// Returns a sorted list of entries with type indicators (dir vs file).
 pub struct ListDirTool {
     config: SharedToolConfig,
 }
 
 impl ListDirTool {
+    /// Creates a new `ListDirTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -247,6 +293,17 @@ impl Tool for ListDirTool {
     }
 }
 
+/// Resolves a user-provided path to an absolute filesystem path.
+///
+/// Handles:
+/// - `~/` prefix expansion to the user's home directory.
+/// - Relative paths joined against the workspace.
+/// - Symlink resolution via `canonicalize` (when the path exists).
+/// - Workspace boundary enforcement via `allowed_dir`.
+///
+/// If the target does not exist yet (e.g., for a `write_file` operation),
+/// canonicalization is best-effort and non-existent paths are accepted
+/// as-is (still subject to boundary checks).
 async fn resolve_path(
     path: &str,
     workspace: &Path,
@@ -297,6 +354,10 @@ async fn resolve_path(
     Ok(resolved)
 }
 
+/// Internal implementation of the `read_file` tool.
+///
+/// Parses args, resolves the path, verifies it is a file, and reads its
+/// contents as a UTF-8 string.
 async fn read_file(
     args_json: &str,
     workspace: &Path,
@@ -336,6 +397,10 @@ async fn read_file(
     })
 }
 
+/// Internal implementation of the `write_file` tool.
+///
+/// Parses args, resolves the path, creates parent directories if needed,
+/// and writes the content as a UTF-8 string.
 async fn write_file(
     args_json: &str,
     workspace: &Path,
@@ -369,6 +434,11 @@ async fn write_file(
     ))
 }
 
+/// Internal implementation of the `edit_file` tool.
+///
+/// Replaces the first occurrence of `old_text` with `new_text` in the
+/// target file. Returns a warning instead of modifying if `old_text`
+/// matches multiple times, forcing the LLM to provide more context.
 async fn edit_file(
     args_json: &str,
     workspace: &Path,
@@ -416,6 +486,8 @@ async fn edit_file(
             anyhow::anyhow!("old_text not found in {}", path),
         ));
     }
+    // Guard against ambiguous edits: if old_text appears multiple times,
+    // warn the LLM instead of making a guess.
     if content.matches(&old_text).count() > 1 {
         return Ok(format!(
             "Warning: old_text appears multiple times in {}. Please provide more context.",
@@ -433,6 +505,10 @@ async fn edit_file(
     Ok(format!("Successfully edited {}", resolved.display()))
 }
 
+/// Internal implementation of the `list_dir` tool.
+///
+/// Parses args, resolves the path, verifies it is a directory, and returns
+/// a sorted list of entries with type indicators.
 async fn list_dir(
     args_json: &str,
     workspace: &Path,

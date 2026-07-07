@@ -1,3 +1,22 @@
+//! Streaming event types and the unified stream representation.
+//!
+//! This module defines [`StreamEvent`], the single enum that carries all possible
+//! streaming updates from any LLM provider. The design goal is to provide a
+//! provider-agnostic view of the streaming process, so that consumers
+//! (e.g., the agent loop, WebSocket forwarders) do not need to understand
+//! Anthropic SSE vs. OpenAI SSE differences.
+//!
+//! # Event Flow
+//!
+//! A typical streaming session produces events in this order:
+//!
+//! 1. `TextDelta` (one or more) — incremental text output
+//! 2. `ToolCallStart` → `ToolCallArgumentsDelta`* → `ToolCallEnd` — tool calls
+//! 3. `ThinkingDelta` / `SignatureDelta` — reasoning content (optional)
+//! 4. `UsageUpdate` — final token counts
+//! 5. `FinishReasonUpdate` — why generation stopped
+//! 6. `Done` — final accumulated response, or `Error` on failure
+
 use std::pin::Pin;
 
 use futures::Stream;
@@ -76,6 +95,11 @@ pub enum StreamError {
     Interrupted,
 }
 
+/// Converts a [`ProviderError`](crate::ProviderError) into the appropriate [`StreamError`] variant.
+///
+/// - Network-related errors → `StreamError::Network`
+/// - Parse/invalid response errors → `StreamError::Parse`
+/// - Rate limit, auth, model, config, other errors → `StreamError::Provider`
 impl From<crate::ProviderError> for StreamError {
     fn from(err: crate::ProviderError) -> Self {
         use crate::ProviderError;

@@ -1,3 +1,31 @@
+//! OpenAI Responses API streaming adapter.
+//!
+//! OpenAI's streaming format uses SSE with JSON payloads prefixed by `data: `.
+//! The adapter parses these lines, deserializes them into [`ResponsesStreamEvent`],
+//! and emits unified [`StreamEvent`] values.
+//!
+//! # Streaming Event Types
+//!
+//! | OpenAI Event                              | Unified Event                |
+//! |-------------------------------------------|------------------------------|
+//! | `response.output_text.delta`              | `TextDelta`                  |
+//! | `response.reasoning_text.delta`           | `ThinkingDelta`              |
+//! | `response.function_call_arguments.delta`  | `ToolCallArgumentsDelta`     |
+//! | `response.output_item.added`              | `ToolCallStart` (for funcs)  |
+//! | `response.output_item.done`               | `ToolCallEnd`                |
+//! | `response.function_call_arguments.done`   | `ToolCallArgumentsDelta` + `ToolCallEnd` |
+//! | `response.completed`                      | `UsageUpdate`                |
+//! | `error`                                   | `StreamError::Provider`      |
+//!
+//! # State Management
+//!
+//! The [`OpenAiParser`] tracks text block indices and tool call state across events
+//! to correctly associate delta events with their parent items.
+//!
+//! Spec sources:
+//! - <https://platform.openai.com/docs/guides/streaming-responses>
+//! - <https://platform.openai.com/docs/api-reference/responses-streaming>
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -38,7 +66,10 @@ impl StreamAdapter for OpenAiAdapter {
     }
 }
 
-/// OpenAI SSE parser.
+/// OpenAI SSE parser (state machine).
+///
+/// Processes raw SSE `data: ...` lines and emits unified [`StreamEvent`] values.
+/// Maintains a buffer for partial lines across chunk boundaries.
 struct OpenAiParser {
     buffer: String,
     state: ResponsesStreamState,
@@ -90,16 +121,30 @@ impl OpenAiParser {
     }
 }
 
+/// Tracks streaming state for the OpenAI Responses format.
+///
+/// Responsible for:
+/// - Assigning stable content block indices to `(output_index, content_index)` pairs.
+/// - Remembering tool call metadata (id, name) across delta and done events.
 struct ResponsesStreamState {
+    /// Maps `(output_index, content_index)` to a stable content block index for
+    /// `TextDelta` and `OutputTextDone` events.
     text_block_indices: HashMap<(usize, usize), usize>,
+    /// Monotonically increasing counter for content block indices.
     next_text_block_index: usize,
+    /// Tracks tool calls by their item_id to correlate deltas across events.
     tool_calls_by_item_id: HashMap<String, ToolCallState>,
 }
 
+/// State for an in-progress tool call.
 struct ToolCallState {
+    /// Tool call id (may come from `call_id` or `id` field).
     id: String,
+    /// Tool/function name (may arrive in a later event).
     name: Option<String>,
+    /// Output index in the response array.
     output_index: usize,
+    /// Whether a `ToolCallStart` event has already been emitted for this call.
     started: bool,
 }
 
@@ -191,6 +236,10 @@ impl ResponsesStreamState {
     }
 }
 
+/// Extension trait for converting [`ResponsesStreamEvent`] into unified [`StreamEvent`] values.
+///
+/// The conversion uses the shared [`ResponsesStreamState`] to correctly track
+/// content block indices and tool call metadata across events.
 trait ResponsesEventExt {
     fn to_stream_events(
         &self,
@@ -271,6 +320,9 @@ impl ResponsesEventExt for ResponsesStreamEvent {
     }
 }
 
+/// Extracts a [`StreamEvent::UsageUpdate`] from a completed [`OpenAIResponsesResponse`].
+///
+/// Returns `None` when the response has no usage data.
 fn usage_update_from_response(response: &OpenAIResponsesResponse) -> Option<StreamEvent> {
     let usage = response.usage.as_ref()?;
     let input_tokens = usage.input_tokens.map(|v| v as i32);
@@ -283,6 +335,10 @@ fn usage_update_from_response(response: &OpenAIResponsesResponse) -> Option<Stre
     ))
 }
 
+/// Generates [`StreamEvent`] values from a [`ResponsesOutputItem`] for tool calls.
+///
+/// When `emit_end` is `true`, a `ToolCallEnd` event is appended after the arguments delta.
+/// This is used for `output_item.done` and `function_call_arguments.done` events.
 fn tool_call_events_from_item(
     state: &mut ResponsesStreamState,
     item: &ResponsesOutputItem,

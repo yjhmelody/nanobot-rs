@@ -1,5 +1,24 @@
 //! Fallback provider implementation for automatic retry with multiple LLM providers.
 
+//! Fallback provider implementation for automatic retry with multiple LLM providers.
+//!
+//! The [`FallbackProvider`] wraps a list of [`LLMProvider`] instances and tries them in
+//! order. If a provider returns a retryable error (network issue, timeout, rate limit),
+//! it moves to the next provider. Non-retryable errors (authentication, invalid config)
+//! abort the entire chain immediately.
+//!
+//! # Retry Semantics
+//!
+//! For non-streaming chat:
+//! - Retryable: [`ProviderError::ApiRequest`] (with timeout/connect/server_error),
+//!   [`ProviderError::Timeout`], [`ProviderError::RateLimit`]
+//! - Non-retryable: All other [`ProviderError`] variants
+//!
+//! For streaming chat:
+//! - Retryable: [`StreamError::Network`] and [`StreamError::Provider`] messages
+//!   containing "rate limit" or "timeout"
+//! - Non-retryable: All other [`StreamError`] variants
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -117,6 +136,9 @@ impl LLMProvider for FallbackProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
+                    // Streaming errors have their own retryability classification
+                    // because StreamError does not directly carry ProviderError metadata.
+                    // Instead we use string matching on the provider message.
                     let is_retryable = match &err {
                         StreamError::Network(_) => true,
                         StreamError::Provider(msg) => {

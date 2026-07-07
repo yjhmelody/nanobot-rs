@@ -1,4 +1,24 @@
-//! ReAct executor - orchestrates the Reason-Act-Observe loop
+//! ReAct loop executor — orchestrates the Reason-Act-Observe state machine.
+//!
+//! [`ReActExecutor`] drives the core loop: query the model, execute tools,
+//! observe results, and repeat until a final answer is produced, the
+//! iteration limit is reached, or the user cancels.
+//!
+//! # State Machine
+//!
+//! See [`LoopState`] for the state transitions:
+//!
+//! ```text
+//! QueryModel ──(has tool calls)──▶ ExecuteTool ──(all done)──▶ QueryModel
+//!      │                               │
+//!      └──(is final)──▶ Finish         └──(cancelled)──▶ Finish
+//!      └──(is truncated)──▶ QueryModel (next iteration)
+//! ```
+//!
+//! # Cancellation
+//!
+//! The loop checks the `cancelled` [`AtomicBool`] at the start of each
+//! iteration and before every tool execution, enabling prompt preemption.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,9 +37,13 @@ use super::tool_runner::ToolRunner;
 
 use super::TARGET;
 
+/// Maximum characters of a tool result to include in a progress hint.
 const TOOL_RESULT_MAX_CHARS: usize = 480;
 
-/// ReAct loop executor
+/// Drives the ReAct (Reason-Act-Observe) loop for a single turn.
+///
+/// Wraps a [`Planner`] for model queries and a [`ToolRunner`] for tool
+/// execution, cycling through states until termination.
 pub struct ReActExecutor {
     planner: Planner,
     tool_runner: ToolRunner,
@@ -27,6 +51,11 @@ pub struct ReActExecutor {
 }
 
 impl ReActExecutor {
+    /// Creates a new `ReActExecutor`.
+    ///
+    /// * `provider` — LLM provider for model queries.
+    /// * `tools` — Tool registry for executing tool calls.
+    /// * `max_iterations` — Maximum ReAct iterations before forcing exit.
     pub fn new(
         provider: Arc<dyn LLMProvider>,
         tools: Arc<ToolRegistry>,
@@ -39,7 +68,22 @@ impl ReActExecutor {
         }
     }
 
-    /// Run the complete ReAct loop
+    /// Runs the complete ReAct loop with the given initial messages.
+    ///
+    /// # Arguments
+    ///
+    /// * `messages` — Initial conversation messages (system prompt,
+    ///   history, user message).
+    /// * `tools` — Tool definitions to provide to the model.
+    /// * `config` — Model configuration for each query.
+    /// * `context` — Execution context (session key, channel, cancellation
+    ///   signal).
+    /// * `progress` — Optional progress emitter for streaming updates.
+    ///
+    /// # Returns
+    ///
+    /// A [`LoopOutcome`] containing the final response, exit reason,
+    /// iteration count, and usage statistics.
     pub async fn run(
         &self,
         mut messages: Vec<ChatMessage>,
@@ -53,7 +97,7 @@ impl ReActExecutor {
         let mut last_usage: Option<UsageStats> = None;
         let mut loop_usage: Option<UsageStats> = None;
         loop {
-            // Check cancellation
+            // Check cancellation at the top of every iteration
             if context.is_cancelled() {
                 info!(target: TARGET, "ReAct loop cancelled");
                 return Ok(LoopOutcome::new(
@@ -296,20 +340,29 @@ impl ReActExecutor {
     }
 }
 
-/// Execution context for ReAct loop
+/// Execution context propagated through the ReAct loop.
+///
+/// Carries session metadata and a cancellation signal that the loop polls
+/// at each iteration and tool boundary.
 #[derive(Clone)]
 pub struct ExecutionContext {
+    /// The session key for this execution turn.
     pub session_key: nanobot_types::SessionKey,
+    /// The originating channel.
     pub channel: String,
+    /// The originating chat ID.
     pub chat_id: String,
+    /// Cancellation signal shared with the parent [`AgentLoop`].
     pub cancelled: Arc<AtomicBool>,
 }
 
 impl ExecutionContext {
+    /// Returns `true` if a cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 
+    /// Converts this context into a [`ToolContext`] for tool execution.
     pub fn to_tool_context(&self) -> ToolContext {
         ToolContext {
             channel: self.channel.clone(),
@@ -320,6 +373,7 @@ impl ExecutionContext {
     }
 }
 
+/// Extracts the effective total token count from usage stats.
 fn effective_total_tokens(usage: &UsageStats) -> Option<u64> {
     usage.total_tokens.or_else(|| {
         usage
@@ -329,6 +383,8 @@ fn effective_total_tokens(usage: &UsageStats) -> Option<u64> {
     })
 }
 
+/// Accumulates token usage across multiple model calls in the same loop,
+/// summing prompt, completion, and total token counts.
 fn accumulate_loop_usage(acc: &mut Option<UsageStats>, usage: &UsageStats) {
     if usage.prompt_tokens.is_none()
         && usage.completion_tokens.is_none()

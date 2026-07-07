@@ -1,3 +1,26 @@
+//! Central tool registry for dispatching tool calls.
+//!
+//! The [`ToolRegistry`] is the main entry point for the agent loop to
+//! discover and invoke tools. It holds all registered tools (built-in
+//! and dynamic) and provides a uniform `execute(name, args, ctx)` API.
+//!
+//! ## Registration model
+//!
+//! - **Built-in tools** are statically defined at construction time:
+//!   filesystem, shell, web, search, message. Their names are immutable
+//!   and protected from accidental override.
+//! - **Dynamic tools** are registered at runtime by MCP servers or user
+//!   code via [`register_dynamic_tool`](ToolRegistry::register_dynamic_tool).
+//! - The **spawn** tool is registered lazily via
+//!   [`set_spawn_service`](ToolRegistry::set_spawn_service) to break
+//!   circular dependency chains.
+//!
+//! ## Thread safety
+//!
+//! Uses `parking_lot::RwLock` to protect the tool map, since lookups
+//! are frequent, critical sections are short, and no await points occur
+//! while holding the lock.
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,17 +39,61 @@ use nanobot_cron::CronService;
 use nanobot_types::SessionKey;
 use parking_lot::RwLock;
 
-/// Central dispatcher for built-in tools.
+/// Central dispatcher for all agent tools.
 ///
-/// The registry keeps runtime dependencies (workspace, configs, optional services)
-/// and exposes a uniform `execute(name, args_json)` API to the agent loop.
+/// Manages the lifecycle and execution of built-in and dynamically
+/// registered tools. The agent loop holds one `ToolRegistry` instance
+/// and uses it for all tool interactions.
+///
+/// ## Locking
+///
+/// Uses `parking_lot::RwLock` for the tool map because:
+/// - Tool lookups are frequent (every LLM turn).
+/// - Critical sections are short (just a HashMap lookup).
+/// - No await points inside the locked section.
+///
+/// ## Example
+///
+/// ```no_run
+/// use nanobot_tools::ToolRegistry;
+/// use nanobot_tools::ToolContext;
+/// use nanobot_types::SessionKey;
+///
+/// # async fn example(registry: &ToolRegistry) -> nanobot_tools::ToolResult<()> {
+/// let ctx = ToolContext {
+///     channel: "cli".to_string(),
+///     chat_id: "direct".to_string(),
+///     session_key: SessionKey::from("cli:direct"),
+///     message_id: None,
+/// };
+/// let result = registry.execute("read_file", r#"{"path": "/tmp/test.txt"}"#, &ctx).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ToolRegistry {
+    /// Map of tool name to tool implementation, protected by RwLock.
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// Names of built-in tools (immutable, protected from override).
     builtin_names: HashSet<String>,
+    /// Shared runtime configuration for all tools.
     config: SharedToolConfig,
 }
 
 impl ToolRegistry {
+    /// Creates a new `ToolRegistry` with all built-in tools.
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace` - Base directory for file operations.
+    /// * `restrict_to_workspace` - If true, file/exec are confined to the workspace.
+    /// * `exec_config` - Shell execution configuration.
+    /// * `web_config` - Web search/fetch configuration.
+    /// * `bus` - Optional message bus for the message tool.
+    /// * `cron_service` - Optional cron service for the cron tool.
+    ///
+    /// The spawn tool is **not** registered here; it must be set separately
+    /// via [`set_spawn_service`](ToolRegistry::set_spawn_service) to avoid
+    /// circular dependencies during construction.
     pub(crate) fn new(
         workspace: PathBuf,
         restrict_to_workspace: bool,
@@ -73,6 +140,10 @@ impl ToolRegistry {
         }
     }
 
+    /// Returns the definition of every registered tool, sorted by name.
+    ///
+    /// The agent loop uses this list to inform the LLM of available tools
+    /// at each turn.
     pub fn definitions(&self) -> Vec<Arc<ToolDefinition>> {
         let mut defs = self
             .tools
@@ -84,6 +155,13 @@ impl ToolRegistry {
         defs
     }
 
+    /// Registers a dynamic tool (typically from an MCP server).
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error if:
+    /// - The tool name conflicts with a built-in tool name.
+    /// - The tool name is already registered.
     pub fn register_dynamic_tool(&self, tool: Arc<dyn Tool>) -> ToolResult<()> {
         let name = tool.name().to_string();
         if self.builtin_names.contains(&name) {
@@ -103,6 +181,10 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Unregisters a dynamic tool by name.
+    ///
+    /// Built-in tools cannot be unregistered; calls for built-in names
+    /// are silently ignored.
     pub fn unregister_dynamic_tool(&self, name: &str) {
         if self.builtin_names.contains(name) {
             return;
@@ -112,8 +194,9 @@ impl ToolRegistry {
 
     /// Sets the spawn service after initial construction.
     ///
-    /// This allows setting the spawn service after registry creation,
-    /// which is useful for breaking circular dependencies.
+    /// Registers the `spawn` tool in the registry. This is deferred to
+    /// break circular dependencies between `ToolRegistry` and the subagent
+    /// manager (which needs the registry).
     pub fn set_spawn_service(&self, service: Arc<dyn SpawnService>) {
         let spawn_tool: Arc<dyn Tool> = Arc::new(SpawnTool::new(service));
         self.tools
@@ -121,6 +204,10 @@ impl ToolRegistry {
             .insert(spawn_tool.name().to_string(), spawn_tool);
     }
 
+    /// Calls `start_turn` on every registered tool.
+    ///
+    /// This is invoked by the agent loop at the beginning of each LLM
+    /// turn. Tools use this hook to reset per-turn state.
     pub async fn start_turn(&self) -> ToolResult<()> {
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
@@ -129,6 +216,10 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Checks whether any tool sent a message in the current turn.
+    ///
+    /// The agent loop uses this to decide if the LLM's text response is
+    /// needed or if the tool's message delivery suffices.
     pub async fn message_sent_in_turn(&self) -> bool {
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
         for tool in snapshot {
@@ -139,6 +230,10 @@ impl ToolRegistry {
         false
     }
 
+    /// Cancels all spawned tasks associated with a session.
+    ///
+    /// Called when a session ends or is interrupted. Returns the total
+    /// number of tasks that were cancelled.
     pub async fn cancel_spawn_by_session(&self, session_key: &SessionKey) -> usize {
         let mut cancelled = 0usize;
         let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
@@ -153,23 +248,24 @@ impl ToolRegistry {
 
     /// Executes a tool by name with JSON arguments and runtime context.
     ///
-    /// This is the main entry point for tool execution.
+    /// This is the main entry point for tool execution, called by the
+    /// agent loop.
     ///
     /// # Arguments
     ///
-    /// * `name` - Tool name (e.g., "read_file", "exec", or dynamic tool name)
-    /// * `args_json` - JSON string containing tool arguments
-    /// * `ctx` - Runtime context containing channel, chat_id, session_key, and message_id
+    /// * `name` - Tool name (e.g., "read_file", "exec", or dynamic tool name).
+    /// * `args_json` - JSON string containing tool arguments.
+    /// * `ctx` - Runtime context containing channel, chat_id, session_key, and message_id.
     ///
     /// # Returns
     ///
-    /// Returns the tool execution result as a string.
+    /// The tool execution result as a string.
     ///
     /// # Errors
     ///
-    /// * Returns an error if the tool name is not registered
-    /// * Returns an error if args_json cannot be parsed
-    /// * Returns an error if tool execution fails
+    /// * [`ToolError::NotFound`] if the tool name is not registered.
+    /// * Delegated to the tool's `execute` method for argument parsing and
+    ///   execution errors.
     ///
     /// # Example
     ///
@@ -202,10 +298,7 @@ impl ToolRegistry {
         }
     }
 
-    /// Get shared configuration for runtime modification.
-    ///
-    /// Returns a reference to the shared configuration that can be used to
-    /// modify tool settings at runtime.
+    /// Returns a reference to the shared configuration for runtime modification.
     ///
     /// # Example
     ///
@@ -220,25 +313,25 @@ impl ToolRegistry {
         &self.config
     }
 
-    /// Update exec timeout at runtime.
+    /// Updates the shell execution timeout at runtime.
     ///
-    /// This is a convenience method that updates the timeout for shell execution.
     /// All subsequent shell commands will use the new timeout.
     pub async fn set_exec_timeout(&self, timeout_secs: u64) {
         self.config.set_exec_timeout(timeout_secs).await;
     }
 
-    /// Update workspace restriction at runtime.
+    /// Enables or disables workspace restriction at runtime.
     ///
-    /// When enabled, all file operations are restricted to the workspace directory.
-    /// When disabled, file operations can access any path.
+    /// When enabled, all file operations are restricted to the workspace
+    /// directory. When disabled, file operations can access any path.
     pub async fn set_restrict_to_workspace(&self, restrict: bool) {
         self.config.set_restrict_to_workspace(restrict).await;
     }
 
-    /// Update workspace directory at runtime.
+    /// Updates the workspace directory at runtime.
     ///
-    /// All subsequent file operations will use the new workspace as the base directory.
+    /// All subsequent file operations will use the new workspace as the
+    /// base directory for resolving relative paths.
     pub async fn set_workspace(&self, workspace: PathBuf) {
         self.config.set_workspace(workspace).await;
     }

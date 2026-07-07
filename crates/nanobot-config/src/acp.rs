@@ -1,34 +1,136 @@
-//! ACP configuration
+//! Configuration for the Agent Client Protocol (ACP) integration.
+//!
+//! ACP is a protocol that allows nanobot to delegate tasks to external
+//! agent binaries (e.g., Claude Agent ACP, Codex ACP, GitHub Copilot CLI).
+//! This module provides the [`ACPConfig`] and [`AgentConfig`] types that
+//! control how these external agents are launched and managed.
+//!
+//! # Design
+//!
+//! - The default configuration pre-populates agents for three well-known ACP
+//!   implementations: Claude Agent ACP (Zed Industries), Codex ACP, and
+//!   GitHub Copilot CLI.
+//! - Users can override the default agent and add custom agents via the
+//!   config file. See [`ACPConfig::default`] for the built-in defaults.
+//! - The `allowed_agents` field acts as an allowlist — agents not in this
+//!   list cannot be invoked via ACP, even if they have a config entry.
+//!
+//! # Relationships
+//!
+//! - Referenced from [`crate::schema::Config`] as `Config.acp`, an optional
+//!   field (`Option<ACPConfig>`).
+//! - Used at runtime by `nanobot-agent`'s ACP client infrastructure to spawn
+//!   subprocesses and communicate via the ACP protocol.
+//!
+//! # References
+//!
+//! - [Claude Agent ACP](https://github.com/zed-industries/claude-agent-acp)
+//! - [Codex ACP](https://github.com/zed-industries/codex-acp)
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Configuration for the Agent Client Protocol (ACP) integration.
+///
+/// ACP allows nanobot to delegate tasks to external agent subprocesses.
+/// This struct controls which agents are available, which one is used by
+/// default, and how each agent is launched.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "enabled": true,
+///   "defaultAgent": "claude",
+///   "allowedAgents": ["claude", "codex"],
+///   "agents": {
+///     "claude": {
+///       "command": "claude-agent-acp",
+///       "args": [],
+///       "env": {}
+///     }
+///   }
+/// }
+/// ```
+///
+/// # Invariants
+///
+/// - Every name in `allowed_agents` should have a corresponding entry in
+///   `agents`. The default [`ACPConfig::default`] upholds this invariant.
+/// - `default_agent` should be in `allowed_agents`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ACPConfig {
     /// Whether ACP integration is enabled.
+    ///
+    /// When `false`, external agent delegation via ACP is disallowed
+    /// regardless of the configured agents.
     pub enabled: bool,
     /// Name of the default agent to use when none is specified.
+    ///
+    /// Must correspond to a key in `agents` and be present in `allowed_agents`.
     pub default_agent: String,
     /// Agents that are permitted to be invoked via ACP.
+    ///
+    /// Acts as an allowlist — only agent names in this vector can be
+    /// delegated to, even if `agents` contains additional entries.
     pub allowed_agents: Vec<String>,
     /// Per-agent command and environment configuration, keyed by agent name.
+    ///
+    /// Each value describes how to launch a specific ACP agent subprocess.
+    /// The key must match an entry in `allowed_agents` to be usable.
     pub agents: HashMap<String, AgentConfig>,
 }
 
 /// Command-line configuration for a single ACP agent.
+///
+/// Describes how to spawn an external agent subprocess: the executable
+/// binary, its arguments, and environment variables.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "command": "claude-agent-acp",
+///   "args": [],
+///   "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Executable command used to launch the agent process.
+    ///
+    /// Should be resolvable via `PATH` or be an absolute path. This is the
+    /// first argument passed to [`std::process::Command::new`].
     pub command: String,
     /// Additional arguments passed to the agent command.
+    ///
+    /// These follow the command in the subprocess invocation.
+    /// Defaults to an empty vector.
     #[serde(default)]
     pub args: Vec<String>,
     /// Extra environment variables injected into the agent process.
+    ///
+    /// These are merged into the parent process's environment when spawning
+    /// the ACP agent. Keys are variable names, values are their contents.
+    /// Defaults to an empty map.
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
 
+/// Provides sensible defaults for ACP integration.
+///
+/// The default configuration:
+/// - Enables ACP (`enabled: true`).
+/// - Pre-populates three well-known ACP agents (Claude, Codex, Copilot).
+/// - Sets "claude" as the default agent.
+///
+/// # Pre-populated Agents
+///
+/// | Key      | Command            | Args      | Source                                  |
+/// |----------|--------------------|-----------|-----------------------------------------|
+/// | claude   | `claude-agent-acp` | (none)    | Zed Industries                          |
+/// | codex    | `codex-acp`        | (none)    | Zed Industries                          |
+/// | copilot  | `copilot`          | `--acp`   | GitHub Copilot CLI                      |
 impl Default for ACPConfig {
     fn default() -> Self {
         let mut agents = HashMap::new();

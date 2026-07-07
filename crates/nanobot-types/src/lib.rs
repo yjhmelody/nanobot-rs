@@ -1,3 +1,44 @@
+//! Core type definitions for the nanobot agent framework.
+//!
+//! This crate provides all shared, domain-agnostic data types used across the
+//! nanobot codebase. It is intentionally dependency-light and does not contain
+//! any runtime logic beyond simple transformations and validation.
+//!
+//! # Design
+//!
+//! Types are organized by domain into submodules:
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | `agent` | Skill metadata and runtime requirements |
+//! | `builtin` | Built-in tool enumeration and parsing |
+//! | `bus` | Message types for the pub/sub message bus |
+//! | `cron` | Cron job schedule, payload, and state types |
+//! | `heartbeat` | Heartbeat evaluation decision types |
+//! | `provider` | LLM provider message and response types |
+//! | `task` | Task identifier wrapping UUID |
+//! | `text` | UTF-8-safe string truncation utilities |
+//! | `tool_name` | Tool name enum (built-in vs dynamic) |
+//! | `tools` | Tool definitions, schemas, and argument types |
+//!
+//! # Relationship to other crates
+//!
+//! - `nanobot-types` is consumed by virtually every other crate in the workspace.
+//! - It depends on `serde` for JSON serialization (used for both config files
+//!   and wire format with LLM providers).
+//! - The `chrono`/`chrono-tz`/`cron` dependencies are required only by the `cron`
+//!   submodule for schedule computation.
+//! - `uuid` is used by the `task` submodule for unique task identifiers.
+//!
+//! # Conventions
+//!
+//! - Types exported at crate root (like [`SessionKey`]) are those used broadly
+//!   across the codebase. Domain-specific types live in their respective submodules.
+//! - All types implement `Serialize`+`Deserialize` where JSON round-tripping is
+//!   needed.
+//! - Structs use `#[serde(rename_all = "camelCase")]` to maintain compatibility
+//!   with the Python codebase's JSON conventions.
+
 pub mod agent;
 pub mod builtin;
 pub mod bus;
@@ -12,30 +53,69 @@ pub mod tools;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Newtype wrapper for session keys.
+/// Newtype wrapper for session keys used to identify conversations.
+///
+/// A session key uniquely identifies a conversation by combining a channel name
+/// and a chat ID, separated by `:`. For example, `"telegram:123456"` identifies
+/// the Telegram conversation with chat ID 123456.
+///
+/// The `#[serde(transparent)]` attribute ensures that serialization produces a
+/// plain string, matching the JSONL session file format.
+///
+/// # Examples
+///
+/// ```
+/// use nanobot_types::SessionKey;
+/// let key = SessionKey::new("cli", "direct");
+/// assert_eq!(key.as_str(), "cli:direct");
+/// ```
+///
+/// # Derive rationale
+///
+/// - `Debug`: required for logging and tracing.
+/// - `Default`: key is empty string (used as sentinel in some contexts).
+/// - `Clone`: session keys are shared across components.
+/// - `PartialEq + Eq + Hash`: used as keys in `HashMap`/`DashMap`.
+/// - `Serialize + Deserialize`: stored in JSONL session files.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionKey(String);
 
 impl SessionKey {
     /// Creates a new session key from a channel and chat ID, joined by `:`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nanobot_types::SessionKey;
+    /// let key = SessionKey::new("telegram", "group-42");
+    /// ```
     pub fn new(channel: impl Into<String>, chat_id: impl Into<String>) -> Self {
         Self(format!("{}:{}", channel.into(), chat_id.into()))
     }
 
-    /// Creates a session key from an owned string.
+    /// Creates a session key directly from an owned string without formatting.
+    ///
+    /// This is useful when the key has already been deserialized or constructed
+    /// externally in the canonical `channel:chat_id` format.
     pub fn from_string(s: String) -> Self {
         Self(s)
     }
-    /// Returns the key as a string slice.
+
+    /// Returns the session key as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    /// Consumes the key and returns the underlying string.
+
+    /// Consumes the session key and returns the underlying `String`.
     pub fn into_inner(self) -> String {
         self.0
     }
-    /// Returns `true` if the key is an empty string.
+
+    /// Returns `true` if the session key is an empty string.
+    ///
+    /// An empty session key is the [`Default`] value and acts as a sentinel
+    /// for uninitialised or anonymous sessions.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

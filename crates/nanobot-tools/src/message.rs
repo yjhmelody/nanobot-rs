@@ -1,3 +1,16 @@
+//! Message tool for sending outbound messages to channels.
+//!
+//! Provides the `message` tool that allows the LLM to send messages to
+//! users. Messages are published to the [`MessageBus`] (if available) for
+//! delivery by channel adapters.
+//!
+//! ## Per-turn tracking
+//!
+//! The tool tracks whether it sent a message in the current agent turn
+//! via an `AtomicBool`. The agent loop uses this signal (`sent_in_turn`)
+//! to decide whether the LLM needs to produce a visible response or
+//! whether the tool's message delivery counts as the response.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -18,12 +31,27 @@ const MESSAGE_CHAT_ID_DESC: &str = "Optional: target chat/user ID";
 const MESSAGE_MEDIA_DESC: &str =
     "Optional: list of file paths to attach (images, audio, documents)";
 
+/// Tool for sending outbound messages to users via configured channels.
+///
+/// If no [`MessageBus`] is available (e.g., in the CLI-only agent mode),
+/// the tool still returns success but does not deliver the message
+/// anywhere. This allows the agent loop to proceed when running without
+/// a gateway.
 pub struct MessageTool {
+    /// The message bus for publishing outbound messages, or `None` if
+    /// running in headless mode.
     bus: Option<MessageBus>,
+    /// Tracks whether a message was sent in the current turn.
     sent_in_turn: AtomicBool,
 }
 
 impl MessageTool {
+    /// Creates a new `MessageTool`.
+    ///
+    /// # Arguments
+    ///
+    /// * `bus` - Optional message bus. If `None`, the tool reports success
+    ///   but does not actually deliver messages.
     pub fn new(bus: Option<MessageBus>) -> Self {
         Self {
             bus,
@@ -31,6 +59,9 @@ impl MessageTool {
         }
     }
 
+    /// Returns the static tool definition (name: "message").
+    ///
+    /// Uses a `OnceLock` to cache the definition after first construction.
     pub fn definition() -> Arc<ToolDefinition> {
         static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
@@ -70,6 +101,10 @@ impl MessageTool {
         .clone()
     }
 
+    /// Executes the message tool with strongly-typed arguments.
+    ///
+    /// Publishes the message to the bus and sets the `sent_in_turn` flag
+    /// if the message is for the current conversation context.
     async fn execute_typed(&self, args: MessageArgs, ctx: &ToolContext) -> ToolResult<String> {
         let channel = args.channel.unwrap_or_else(|| ctx.channel.clone());
         let chat_id = args.chat_id.unwrap_or_else(|| ctx.chat_id.clone());
@@ -108,6 +143,9 @@ impl MessageTool {
             }
         }
 
+        // Track whether we sent to the current conversation channel.
+        // This is used by the agent loop to decide if the LLM's text
+        // response is needed or if the tool message suffices.
         if channel == ctx.channel && chat_id == ctx.chat_id {
             self.sent_in_turn.store(true, Ordering::SeqCst);
         }
@@ -136,6 +174,7 @@ impl Tool for MessageTool {
         self.execute_typed(parsed, ctx).await
     }
 
+    /// Resets the `sent_in_turn` flag at the start of each turn.
     async fn start_turn(&self) -> ToolResult<()> {
         self.sent_in_turn.store(false, Ordering::SeqCst);
         Ok(())

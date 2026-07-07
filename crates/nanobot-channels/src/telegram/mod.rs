@@ -1,3 +1,28 @@
+//! Telegram Bot API channel adapter.
+//!
+//! This module implements the [`ChannelAdapter`] trait for the
+//! [Telegram Bot API](https://core.telegram.org/bots/api).
+//!
+//! # Inbound Messages
+//!
+//! Inbound messages are received via **long polling** (`getUpdates`).
+//! The adapter spawns a background task that polls the API with a
+//! 20-second timeout, parses incoming text messages, and publishes
+//! them to the shared [`MessageBus`].
+//!
+//! # Outbound Messages
+//!
+//! Outbound messages are sent via `sendMessage`.  Text longer than
+//! `TELEGRAM_TEXT_LIMIT` bytes is automatically split into multiple
+//! chunks.
+//!
+//! # Limitations
+//!
+//! - No streaming updates (Telegram does not support editing messages
+//!   created by the bot in a way compatible with this streaming model).
+//! - Only `text` message type is currently handled for inbound messages.
+//! - Image/media attachments are not yet supported.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
@@ -13,10 +38,13 @@ use crate::error::{ChannelError, ChannelResult};
 use nanobot_bus::{InboundMessage, MessageBus, MessageMetadata, OutboundMessage};
 use nanobot_config::schema::TelegramChannelConfig;
 
+/// Default Telegram Bot API base URL.
 const TELEGRAM_API_DEFAULT: &str = "https://api.telegram.org";
+/// Maximum byte length for a single Telegram message (Telegram's limit is 4096).
 const TELEGRAM_TEXT_LIMIT: usize = 4000;
 const LOG_TARGET: &str = "nanobot::channels::telegram";
 
+/// Response from the `getUpdates` endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramUpdatesResponse {
     ok: bool,
@@ -24,12 +52,14 @@ struct TelegramUpdatesResponse {
     result: Vec<TelegramUpdate>,
 }
 
+/// A single update from the `getUpdates` long-poll endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramUpdate {
     update_id: i64,
     message: Option<TelegramMessage>,
 }
 
+/// An incoming message from Telegram.
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramMessage {
     message_id: i64,
@@ -38,41 +68,69 @@ struct TelegramMessage {
     text: Option<String>,
 }
 
+/// A Telegram user (sender).
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramUser {
     id: i64,
 }
 
+/// A Telegram chat (conversation).
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramChat {
     id: i64,
 }
 
+/// Payload for the `sendMessage` API call.
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramSendMessage {
     chat_id: i64,
     text: String,
 }
 
+/// Response from the `sendMessage` endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramSendMessageResponse {
     ok: bool,
     result: TelegramMessage,
 }
 
+/// Telegram Bot API channel adapter.
+///
+/// Implements [`ChannelAdapter`] using the Telegram Bot API's long-polling
+/// model for inbound messages and the `sendMessage` method for outbound.
+///
+/// # State
+/// - `running` — `Arc<AtomicBool>` shared with the polling background task.
+/// - `offset` — `Arc<AtomicI64>` tracking the last processed `update_id`
+///   for the `getUpdates` offset parameter.
+/// - `poll_task` — Handle for the background polling task, stored in a
+///   `tokio::sync::Mutex` because it's written once and read during shutdown.
 pub struct TelegramChannel {
+    /// Channel instance name (from config).
     name: String,
+    /// Access-control list for inbound message filtering.
     allow_from: Vec<String>,
+    /// Shared message bus for publishing inbound messages.
     bus: MessageBus,
+    /// Reusable HTTP client for API calls.
     client: Client,
+    /// Telegram bot token.
     token: String,
+    /// Telegram Bot API base URL (defaults to `TELEGRAM_API_DEFAULT`).
     api_base: String,
+    /// Whether the channel is currently running (shared with poll task).
     running: Arc<AtomicBool>,
+    /// Last processed `update_id` (`AtomicI64` for lock-free access).
     offset: Arc<AtomicI64>,
+    /// Handle for the long-polling background task.
     poll_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl TelegramChannel {
+    /// Construct a new `TelegramChannel` from configuration.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Config`] if the token is empty or blank.
     pub fn new(name: String, cfg: TelegramChannelConfig, bus: MessageBus) -> ChannelResult<Self> {
         let token = cfg.token;
         if token.trim().is_empty() {
@@ -97,6 +155,9 @@ impl TelegramChannel {
         })
     }
 
+    /// Build the full URL for a Telegram Bot API method.
+    ///
+    /// Returns `{api_base}/bot{token}/{method}`.
     fn endpoint(&self, method: &str) -> String {
         format!(
             "{}/bot{}/{}",
@@ -117,6 +178,16 @@ impl ChannelAdapter for TelegramChannel {
         self.running.load(Ordering::Acquire)
     }
 
+    /// Start the Telegram channel's long-polling loop.
+    ///
+    /// Spawns a background task that repeatedly calls `getUpdates` with
+    /// a 20-second timeout and published inbound messages to the
+    /// [`MessageBus`].  Updates are tracked via the `offset` parameter
+    /// to avoid re-processing.
+    ///
+    /// # Errors
+    /// Returns an error if the channel is already running (logged as a
+    /// warning, returns `Ok`).
     async fn start(&self) -> ChannelResult<()> {
         if self.running.swap(true, Ordering::Release) {
             warn!(target: LOG_TARGET, name = %self.name, "already running");
@@ -199,6 +270,9 @@ impl ChannelAdapter for TelegramChannel {
         Ok(())
     }
 
+    /// Stop the Telegram channel.
+    ///
+    /// Sets the running flag and aborts the polling background task.
     async fn stop(&self) -> ChannelResult<()> {
         self.running.store(false, Ordering::Release);
         if let Some(task) = self.poll_task.lock().await.take() {
@@ -208,6 +282,16 @@ impl ChannelAdapter for TelegramChannel {
         Ok(())
     }
 
+    /// Send an outbound text message to a Telegram chat.
+    ///
+    /// Splits text longer than `TELEGRAM_TEXT_LIMIT` bytes into multiple
+    /// chunks (at UTF-8 character boundaries) and sends each as a separate
+    /// message.
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Adapter`] if:
+    /// - The `chat_id` is not a valid integer (Telegram uses numeric IDs).
+    /// - The API request or response parsing fails.
     async fn send(&self, msg: OutboundMessage) -> ChannelResult<SendOutcome> {
         let chat_id: i64 = msg.chat_id.parse().map_err(|e| {
             ChannelError::adapter(
@@ -250,6 +334,11 @@ impl ChannelAdapter for TelegramChannel {
     }
 }
 
+/// Split text into chunks not exceeding `limit` bytes, respecting UTF-8 char boundaries.
+///
+/// This is a simpler splitter than the Feishu equivalent (no newline/space
+/// preference) because Telegram's `sendMessage` handles rendering; we just
+/// need to stay under the message size limit.
 fn split_text(text: &str, limit: usize) -> Vec<String> {
     if text.len() <= limit {
         return vec![text.to_string()];
@@ -258,7 +347,7 @@ fn split_text(text: &str, limit: usize) -> Vec<String> {
     let mut start = 0;
     while start < text.len() {
         let end = (start + limit).min(text.len());
-        // Try to break at char boundary
+        // Walk back to a UTF-8 char boundary to avoid splitting a multi-byte character.
         let end = if !text.is_char_boundary(end) {
             let mut bound = end;
             while bound > start && !text.is_char_boundary(bound) {

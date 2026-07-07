@@ -1,3 +1,24 @@
+//! Streaming event accumulator that builds a complete [`LLMResponse`] from events.
+//!
+//! [`StreamAccumulator`] provides a simple state machine that processes streaming events
+//! in order and produces a fully populated [`LLMResponse`] at the end. It handles:
+//!
+//! - Text content from multiple content blocks (joined with double newlines)
+//! - Thinking blocks from reasoning content deltas
+//! - Tool calls with incremental argument JSON deltas
+//! - Usage statistics updates (cumulative)
+//! - Finish reason propagation
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let mut acc = StreamAccumulator::new();
+//! for event in stream {
+//!     acc.process_event(&event);
+//! }
+//! let response = acc.build_response();
+//! ```
+
 use std::collections::HashMap;
 
 use crate::{LLMResponse, ThinkingBlock, ToolCallRequest, ToolName, UsageStats};
@@ -5,22 +26,34 @@ use crate::{LLMResponse, ThinkingBlock, ToolCallRequest, ToolName, UsageStats};
 use super::events::StreamEvent;
 
 /// Accumulates streaming events to build a complete response.
+///
+/// This is a stateful accumulator that must receive events in order. It is not
+/// thread-safe and should be used from a single task.
 pub struct StreamAccumulator {
+    /// Text content blocks, indexed by their block position.
     content_blocks: Vec<String>,
+    /// Thinking/reasoning blocks accumulated from `ThinkingDelta` events.
     thinking_blocks: Vec<ThinkingBlock>,
+    /// In-progress tool calls, keyed by tool call id.
     tool_calls: HashMap<String, ToolCallBuilder>,
+    /// Maps output index to tool call id for delta routing.
     tool_calls_by_index: HashMap<usize, String>,
+    /// Accumulated usage statistics.
     usage: UsageStats,
+    /// Finish reason, if received.
     finish_reason: Option<String>,
 }
 
+/// Internal builder for incrementally constructing a tool call from streaming deltas.
 struct ToolCallBuilder {
     id: String,
     name: String,
+    /// JSON arguments string being built incrementally from `ToolCallArgumentsDelta` events.
     arguments_json: String,
 }
 
 impl StreamAccumulator {
+    /// Creates a new empty accumulator.
     pub fn new() -> Self {
         Self {
             content_blocks: Vec::new(),
@@ -100,7 +133,11 @@ impl StreamAccumulator {
         }
     }
 
-    /// Builds the final LLMResponse from accumulated events.
+    /// Consumes the accumulator and produces the final [`LLMResponse`].
+    ///
+    /// Text content blocks are joined with double newlines. Tool calls are collected
+    /// into a vec (order is not guaranteed). If no finish reason was received, defaults to `"stop"`.
+    /// Thinking blocks with empty content are discarded.
     pub fn build_response(self) -> LLMResponse {
         let content = if self.content_blocks.is_empty() {
             None
@@ -134,6 +171,8 @@ impl StreamAccumulator {
         }
     }
 
+    /// Ensures that the content block at `index` exists, extending the vec with
+    /// empty strings as needed. This handles out-of-order or missing content blocks.
     fn ensure_content_block(&mut self, index: usize) {
         while self.content_blocks.len() <= index {
             self.content_blocks.push(String::new());

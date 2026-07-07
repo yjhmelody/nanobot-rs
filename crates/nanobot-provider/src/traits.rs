@@ -1,3 +1,23 @@
+//! Core trait definitions for LLM providers.
+//!
+//! This module defines:
+//!
+//! - [`ChatRequest`]: The unified request payload sent to every provider.
+//! - [`LLMProvider`]: The trait that every backend (Anthropic, OpenAI-compatible, etc.)
+//!   must implement.
+//!
+//! # Design Rationale
+//!
+//! - [`ChatRequest`] is provider-agnostic: it uses `nanobot-types` message types and maps
+//!   reasoning config generically. Each concrete provider translates this into its own
+//!   wire format internally.
+//! - [`LLMProvider`] uses `#[async_trait]` for async trait methods, required because
+//!   Rust does not yet support `async fn` in traits natively.
+//! - [`chat_stream`] has a default implementation that wraps [`chat`] in a single-event
+//!   stream, so providers that do not support streaming still satisfy the trait without
+//!   boilerplate.
+//! - The `Send + Sync` bounds allow providers to be shared as `Arc<dyn LLMProvider>`.
+
 use std::fmt::Debug;
 use std::sync::Arc;
 

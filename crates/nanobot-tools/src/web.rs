@@ -1,3 +1,28 @@
+//! Web tools for searching and fetching URL content.
+//!
+//! Provides two tools:
+//!
+//! - [`WebSearchTool`] -- Searches the web using the Brave Search API
+//!   (`web_search`).
+//! - [`WebFetchTool`] -- Fetches a URL and extracts readable content
+//!   (`web_fetch`).
+//!
+//! ## Brave Search API
+//!
+//! The `web_search` tool requires a Brave Search API key configured in
+//! the tool config (`tools.web.search.apiKey`). Without it, the tool
+//! returns a helpful message guiding the user to configure it.
+//!
+//! ## Content extraction
+//!
+//! The `web_fetch` tool auto-detects content type:
+//! - **HTML**: Extracts readable text via `html2text`.
+//! - **JSON**: Returns raw JSON text.
+//! - **Other**: Returns raw text as-is.
+//!
+//! Content is truncated at 50,000 characters by default to manage LLM
+//! token usage.
+
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -18,11 +43,16 @@ const WEB_SEARCH_COUNT_DESC: &str = "Results (1-10)";
 const WEB_FETCH_DESC: &str = "Fetch URL and extract readable content (HTML to text).";
 const WEB_FETCH_URL_DESC: &str = "URL to fetch";
 
+/// Tool for searching the web using the Brave Search API.
+///
+/// Returns a list of results with titles, URLs, and snippets.
+/// Requires the `search_api_key` to be configured.
 pub struct WebSearchTool {
     config: SharedToolConfig,
 }
 
 impl WebSearchTool {
+    /// Creates a new `WebSearchTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -76,11 +106,16 @@ impl Tool for WebSearchTool {
     }
 }
 
+/// Tool for fetching a URL and extracting readable content.
+///
+/// Auto-detects HTML (converts to text via `html2text`), JSON (returns raw),
+/// or other content types. Content is truncated to avoid context overflow.
 pub struct WebFetchTool {
     config: SharedToolConfig,
 }
 
 impl WebFetchTool {
+    /// Creates a new `WebFetchTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -132,6 +167,23 @@ impl Tool for WebFetchTool {
     }
 }
 
+/// Executes a web search via the Brave Search API.
+///
+/// # Arguments
+///
+/// * `args_json` - JSON-serialized [`WebSearchArgs`] (query, count).
+/// * `api_key` - Brave Search API subscription token.
+/// * `max_results` - Default maximum results (overridden by `count` arg).
+/// * `proxy` - Optional HTTP proxy URL.
+///
+/// # Returns
+///
+/// A formatted text response with numbered results (title, URL, description).
+///
+/// # Errors
+///
+/// Returns an error if the API request fails or the response cannot be parsed.
+/// If no API key is configured, returns a guidance message instead of an error.
 pub async fn execute_search(
     args_json: &str,
     api_key: &str,
@@ -198,6 +250,25 @@ pub async fn execute_search(
     Ok(lines.join("\n"))
 }
 
+/// Fetches a URL and extracts readable text content.
+///
+/// # Arguments
+///
+/// * `args_json` - JSON-serialized [`WebFetchArgs`] (url, optional max_chars).
+/// * `max_chars_default` - Default maximum characters (default 50,000).
+/// * `proxy` - Optional HTTP proxy URL.
+///
+/// # Returns
+///
+/// A JSON-serialized [`WebFetchResponse`] containing the URL, status code,
+/// content type extractor, truncation flag, length, and extracted text.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The URL is invalid or uses a non-HTTP scheme.
+/// - The HTTP request fails or times out.
+/// - The response body cannot be read or serialized.
 pub async fn execute_fetch(
     args_json: &str,
     max_chars_default: usize,
@@ -216,6 +287,7 @@ pub async fn execute_fetch(
             anyhow::anyhow!("URL validation failed: {}: {}", url, e),
         )
     })?;
+    // Only HTTP/HTTPS URLs are allowed for security.
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ToolError::execution(
             "web_fetch",
@@ -252,6 +324,7 @@ pub async fn execute_fetch(
         )
     })?;
 
+    // Auto-detect content type and extract readable text.
     let (extractor, mut text) = if ctype.contains("application/json") {
         ("json", body)
     } else if ctype.contains("text/html")
@@ -283,6 +356,12 @@ pub async fn execute_fetch(
     })
 }
 
+/// Builds a `reqwest::Client` with optional proxy support.
+///
+/// # Arguments
+///
+/// * `proxy` - Optional HTTP proxy URL (e.g., `http://proxy:8080`).
+///   If empty or `None`, no proxy is configured.
 fn build_client(proxy: Option<&str>) -> ToolResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder();
     if let Some(proxy_url) = proxy

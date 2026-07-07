@@ -59,8 +59,11 @@ use crate::helpers::ensure_dir;
 /// - Multi-agent shared memory spaces
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
+    /// Path to the `memory/` directory under the workspace.
     memory_dir: PathBuf,
+    /// Path to `MEMORY.md` -- curated long-term memory.
     memory_file: PathBuf,
+    /// Path to `HISTORY.md` -- append-only event log.
     history_file: PathBuf,
 }
 
@@ -185,17 +188,27 @@ impl MemoryStore {
         }
     }
 
-    /// Returns the path to the history log file.
+    /// Returns the path to the history log file (`HISTORY.md`).
     pub fn history_file(&self) -> &Path {
         &self.history_file
     }
 
-    /// Returns the path to the memory directory.
+    /// Returns the path to the memory directory (`{workspace}/memory/`).
     pub fn memory_dir(&self) -> &Path {
         &self.memory_dir
     }
 }
 
+/// Splits memory content into blocks separated by markdown headings or blank lines.
+///
+/// Each heading (`#`, `##`, etc.) starts a new block. Contiguous non-heading
+/// lines separated by a blank line also form separate blocks. This allows the
+/// query-scoring logic to operate at a fine granularity rather than on the
+/// entire memory file.
+///
+/// # Returns
+///
+/// A list of non-empty string blocks.
 fn split_memory_blocks(content: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut current = Vec::new();
@@ -223,6 +236,14 @@ fn split_memory_blocks(content: &str) -> Vec<String> {
     blocks.into_iter().filter(|b| !b.is_empty()).collect()
 }
 
+/// Tokenizes a query string into lowercase terms for relevance scoring.
+///
+/// Splits on any non-alphanumeric character (except `_` and `-`), filters
+/// out single-character tokens, and converts to lowercase.
+///
+/// # Returns
+///
+/// A list of terms (each at least 2 characters long).
 fn tokenize(input: &str) -> Vec<String> {
     input
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
@@ -233,6 +254,14 @@ fn tokenize(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Scores a memory block by counting occurrences of each query term.
+///
+/// This is a simple bag-of-words overlap score. Each occurrence of a query
+/// term in the block (case-insensitive) increments the score by 1.
+///
+/// # Returns
+///
+/// The total number of query-term occurrences in the block.
 fn score_block(block: &str, query_terms: &[String]) -> usize {
     let lower = block.to_ascii_lowercase();
     query_terms

@@ -1,10 +1,18 @@
+//! Filesystem helper functions for path resolution and template synchronisation.
+//!
+//! Provides utilities for resolving the nanobot data directory
+//! (`~/.nanobot`), the workspace path, and synchronising default workspace
+//! templates (AGENTS.md, SOUL.md, HEARTBEAT.md, etc.).
+
 use std::path::{Path, PathBuf};
 
 use super::templates::{HISTORY_TEMPLATE_PATH, MEMORY_TEMPLATE, ROOT_TEMPLATES};
 use anyhow::{Context, Result};
 use tokio::fs;
 
-/// Asynchronous version of ensure_dir.
+/// Ensure a directory exists, creating it and any parents if necessary.
+///
+/// Returns the canonical path of the directory.
 pub async fn ensure_dir_async(path: &Path) -> Result<PathBuf> {
     fs::create_dir_all(path)
         .await
@@ -12,12 +20,17 @@ pub async fn ensure_dir_async(path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+/// Resolve the nanobot data directory (`~/.nanobot`), creating it if needed.
 pub async fn get_data_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("failed to resolve home directory")?;
     let path = home.join(".nanobot");
     ensure_dir_async(&path).await
 }
 
+/// Resolve the workspace directory, creating it if needed.
+///
+/// If `workspace` is `Some`, it may contain a `~/` prefix that will be
+/// expanded. If `None`, defaults to `~/.nanobot/workspace`.
 pub async fn get_workspace_path(workspace: Option<&str>) -> Result<PathBuf> {
     let path = if let Some(raw) = workspace {
         expand_tilde(raw)?
@@ -30,6 +43,9 @@ pub async fn get_workspace_path(workspace: Option<&str>) -> Result<PathBuf> {
     ensure_dir_async(&path).await
 }
 
+/// Expand a leading `~/` in a path to the user's home directory.
+///
+/// If the path does not start with `~/`, it is returned as-is.
 pub fn expand_tilde(raw: &str) -> Result<PathBuf> {
     if let Some(rest) = raw.strip_prefix("~/") {
         let home = dirs::home_dir().context("failed to resolve home directory")?;
@@ -39,14 +55,15 @@ pub fn expand_tilde(raw: &str) -> Result<PathBuf> {
     }
 }
 
-// pub fn safe_filename(name: &str) -> String {
-//     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-//     let re = RE.get_or_init(|| Regex::new(r#"[<>:"/\\|?*]"#).expect("invalid regex"));
-//     re.replace_all(name, "_").trim().to_string()
-// }
-
 /// Sync workspace templates to the workspace directory.
-/// Returns a list of files that were added.
+///
+/// Writes the following files if they do not exist (or if `overwrite` is true):
+/// - Root templates: `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`
+/// - Memory template: `memory/MEMORY.md`
+/// - History file: `memory/HISTORY.md` (empty)
+/// - Skills directory: `skills/` (empty directory)
+///
+/// Returns a list of relative paths that were written.
 pub async fn sync_workspace_templates(workspace: &Path, overwrite: bool) -> Result<Vec<String>> {
     let mut added = Vec::new();
 
@@ -75,6 +92,7 @@ pub async fn sync_workspace_templates(workspace: &Path, overwrite: bool) -> Resu
         if let Some(parent) = history_dest.parent() {
             fs::create_dir_all(parent).await?;
         }
+        // HISTORY.md starts empty; it is populated by the agent loop.
         fs::write(&history_dest, "").await?;
         added.push(HISTORY_TEMPLATE_PATH.to_string());
     }

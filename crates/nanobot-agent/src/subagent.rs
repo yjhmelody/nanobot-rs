@@ -1,3 +1,26 @@
+//! Subagent management — independent agent tasks spawned from the main loop.
+//!
+//! [`SubagentManager`] implements the [`SpawnService`] trait, allowing
+//! the main agent to spawn parallel agentic tasks. Each subagent runs its
+//! own simplified ReAct loop with the provider and tools shared from the
+//! parent, and its result is delivered back via the message bus as a
+//! system message.
+//!
+//! # Design Notes
+//!
+//! - **Shared dependencies**: Subagents reuse the parent's LLM provider
+//!   and tool registry, avoiding redundant setup.
+//! - **Task tracking**: Running tasks are tracked in [`DashMap`]s keyed by
+//!   `TaskId` and `SessionKey`, enabling bulk cancellation via
+//!   [`cancel_by_session`].
+//! - **Result routing**: Subagent results are published as system messages
+//!   with a `chat_id` of `"origin_channel:origin_chat_id"`, which the
+//!   main loop's [`process_message`](crate::loop_core::AgentLoop::process_message)
+//!   unpacks and routes to the correct channel.
+//! - **Think-block stripping**: Subagent responses are cleaned of
+//!   `<think>` blocks before being returned, since they may contain
+//!   internal monologue not intended for the user.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,11 +37,16 @@ use nanobot_types::SessionKey;
 use nanobot_types::provider::{AssistantFunctionCall, AssistantToolCall, ChatMessage};
 use nanobot_types::task::TaskId;
 
+/// Tracing target for log messages from this module.
 const TARGET: &str = "nanobot::subagent";
+/// System prompt template for subagents, with `{runtime}` and `{workspace}`
+/// placeholders.
 const SUBAGENT_PROMPT_TEMPLATE: &str = "# Subagent\n\nCurrent Time: {runtime}\n\nYou are a subagent spawned by the main agent to complete a specific task. Stay focused and provide a concise final result.\n\n## Workspace\n{workspace}";
+/// Preamble informing the subagent about skills it can use.
 const SUBAGENT_SKILLS_PREAMBLE: &str =
     "## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n";
 
+/// Internal shared state behind [`SubagentManager`].
 struct SubagentManagerInner {
     provider: Arc<dyn LLMProvider>,
     workspace: std::path::PathBuf,
@@ -29,7 +57,10 @@ struct SubagentManagerInner {
     max_tokens: i32,
     reasoning_effort: Option<nanobot_provider::ReasoningConfig>,
     max_iterations: usize,
+    /// Map of all running subagent task handles, keyed by task ID.
     running_tasks: DashMap<TaskId, JoinHandle<()>>,
+    /// Map of task IDs to their originating session, for session-scoped
+    /// cancellation.
     session_tasks: DashMap<SessionKey, DashMap<TaskId, ()>>,
 }
 
@@ -47,12 +78,20 @@ impl std::fmt::Debug for SubagentManagerInner {
     }
 }
 
+/// Manages subagent lifecycle: spawn, track, cancel, and cleanup.
+///
+/// Implements [`SpawnService`] so it can be registered with the tool
+/// registry as the backend for the `spawn_subagent` tool.
 #[derive(Clone, Debug)]
 pub struct SubagentManager {
     inner: Arc<SubagentManagerInner>,
 }
 
 impl SubagentManager {
+    /// Creates a new `SubagentManager`.
+    ///
+    /// This constructor is `pub(crate)` — callers go through the
+    /// [`AgentLoopBuilder`](crate::builder::AgentLoopBuilder).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         provider: Arc<dyn LLMProvider>,
@@ -82,12 +121,15 @@ impl SubagentManager {
         }
     }
 
+    /// Cancels all subagent tasks associated with the given session.
     pub async fn cancel_by_session(&self, session_key: &SessionKey) -> usize {
         self.inner.cancel_by_session(session_key).await
     }
 }
 
 impl SubagentManagerInner {
+    /// Spawns a subagent in a new tokio task, registers it for lifecycle
+    /// tracking, and returns a notification string.
     async fn spawn_impl(
         self: &Arc<Self>,
         task: String,
@@ -136,6 +178,8 @@ impl SubagentManagerInner {
         )
     }
 
+    /// Cancels all subagent tasks for a given session by aborting their
+    /// join handles.
     async fn cancel_by_session(&self, session_key: &SessionKey) -> usize {
         let ids = if let Some((_, tasks)) = self.session_tasks.remove(session_key) {
             tasks.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
@@ -155,6 +199,7 @@ impl SubagentManagerInner {
         cancelled
     }
 
+    /// Removes a task from both tracking maps after it completes.
     async fn cleanup_task(&self, task_id: &TaskId, session_key: Option<&SessionKey>) {
         self.running_tasks.remove(task_id);
         if let Some(session_key) = session_key
@@ -168,6 +213,8 @@ impl SubagentManagerInner {
         }
     }
 
+    /// Runs a single subagent: builds the prompt, runs the loop, and
+    /// announces the result via the message bus.
     async fn run_subagent(
         &self,
         task_id: &TaskId,
@@ -232,6 +279,7 @@ impl SubagentManagerInner {
 
 #[async_trait]
 impl SpawnService for SubagentManager {
+    /// Spawns a new subagent and returns a human-readable confirmation.
     async fn spawn(
         &self,
         task: String,
@@ -245,11 +293,13 @@ impl SpawnService for SubagentManager {
             .await
     }
 
+    /// Cancels all subagents for a session.
     async fn cancel_by_session(&self, session_key: &SessionKey) -> anyhow::Result<usize> {
         Ok(self.inner.cancel_by_session(session_key).await)
     }
 }
 
+/// Truncates text to `max` characters, appending `"..."` if truncated.
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -262,6 +312,9 @@ fn truncate(text: &str, max: usize) -> String {
     out
 }
 
+/// Strips `<think>...</think>` blocks from an optional text string.
+///
+/// If the cleaned text is empty, returns `None`.
 fn strip_think(text: Option<&str>) -> Option<String> {
     let t = text?;
     let re = Regex::new(r"<think>[\s\S]*?</think>").ok()?;
@@ -273,6 +326,9 @@ fn strip_think(text: Option<&str>) -> Option<String> {
     }
 }
 
+/// The core subagent loop: sends a system prompt + task to the LLM,
+/// executes any tool calls, and repeats until a final answer is produced
+/// or `max_iterations` is reached.
 #[allow(clippy::too_many_arguments)]
 async fn run_subagent_loop_impl(
     task: &str,
@@ -297,6 +353,7 @@ async fn run_subagent_loop_impl(
             .replace("{workspace}", &workspace.display().to_string()),
     ];
 
+    // Subagents can also use available skills
     let skills = SkillsLoader::new(workspace).build_skills_summary().await;
     if !skills.trim().is_empty() {
         parts.push(format!("{SUBAGENT_SKILLS_PREAMBLE}{skills}"));
@@ -368,6 +425,10 @@ async fn run_subagent_loop_impl(
         .unwrap_or_else(|| "Task completed but no final response was generated.".to_string()))
 }
 
+/// Publishes a subagent result back to the main agent as a system message.
+///
+/// The `chat_id` is encoded as `"origin_channel:origin_chat_id"` so the
+/// main loop can route the response to the correct channel.
 #[allow(clippy::too_many_arguments)]
 fn announce_result_impl(
     _task_id: &str,

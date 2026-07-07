@@ -1,3 +1,20 @@
+//! Periodic LLM-driven heartbeat service for proactive task management.
+//!
+//! The `HeartbeatService` runs an async background loop that periodically
+//! checks `HEARTBEAT.md` in the workspace and asks the LLM whether there
+//! are tasks to execute. If the LLM decides to run, the result is dispatched
+//! through registered `HeartbeatExecuteHandler` and `HeartbeatNotifyHandler`
+//! callbacks.
+//!
+//! ## Decision Parsing
+//!
+//! The LLM is expected to respond with a JSON object:
+//! `{"action":"run|skip","tasks":"..."}`. The parser supports three formats:
+//!
+//! 1. Pure JSON: `{"action":"run","tasks":"finish docs"}`
+//! 2. Markdown fenced code block: `... ```json { ... } ``` ...`
+//! 3. Extracted JSON object (first `{` to last `}`)
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,22 +30,58 @@ use nanobot_provider::{ChatMessage, ChatRequest, LLMProvider};
 use nanobot_types::SessionKey;
 use nanobot_types::heartbeat::HeartbeatDecisionArgs;
 
+/// Tracing log target for this module.
 pub(crate) const LOG_TARGET: &str = "nanobot::heartbeat";
 
+/// System prompt instructing the LLM to act as a heartbeat agent.
 const HEARTBEAT_SYSTEM_PROMPT: &str = "You are a heartbeat agent. Review HEARTBEAT.md and reply with JSON only: {\"action\":\"run|skip\",\"tasks\":\"...\"}. Use action=skip and empty tasks when no active tasks exist.";
+/// Prefix for the user prompt that wraps the HEARTBEAT.md content.
 const HEARTBEAT_USER_PROMPT_PREFIX: &str =
     "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n";
 
+/// Handler trait invoked when the heartbeat LLM decides that tasks should be
+/// executed.
+///
+/// Implementors receive the task string extracted from the LLM's decision
+/// and return a result string.
 #[async_trait]
 pub trait HeartbeatExecuteHandler: Send + Sync {
+    /// Execute the given tasks and return a result summary.
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` — Task description extracted from the LLM decision.
     async fn on_execute(&self, tasks: String) -> HeartbeatResult<String>;
 }
 
+/// Handler trait invoked after task execution completes (when there is a
+/// non-empty result to deliver).
+///
+/// Implementors receive the execution result and may forward it to a
+/// channel, log it, etc.
 #[async_trait]
 pub trait HeartbeatNotifyHandler: Send + Sync {
+    /// Deliver the heartbeat execution result.
+    ///
+    /// # Arguments
+    ///
+    /// * `response` — The result from `HeartbeatExecuteHandler::on_execute`.
     async fn on_notify(&self, response: String);
 }
 
+/// Background service that periodically checks for active tasks via LLM.
+///
+/// # Fields
+///
+/// * `workspace` — Path to the workspace directory containing `HEARTBEAT.md`.
+/// * `provider` — LLM provider used to make the run/skip decision.
+/// * `model` — Model name to use for the LLM query.
+/// * `interval_s` — Seconds between heartbeat checks.
+/// * `enabled` — Whether the heartbeat loop should run.
+/// * `running` — Atomic flag indicating whether the loop is active.
+/// * `task` — Handle to the background tokio task.
+/// * `on_execute` — Registered execute handler (write-guarded by `RwLock`).
+/// * `on_notify` — Registered notify handler (write-guarded by `RwLock`).
 pub struct HeartbeatService {
     workspace: PathBuf,
     provider: Arc<dyn LLMProvider>,
@@ -42,6 +95,15 @@ pub struct HeartbeatService {
 }
 
 impl HeartbeatService {
+    /// Create a new `HeartbeatService`.
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace` — Path to the workspace containing `HEARTBEAT.md`.
+    /// * `provider` — LLM provider for making go/no-go decisions.
+    /// * `model` — Model name for the LLM query.
+    /// * `interval_s` — Seconds between heartbeat ticks.
+    /// * `enabled` — Whether the heartbeat loop runs on `start`.
     pub fn new(
         workspace: PathBuf,
         provider: Arc<dyn LLMProvider>,
@@ -62,14 +124,27 @@ impl HeartbeatService {
         }
     }
 
+    /// Register a handler to be called when the LLM decides to execute tasks.
+    ///
+    /// The handler is stored behind a `parking_lot::RwLock` and is called
+    /// from the heartbeat's background tokio task.
     pub async fn register_on_execute_handler(&self, handler: Arc<dyn HeartbeatExecuteHandler>) {
         *self.on_execute.write() = Some(handler);
     }
 
+    /// Register a handler to be called after task execution completes.
+    ///
+    /// The handler receives the execution result and may forward it to
+    /// a user-facing channel.
     pub async fn register_on_notify_handler(&self, handler: Arc<dyn HeartbeatNotifyHandler>) {
         *self.on_notify.write() = Some(handler);
     }
 
+    /// Start the heartbeat loop in a background tokio task.
+    ///
+    /// Does nothing if `enabled` is `false` or if already running. The loop
+    /// sleeps for `interval_s` seconds between ticks and exits when `stop`
+    /// is called.
     pub async fn start(self: &Arc<Self>) {
         if !self.enabled {
             info!(target: LOG_TARGET, "heartbeat disabled");
@@ -100,6 +175,9 @@ impl HeartbeatService {
         );
     }
 
+    /// Stop the heartbeat loop and await the background task's completion.
+    ///
+    /// Sets the `running` atomic flag to `false` and aborts the tokio task.
     pub async fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(task) = self.task.lock().await.take() {
@@ -107,6 +185,10 @@ impl HeartbeatService {
         }
     }
 
+    /// Manually trigger one heartbeat cycle outside the regular loop.
+    ///
+    /// Useful for testing or on-demand invocations. Returns `None` if the
+    /// heartbeat file is missing, the LLM decides to skip, or execution fails.
     #[allow(unused)]
     pub async fn trigger_now(&self) -> Option<String> {
         let content = self.read_heartbeat_file()?;
@@ -136,6 +218,12 @@ impl HeartbeatService {
         }
     }
 
+    /// Execute a single heartbeat tick.
+    ///
+    /// 1. Read HEARTBEAT.md (no-op if missing).
+    /// 2. Ask the LLM for a run/skip decision.
+    /// 3. If `run`, invoke the execute handler.
+    /// 4. If execution produces output, invoke the notify handler.
     async fn tick(&self) -> HeartbeatResult<()> {
         let Some(content) = self.read_heartbeat_file() else {
             return Ok(());
@@ -164,6 +252,10 @@ impl HeartbeatService {
         Ok(())
     }
 
+    /// Read the contents of `HEARTBEAT.md` from the workspace.
+    ///
+    /// Returns `None` if the file does not exist, cannot be read, or is
+    /// empty/whitespace-only.
     fn read_heartbeat_file(&self) -> Option<String> {
         let path = self.workspace.join("HEARTBEAT.md");
         if !path.exists() {
@@ -175,6 +267,10 @@ impl HeartbeatService {
             .filter(|s| !s.is_empty())
     }
 
+    /// Ask the LLM whether the tasks in `HEARTBEAT.md` should be executed.
+    ///
+    /// Returns a tuple of `(action, tasks)` where `action` is `"run"` or
+    /// `"skip"`. Uses `temperature=0.0` for deterministic decisions.
     async fn decide(&self, content: &str) -> HeartbeatResult<(String, String)> {
         let response = self
             .provider
@@ -200,6 +296,12 @@ impl HeartbeatService {
         Ok((parsed.action.trim().to_lowercase(), parsed.tasks))
     }
 
+    /// Parse the LLM's text response into a `HeartbeatDecisionArgs`.
+    ///
+    /// Tries three strategies in order:
+    /// 1. Direct JSON parse of the trimmed response.
+    /// 2. JSON extracted from a markdown fenced code block.
+    /// 3. JSON object extracted by finding the first `{` and last `}`.
     fn parse_decision_response(content: &str) -> HeartbeatResult<HeartbeatDecisionArgs> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -210,12 +312,14 @@ impl HeartbeatService {
             return Ok(parsed);
         }
 
+        // Try extracting from a ```json ... ``` block.
         if let Some(extracted) = Self::extract_json_block(trimmed)
             && let Ok(parsed) = serde_json::from_str::<HeartbeatDecisionArgs>(&extracted)
         {
             return Ok(parsed);
         }
 
+        // Fallback: find the first { and last }.
         if let Some(extracted) = Self::extract_json_object(trimmed)
             && let Ok(parsed) = serde_json::from_str::<HeartbeatDecisionArgs>(&extracted)
         {
@@ -227,6 +331,10 @@ impl HeartbeatService {
         ))
     }
 
+    /// Extract a JSON object from a markdown fenced code block.
+    ///
+    /// Looks for content between ``` delimiters that starts with `{` and
+    /// ends with `}`.
     fn extract_json_block(content: &str) -> Option<String> {
         for (index, part) in content.split("```").enumerate() {
             if index % 2 == 1 {
@@ -243,6 +351,8 @@ impl HeartbeatService {
         None
     }
 
+    /// Extract a JSON object by finding the first `{` and the last `}` in
+    /// the string.
     fn extract_json_object(content: &str) -> Option<String> {
         let start = content.find('{')?;
         let end = content.rfind('}')?;

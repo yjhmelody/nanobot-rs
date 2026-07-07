@@ -1,3 +1,22 @@
+//! Text search tools backed by ripgrep.
+//!
+//! Provides two tools for searching file contents:
+//!
+//! - [`SearchFilesTool`] -- Full-text search with regex support and file
+//!   pattern filtering (`search_files`).
+//! - [`GrepCodeTool`] -- Code-focused search with language-specific
+//!   filtering and automatic exclusion of non-code files (`grep_code`).
+//!
+//! Both tools shell out to the `rg` (ripgrep) command-line tool for fast,
+//! parallelized searching. They parse ripgrep's JSON output format to
+//! produce rich results with context lines.
+//!
+//! ## Performance
+//!
+//! Stdout and stderr are read concurrently via `tokio::spawn` to avoid
+//! blocking the async runtime. Results are limited to a configurable
+//! maximum (default 50) to keep response sizes manageable for the LLM.
+
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
@@ -33,6 +52,7 @@ const GREP_CODE_LIMIT_DESC: &str = "Maximum number of results (default: 50)";
 const GREP_CODE_CONTEXT_LINES_DESC: &str =
     "Number of context lines before/after match (default: 2)";
 
+/// Internal argument struct for the `search_files` tool.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchFilesArgs {
@@ -51,6 +71,7 @@ struct SearchFilesArgs {
     context_lines: usize,
 }
 
+/// Internal argument struct for the `grep_code` tool.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GrepCodeArgs {
@@ -75,6 +96,7 @@ fn default_context_lines() -> usize {
     2
 }
 
+/// A single search result with context lines.
 #[derive(Debug, Serialize)]
 struct SearchResult {
     file: String,
@@ -86,6 +108,7 @@ struct SearchResult {
     context_after: Vec<String>,
 }
 
+/// The JSON response structure returned by search tools.
 #[derive(Debug, Serialize)]
 struct SearchResponse {
     results: Vec<SearchResult>,
@@ -93,11 +116,15 @@ struct SearchResponse {
     truncated: bool,
 }
 
+/// Tool for full-text search across files using ripgrep.
+///
+/// Supports regex search, file glob patterns, and context lines.
 pub struct SearchFilesTool {
     config: SharedToolConfig,
 }
 
 impl SearchFilesTool {
+    /// Creates a new `SearchFilesTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -176,11 +203,17 @@ impl Tool for SearchFilesTool {
     }
 }
 
+/// Tool for code-specific search with language filtering.
+///
+/// Unlike `search_files`, `grep_code` uses literal search by default
+/// (not regex) and supports filtering by programming language via
+/// ripgrep's `--type` flag (e.g., `rust`, `python`, `javascript`).
 pub struct GrepCodeTool {
     config: SharedToolConfig,
 }
 
 impl GrepCodeTool {
+    /// Creates a new `GrepCodeTool` with the given shared configuration.
     pub fn new(config: SharedToolConfig) -> Self {
         Self { config }
     }
@@ -246,7 +279,8 @@ impl Tool for GrepCodeTool {
             file_pattern: None,
             language: args.language.as_deref(),
             case_sensitive: args.case_sensitive,
-            regex: false, // grep_code uses literal search by default
+            // grep_code uses literal search by default (no regex).
+            regex: false,
             limit: args.limit,
             context_lines: args.context_lines,
             workspace: snapshot.workspace.as_path(),
@@ -255,6 +289,7 @@ impl Tool for GrepCodeTool {
     }
 }
 
+/// Internal parameters for the ripgrep search.
 struct RipgrepSearchParams<'a> {
     query: &'a str,
     path: Option<&'a str>,
@@ -267,6 +302,11 @@ struct RipgrepSearchParams<'a> {
     workspace: &'a Path,
 }
 
+/// Executes a ripgrep search with the given parameters and returns
+/// structured JSON results.
+///
+/// Spawns `rg` as a subprocess with JSON output mode, reads stdout
+/// and stderr concurrently, and parses the NDJSON output.
 async fn search_with_ripgrep(params: RipgrepSearchParams<'_>) -> ToolResult<String> {
     let search_path = if let Some(p) = params.path {
         params.workspace.join(p)
@@ -290,22 +330,23 @@ async fn search_with_ripgrep(params: RipgrepSearchParams<'_>) -> ToolResult<Stri
         .arg("--context")
         .arg(params.context_lines.to_string());
 
-    // Case sensitivity
+    // Case sensitivity: ripgrep defaults to case-sensitive, so we
+    // add --ignore-case when the user wants case-insensitive search.
     if !params.case_sensitive {
         cmd.arg("--ignore-case");
     }
 
-    // Regex vs literal
+    // Regex vs literal search.
     if !params.regex {
         cmd.arg("--fixed-strings");
     }
 
-    // File pattern
+    // File pattern (glob) filter.
     if let Some(pattern) = params.file_pattern {
         cmd.arg("--glob").arg(pattern);
     }
 
-    // Language filter
+    // Language filter (ripgrep --type flag).
     if let Some(lang) = params.language {
         cmd.arg("--type").arg(lang);
     }
@@ -313,7 +354,7 @@ async fn search_with_ripgrep(params: RipgrepSearchParams<'_>) -> ToolResult<Stri
     // Query and path
     cmd.arg(params.query).arg(&search_path);
 
-    // Execute
+    // Execute the subprocess.
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -334,6 +375,7 @@ async fn search_with_ripgrep(params: RipgrepSearchParams<'_>) -> ToolResult<Stri
         ToolError::execution("search_files", anyhow::anyhow!("Failed to capture stderr"))
     })?;
 
+    // Read stdout and stderr concurrently to avoid deadlocks.
     let mut stdout_data = Vec::new();
     let mut stderr_data = Vec::new();
 
@@ -390,7 +432,7 @@ async fn search_with_ripgrep(params: RipgrepSearchParams<'_>) -> ToolResult<Stri
             )
         })?;
 
-    // ripgrep returns exit code 1 when no matches found, which is not an error
+    // ripgrep returns exit code 1 when no matches found, which is not an error.
     if !status.success() && status.code() != Some(1) {
         let stderr_text = String::from_utf8_lossy(&stderr_data);
         return Err(ToolError::execution(
@@ -414,6 +456,10 @@ async fn search_with_ripgrep(params: RipgrepSearchParams<'_>) -> ToolResult<Stri
     })
 }
 
+/// A single NDJSON line from ripgrep's JSON output.
+///
+/// ripgrep outputs NDJSON with tagged types: `match`, `context`, `begin`,
+/// `end`, `summary`, etc. We only care about `match` and `context` lines.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum RipgrepMessage {
@@ -425,6 +471,7 @@ enum RipgrepMessage {
     Other,
 }
 
+/// A ripgrep match entry from the JSON output.
 #[derive(Debug, Deserialize)]
 struct RipgrepMatch {
     path: RipgrepPath,
@@ -433,36 +480,44 @@ struct RipgrepMatch {
     submatches: Vec<RipgrepSubmatch>,
 }
 
+/// A ripgrep context entry (lines before/after a match).
 #[derive(Debug, Deserialize)]
 struct RipgrepContext {
-    // path: RipgrepPath,
+    // Note: path and line_number are available in the JSON but not needed
+    // since context is always associated with the nearest match.
     lines: RipgrepLines,
-    // line_number: usize,
 }
 
+/// File path from ripgrep output.
 #[derive(Debug, Deserialize)]
 struct RipgrepPath {
     text: String,
 }
 
+/// Line text from ripgrep output.
 #[derive(Debug, Deserialize)]
 struct RipgrepLines {
     text: String,
 }
 
+/// A submatch (the exact matched portion within a line).
 #[derive(Debug, Deserialize)]
 struct RipgrepSubmatch {
     #[serde(rename = "match")]
     match_text: RipgrepMatchText,
     start: usize,
-    // end: usize,
 }
 
+/// The matched text from a submatch.
 #[derive(Debug, Deserialize)]
 struct RipgrepMatchText {
     text: String,
 }
 
+/// Parses ripgrep's NDJSON output into structured [`SearchResult`] values.
+///
+/// Handles context line association (context before/after each match),
+/// match deduplication, and the truncation limit.
 fn parse_ripgrep_json(data: &[u8], limit: usize) -> ToolResult<Vec<SearchResult>> {
     let text = String::from_utf8_lossy(data);
     let mut results = Vec::new();
@@ -482,7 +537,7 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> ToolResult<Vec<SearchResult>
 
         match msg {
             RipgrepMessage::Match { data } => {
-                // Save previous match if exists
+                // Save previous match if exists.
                 if let Some((file, line_num, col, match_text)) = current_match.take() {
                     results.push(SearchResult {
                         file,
@@ -497,12 +552,12 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> ToolResult<Vec<SearchResult>
                         break;
                     }
 
-                    // Reset for next match - previous context_after becomes next context_before
+                    // Reset for next match - previous context_after becomes next context_before.
                     context_before = context_after.clone();
                     context_after.clear();
                 }
 
-                // Start new match
+                // Start new match.
                 let column = data.submatches.first().map(|s| s.start).unwrap_or(0);
                 let match_text = data
                     .submatches
@@ -514,10 +569,10 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> ToolResult<Vec<SearchResult>
             }
             RipgrepMessage::Context { data } => {
                 if current_match.is_some() {
-                    // After a match, context goes to after
+                    // After a match, context goes to after.
                     context_after.push(data.lines.text);
                 } else {
-                    // Before any match, context goes to before
+                    // Before any match, context goes to before.
                     context_before.push(data.lines.text);
                 }
             }
@@ -525,7 +580,7 @@ fn parse_ripgrep_json(data: &[u8], limit: usize) -> ToolResult<Vec<SearchResult>
         }
     }
 
-    // Save last match
+    // Save last match.
     if let Some((file, line_num, col, match_text)) = current_match {
         results.push(SearchResult {
             file,

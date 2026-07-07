@@ -1,3 +1,28 @@
+//! Session consolidation (compression) logic.
+//!
+//! This module provides both a trait-based [`LlmConsolidationStrategy`] and a
+//! free function [`consolidate_session`] for compressing long sessions by
+//! generating an LLM summary of old messages.
+//!
+//! # How consolidation works
+//!
+//! 1. Once enough unconsolidated messages accumulate (configurable via
+//!    `min_messages`), the strategy extracts all messages before a "keep
+//!    recent" window.
+//! 2. Those messages are sent to an LLM with a summarisation prompt.
+//! 3. The summary replaces the old messages as a single `System`-role entry.
+//! 4. The `last_consolidated` pointer is advanced so subsequent calls only
+//!    process new messages.
+//!
+//! # Design Rationale
+//!
+//! - Consolidation is **lossy compression**: details are discarded, but the
+//!   context window stays manageable.
+//! - The "keep recent" window (default 10 messages) preserves the active
+//!   conversation for the LLM's immediate context.
+//! - A low temperature (0.3) is used for summary generation to encourage
+//!   factual, deterministic output.
+
 use std::sync::Arc;
 
 use crate::SessionResult;
@@ -10,6 +35,20 @@ use nanobot_provider::LLMProvider;
 use nanobot_provider::{ChatMessage, MessageContent, MessageRole};
 
 /// LLM-based consolidation strategy adapter.
+///
+/// Wraps a provider, model name, and [`ConsolidationConfig`] behind the
+/// [`ConsolidationStrategy`] trait. Uses the LLM to generate a concise
+/// summary of old messages.
+///
+/// # Example
+///
+/// ```ignore
+/// let strategy = LlmConsolidationStrategy::new(
+///     provider,
+///     "claude-sonnet-4-20250514".into(),
+///     ConsolidationConfig::default(),
+/// );
+/// ```
 pub struct LlmConsolidationStrategy {
     provider: Arc<dyn LLMProvider>,
     model: String,
@@ -17,6 +56,13 @@ pub struct LlmConsolidationStrategy {
 }
 
 impl LlmConsolidationStrategy {
+    /// Creates a new consolidation strategy backed by an LLM.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The LLM provider used for summary generation.
+    /// * `model` - Model identifier (e.g. `"claude-sonnet-4-20250514"`).
+    /// * `config` - Consolidation thresholds and limits.
     pub fn new(provider: Arc<dyn LLMProvider>, model: String, config: ConsolidationConfig) -> Self {
         Self {
             provider,
@@ -28,12 +74,20 @@ impl LlmConsolidationStrategy {
 
 #[async_trait]
 impl ConsolidationStrategy for LlmConsolidationStrategy {
+    /// Returns `true` if the session has accumulated enough unconsolidated
+    /// messages to warrant compression.
+    ///
+    /// Compares the count of messages since `last_consolidated` against
+    /// `config.min_messages`.
     async fn should_consolidate(&self, session: &Session) -> bool {
         let total_messages = session.messages.len();
         let unconsolidated_count = total_messages.saturating_sub(session.last_consolidated);
         unconsolidated_count >= self.config.min_messages
     }
 
+    /// Runs consolidation on the session.
+    ///
+    /// Delegates to the free function [`consolidate_session`].
     async fn consolidate(&self, session: &mut Session) -> SessionResult<bool> {
         consolidate_session(session, self.provider.as_ref(), &self.model, &self.config).await
     }
@@ -42,19 +96,24 @@ impl ConsolidationStrategy for LlmConsolidationStrategy {
 /// Configuration for session consolidation behavior.
 #[derive(Debug, Clone)]
 pub struct ConsolidationConfig {
-    /// Minimum number of messages before consolidation is triggered
+    /// Minimum number of unconsolidated messages before consolidation is
+    /// triggered.
     pub min_messages: usize,
-    /// Number of recent messages to keep unconsolidated
+    /// Number of recent messages to keep unconsolidated (the "keep recent"
+    /// window preserved for the LLM's immediate context).
     pub keep_recent: usize,
-    /// Maximum tokens for the consolidation summary request
+    /// Maximum tokens for the consolidation summary request.
     pub max_tokens: i32,
 }
 
 impl Default for ConsolidationConfig {
     fn default() -> Self {
         Self {
+            // Consolidate once there are 20 unconsolidated messages.
             min_messages: 20,
+            // Always keep the last 10 messages untouched.
             keep_recent: 10,
+            // Allow up to 1000 tokens for the summary.
             max_tokens: 1000,
         }
     }
@@ -72,14 +131,24 @@ impl Default for ConsolidationConfig {
 ///
 /// # Arguments
 ///
-/// * `session` - The session to consolidate (will be modified in place)
-/// * `provider` - LLM provider for generating summaries
-/// * `model` - Model name to use for summarization
-/// * `config` - Consolidation configuration
+/// * `session` - The session to consolidate (will be modified in place).
+/// * `provider` - LLM provider for generating summaries.
+/// * `model` - Model name to use for summarisation.
+/// * `config` - Consolidation configuration.
 ///
 /// # Returns
 ///
-/// Returns `Ok(true)` if consolidation was performed, `Ok(false)` if skipped.
+/// Returns `Ok(true)` if consolidation was performed, `Ok(false)` if skipped
+/// (not enough messages or no messages to compress after keeping the recent
+/// window).
+///
+/// # Errors
+///
+/// Returns an error if the LLM provider fails during summary generation.
+///
+/// # Panics
+///
+/// Does not panic. All error paths return `Err`.
 pub async fn consolidate_session(
     session: &mut Session,
     provider: &dyn LLMProvider,
@@ -100,7 +169,8 @@ pub async fn consolidate_session(
         return Ok(false);
     }
 
-    // Calculate consolidation range
+    // Calculate consolidation range: messages between last_consolidated and
+    // (end - keep_recent) will be summarised.
     let consolidate_end = total_messages.saturating_sub(config.keep_recent);
     if consolidate_end <= session.last_consolidated {
         debug!(
@@ -142,7 +212,7 @@ pub async fn consolidate_session(
         thinking_blocks: None,
     };
 
-    // Replace old messages with summary
+    // Replace old messages with summary, keeping recent messages intact
     let mut new_messages = Vec::with_capacity(1 + (total_messages - consolidate_end));
     new_messages.push(summary_entry);
     new_messages.extend_from_slice(&session.messages[consolidate_end..]);
@@ -161,6 +231,10 @@ pub async fn consolidate_session(
 }
 
 /// Generates a summary of messages using the LLM provider.
+///
+/// Formats the messages into readable conversation text and sends a
+/// summarisation prompt to the provider with a low temperature (0.3) for
+/// deterministic output.
 async fn generate_summary(
     provider: &dyn LLMProvider,
     model: &str,
@@ -217,7 +291,8 @@ async fn generate_summary(
     Ok(summary)
 }
 
-/// Formats messages into a readable text format for summarization.
+/// Formats a slice of session entries into a readable "Role: Content" text
+/// format suitable for LLM summarisation.
 fn format_messages_for_summary(messages: &[SessionEntry]) -> String {
     let mut text = String::new();
 

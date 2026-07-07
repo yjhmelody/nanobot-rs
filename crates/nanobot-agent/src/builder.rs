@@ -1,3 +1,21 @@
+//! Builder for constructing a fully-wired [`AgentLoop`].
+//!
+//! This module provides [`AgentConfig`] (the configuration struct) and
+//! [`AgentLoopBuilder`] (the builder API powered by `bon`). The builder
+//! assembles all dependencies — context provider, session store, retrieval
+//! service, tool registry, subagent manager, and MCP manager — into a
+//! single [`AgentLoop`] ready to run.
+//!
+//! # Design Notes
+//!
+//! - Uses the `bon` crate for a derive-free builder pattern (`bon::bon`).
+//! - Requires only three mandatory arguments (`bus`, `provider`, `workspace`);
+//!   everything else has sensible defaults.
+//! - Lazily initialises session persistence (JSONL), memory provider (file),
+//!   and LLM consolidation strategy during construction.
+//! - Wires up retrieval tools (`context_search`, `context_sources`,
+//!   `context_explain`) as dynamic tools on the registry.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,15 +44,26 @@ use nanobot_session::{
 use nanobot_tools::mcp::MCPManager;
 use nanobot_tools::{Tool, ToolRegistry, ToolRegistryBuilder};
 
-/// Configuration for AgentLoop.
+/// Configuration for [`AgentLoop`].
+///
+/// Controls the model identity, loop limits, token budgets, and subagent
+/// cap.  All fields have sensible defaults via [`Default`]; use the builder
+/// to override.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
+    /// Model identifier (e.g. `"anthropic/claude-opus-4-6"`).
     pub model: String,
+    /// Maximum ReAct iterations per turn (default: 40).
     pub max_iterations: usize,
+    /// LLM temperature (default: 0.1).
     pub temperature: f32,
+    /// Maximum output tokens per model call (default: 8192).
     pub max_tokens: i32,
+    /// Number of historical messages to pass to the LLM (default: 100).
     pub memory_window: usize,
+    /// Optional reasoning-effort configuration for extended thinking.
     pub reasoning_effort: Option<ReasoningConfig>,
+    /// Maximum ReAct iterations for spawned subagents (default: 15).
     pub max_subagent_iterations: usize,
 }
 
@@ -52,12 +81,38 @@ impl Default for AgentConfig {
     }
 }
 
-/// Namespace for the `bon`-generated `AgentLoop` builder.
+/// Namespace for the `bon`-generated [`AgentLoop`] builder.
+///
+/// Use `AgentLoopBuilder::new(...)` to start building, then chain optional
+/// setters, and call `.build().await` to produce the [`AgentLoop`].
+///
+/// # Required arguments
+///
+/// - `bus` — message bus for inbound/outbound communication
+/// - `provider` — LLM provider implementation
+/// - `workspace` — root workspace path for sessions, memory, and tools
 pub struct AgentLoopBuilder;
 
 #[bon::bon]
 impl AgentLoopBuilder {
-    /// Builds and returns a fully configured `AgentLoop`.
+    /// Builds and returns a fully configured [`AgentLoop`].
+    ///
+    /// This async constructor wires up all internal dependencies:
+    ///
+    /// 1. **Context provider** — [`ContextBuilder`] for prompt assembly.
+    /// 2. **Session store** — JSONL-backed persistence with optional
+    ///    LLM-powered consolidation.
+    /// 3. **Memory** — File-based memory provider (`MEMORY.md`/`HISTORY.md`).
+    /// 4. **Retrieval service** — multi-source context retrieval.
+    /// 5. **Tool registry** — filesystem, shell, web, MCP, cron, and
+    ///    retrieval tools, plus any custom tools.
+    /// 6. **Subagent manager** — spawn service for parallel agent tasks.
+    /// 7. **MCP manager** — Model Context Protocol server connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] if the context builder or tool registry
+    /// construction fails.
     #[allow(clippy::new_ret_no_self)]
     #[builder(start_fn = new, finish_fn = build)]
     pub async fn create(
@@ -160,6 +215,14 @@ impl AgentLoopBuilder {
     }
 }
 
+/// Construct the full [`ToolRegistry`] including built-in and retrieval tools.
+///
+/// Creates a [`ToolRegistryBuilder`] with the given configuration, then
+/// registers the three retrieval dynamic tools:
+///
+/// * `context_search` — search all configured retrieval sources.
+/// * `context_sources` — list available retrieval sources.
+/// * `context_explain` — explain the last auto-retrieval for this session.
 #[allow(clippy::too_many_arguments)]
 fn build_tool_registry(
     workspace: PathBuf,

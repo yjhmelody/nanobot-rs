@@ -1,3 +1,21 @@
+//! Subagent spawning tool for background task execution.
+//!
+//! Provides the `spawn` tool that allows the LLM to delegate complex or
+//! time-consuming tasks to independent subagents running in the background.
+//! The subagent completes the task and reports back when done.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! SpawnTool (Tool impl) → SpawnService (trait) → SubagentManager (impl)
+//! ```
+//!
+//! The [`SpawnService`] trait decouples the tool from the actual subagent
+//! management implementation, allowing the spawn service to be injected
+//! via [`ToolRegistry::set_spawn_service`](crate::registry::ToolRegistry::set_spawn_service).
+//! This breaks circular dependencies: the subagent manager needs the tool
+//! registry, and the tool registry needs the spawn service.
+
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -17,12 +35,32 @@ const SPAWN_LABEL_DESC: &str = "Optional short label for the task (for display)"
 
 /// Trait for spawning background subagent tasks.
 ///
+/// This trait abstracts the subagent spawning mechanism behind an
+/// interface, allowing the tool to be decoupled from the concrete
+/// subagent manager implementation.
+///
+/// Implementations must be `Send + Sync` for use across async boundaries.
+///
+/// # Flow
+///
 /// ```text
-/// ToolRegistry → SpawnTool → SpawnService (trait)
+/// AgentLoop → SpawnTool → SpawnService::spawn() → Background subagent
 /// ```
 #[async_trait]
 pub trait SpawnService: Send + Sync {
     /// Spawns a background subagent task.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The natural-language task description for the subagent.
+    /// * `label` - Optional short label for display/tracking purposes.
+    /// * `origin_channel` - The channel from which the spawn was requested.
+    /// * `origin_chat_id` - The chat/conversation from which the spawn was requested.
+    /// * `session_key` - Optional session key for scoping the subagent's context.
+    ///
+    /// # Returns
+    ///
+    /// A human-readable string indicating the spawned task (e.g., task ID).
     async fn spawn(
         &self,
         task: String,
@@ -32,21 +70,34 @@ pub trait SpawnService: Send + Sync {
         session_key: Option<SessionKey>,
     ) -> String;
 
-    /// Cancels all tasks associated with a session.
+    /// Cancels all subagent tasks associated with a session.
     ///
-    /// Returns the number of tasks cancelled.
+    /// Called when a session ends or is interrupted to ensure background
+    /// tasks do not continue running orphaned.
+    ///
+    /// # Returns
+    ///
+    /// The number of tasks that were cancelled.
     async fn cancel_by_session(&self, session_key: &SessionKey) -> anyhow::Result<usize>;
 }
 
+/// Tool for spawning background subagent tasks.
+///
+/// Delegates to a [`SpawnService`] implementation for the actual
+/// subagent lifecycle management.
 pub struct SpawnTool {
     service: Arc<dyn SpawnService>,
 }
 
 impl SpawnTool {
+    /// Creates a new `SpawnTool` backed by the given spawn service.
     pub fn new(service: Arc<dyn SpawnService>) -> Self {
         Self { service }
     }
 
+    /// Returns the static tool definition (name: "spawn").
+    ///
+    /// Uses a `OnceLock` to cache the definition after first construction.
     pub fn definition() -> Arc<ToolDefinition> {
         static DEF: OnceLock<Arc<ToolDefinition>> = OnceLock::new();
         DEF.get_or_init(|| {
@@ -75,6 +126,10 @@ impl SpawnTool {
         .clone()
     }
 
+    /// Executes the spawn tool with strongly-typed arguments.
+    ///
+    /// Falls back to defaults if the session context is empty
+    /// (e.g., "cli" channel, "direct" chat).
     pub(crate) async fn execute_typed(
         &self,
         args: SpawnArgs,
@@ -120,6 +175,7 @@ impl Tool for SpawnTool {
         self.execute_typed(parsed, ctx).await
     }
 
+    /// Cancels all spawns for the given session.
     async fn cancel_by_session(&self, session_key: &str) -> ToolResult<usize> {
         self.service
             .cancel_by_session(&SessionKey::from(session_key))

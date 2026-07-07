@@ -1,3 +1,44 @@
+//! Provider selection and construction for nanobot's LLM backends.
+//!
+//! This crate defines and implements the [`LLMProvider`] trait, which is the abstraction
+//! layer between nanobot's agent loop and various LLM APIs. It supports:
+//!
+//! - **Anthropic** (Claude): Native support via their Messages API
+//! - **OpenAI-compatible**: Any provider implementing the OpenAI chat completions or
+//!   responses wire format (OpenAI, OpenRouter, DeepSeek, etc.)
+//! - **Fallback chains**: Automatically retry with alternative providers on failure
+//! - **Streaming**: Unified [`StreamEvent`] stream regardless of the upstream format
+//!   (Anthropic SSE, OpenAI SSE, etc.)
+//!
+//! # Architecture
+//!
+//! The crate's entry point is [`make_provider`], which reads the application [`Config`]
+//! and constructs the appropriate provider chain. Each concrete provider
+//! (`AnthropicProvider`, `OpenAICompatProvider`) implements the [`LLMProvider`] trait.
+//! If `fallback_providers` are configured, a [`FallbackProvider`] wraps them with
+//! automatic retry logic.
+//!
+//! Streaming is handled by provider-specific adapters (`SseAdapter`, `OpenAiAdapter`)
+//! that convert raw HTTP byte streams into a unified [`StreamEvent`] stream.
+//! The [`StreamAccumulator`] can then collect these events into a complete
+//! [`LLMResponse`].
+//!
+//! # Key Design Decisions
+//!
+//! - **Trait-first abstraction**: [`LLMProvider`] is the core trait; providers are
+//!   injected as `Arc<dyn LLMProvider>`, enabling easy testing and new provider additions.
+//! - **Proxy fallback**: [`ProxyFallbackHelper`] implements a "try with proxy, retry
+//!   without proxy" pattern for environments where a system proxy may be broken.
+//! - **Model resolution**: [`OpenAICompatProvider`] applies provider-specific model name
+//!   canonicalization rules from a static registry (`ProviderSpec`).
+//!
+//! # Dependencies
+//!
+//! - `nanobot-config` / `nanobot-types` / `nanobot-types-derive`: Shared types and
+//!   configuration schema
+//! - `reqwest`: HTTP client for API calls
+//! - `rmcp`: Model Context Protocol (used externally, not directly in this crate)
+
 pub mod anthropic;
 mod anthropic_types;
 pub mod base;
@@ -65,6 +106,18 @@ pub fn make_provider(config: &Config) -> ProviderResult<Arc<dyn LLMProvider>> {
     create_single_provider(config, &provider_name)
 }
 
+/// Creates a single provider based on the given configuration and provider name.
+///
+/// This is an internal helper that reads the provider type from the config and
+/// dispatches to the appropriate concrete implementation. It does NOT wrap the
+/// result in a [`FallbackProvider`] — that is done by [`make_provider`] when
+/// `fallback_providers` are configured.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::InvalidConfig`] if:
+/// - The provider type is `OAuth` (not supported as an LLM provider)
+/// - The API key is missing or empty (unless the model starts with `bedrock/`)
 fn create_single_provider(
     config: &Config,
     provider_name: &str,
@@ -96,6 +149,9 @@ fn create_single_provider(
         )));
     }
 
+    // For the "custom" provider name, always supply a default API base if none is
+    // configured (localhost:8000). For all other providers, use the configured base
+    // only if it is non-empty; otherwise let the provider fall back to its own default.
     let api_base = if provider_name == "custom" {
         Some(
             provider_cfg

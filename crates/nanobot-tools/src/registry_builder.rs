@@ -1,3 +1,21 @@
+//! Builder for constructing a [`ToolRegistry`] using the `bon` builder pattern.
+//!
+//! Provides [`ToolRegistryBuilder`], which simplifies registry construction
+//! with optional parameters and sensible defaults. This is the recommended
+//! way to create a [`ToolRegistry`] in application code.
+//!
+//! ## Example
+//!
+//! ```ignore
+//! let registry = ToolRegistryBuilder::new(workspace_path)
+//!     .restrict_to_workspace(true)
+//!     .bus(my_bus)
+//!     .spawn_service(my_spawn_service)
+//!     .cron_service(my_cron_service)
+//!     .custom_tools(vec![Arc::new(MyCustomTool)])
+//!     .build()?;
+//! ```
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,12 +28,35 @@ use nanobot_bus::MessageBus;
 use nanobot_config::{ExecToolConfig, WebToolsConfig};
 use nanobot_cron::CronService;
 
-/// Builder for ToolRegistry.
+/// Builder for constructing a [`ToolRegistry`].
+///
+/// Uses the `bon` crate's builder pattern to provide a clean, typed
+/// construction API with defaults.
 pub struct ToolRegistryBuilder;
 
 #[bon::bon]
 impl ToolRegistryBuilder {
-    /// Builds the ToolRegistry.
+    /// Builds the `ToolRegistry`.
+    ///
+    /// # Required parameter (start_fn)
+    ///
+    /// * `workspace` - Base directory for file operations.
+    ///
+    /// # Optional parameters
+    ///
+    /// * `restrict_to_workspace` (default: `false`) - Restrict file/exec
+    ///   to workspace.
+    /// * `exec_config` (default) - Shell execution configuration.
+    /// * `web_config` (default) - Web search/fetch configuration.
+    /// * `bus` - Message bus for the message tool.
+    /// * `spawn_service` - Service for the spawn tool (subagent spawning).
+    /// * `cron_service` - Service for the cron tool (scheduling).
+    /// * `custom_tools` (default: empty) - Additional [`Tool`] implementations
+    ///   to register.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any custom tool conflicts with a built-in name.
     #[allow(clippy::new_ret_no_self)]
     #[builder(start_fn = new, finish_fn = build)]
     pub fn create(

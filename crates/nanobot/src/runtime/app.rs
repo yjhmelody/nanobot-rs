@@ -1,3 +1,9 @@
+//! Runtime services bundle and bootstrap constructor.
+//!
+//! `RuntimeBundle` holds references to all core services after they have been
+//! wired together. `build_runtime` is the single entry point for assembling
+//! these services from a `Config`.
+
 use std::sync::Arc;
 
 use crate::acp::ACPTool;
@@ -13,24 +19,38 @@ use nanobot_provider::make_provider;
 use nanobot_session::ConsolidationConfig;
 
 /// All runtime services for a running nanobot instance.
+///
+/// Created by [`build_runtime`]. The bundle is `Clone` because individual
+/// fields are `Arc`-wrapped and can be shared across concurrent tasks.
 #[derive(Clone)]
 pub struct RuntimeBundle {
     /// Parsed configuration used to build this runtime.
     pub config: Config,
-    /// Central pub/sub message bus.
+    /// Central pub/sub message bus for inbound/outbound message routing.
     pub bus: MessageBus,
-    /// The main agent reasoning loop.
+    /// The main agent reasoning loop (processes inbound messages).
     pub agent: Arc<AgentLoop>,
-    /// Background cron scheduler.
+    /// Background cron scheduler for timed job execution.
     pub cron: Arc<CronService>,
-    /// Heartbeat service for periodic health checks.
+    /// Heartbeat service for periodic task review and execution.
     pub heartbeat: Arc<HeartbeatService>,
 }
 
-/// Constructs a fully wired `RuntimeBundle` from the given configuration.
+/// Construct a fully wired `RuntimeBundle` from the given configuration.
 ///
-/// Initialises the bus, LLM provider, cron service, heartbeat, tool registry,
-/// and agent loop in dependency order.
+/// Initialises the services in dependency order:
+/// 1. `MessageBus` — message routing backbone.
+/// 2. LLM provider — via `make_provider`.
+/// 3. `CronService` — backed by a JSONL store in the data directory.
+/// 4. `HeartbeatService` — reads `HEARTBEAT.md` from the workspace.
+/// 5. `AgentLoop` — the core reasoning loop with tool registry.
+///
+/// If ACP is configured, an `ACPTool` is injected as a custom tool.
+///
+/// # Errors
+///
+/// Returns a `NanobotError` if the provider cannot be initialised, the
+/// agent loop cannot be built, or data directories cannot be resolved.
 pub async fn build_runtime(config: Config) -> NanobotResult<RuntimeBundle> {
     let bus = MessageBus::new();
     let provider = make_provider(&config)?;

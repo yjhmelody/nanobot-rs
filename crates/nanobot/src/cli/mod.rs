@@ -1,3 +1,35 @@
+//! CLI argument parsing and subcommand dispatch.
+//!
+//! This module defines the command-line interface using `clap` and implements
+//! the handlers for each subcommand:
+//!
+//! | Subcommand | Purpose |
+//! |------------|---------|
+//! | `onboard` | Initialise or refresh config and workspace templates |
+//! | `agent` | Run the agent in interactive (REPL) or one-shot (`--message`) mode |
+//! | `gateway` | Start the gateway service with channels, cron, and heartbeat |
+//! | `status` | Show paths, workspace, and provider configuration |
+//! | `provider` | Manage provider credentials (login, status) |
+//! | `retrieval` | Validate retrieval golden-case JSONL datasets |
+//!
+//! ## Agent Mode
+//!
+//! In interactive mode, the CLI spawns three concurrent tasks:
+//! - Agent loop (processes inbound messages)
+//! - Output listener (prints outbound messages matching the current session)
+//! - Input reader (reads stdin and publishes `InboundMessage` to the bus)
+//!
+//! ## Gateway Mode
+//!
+//! In gateway mode, the CLI additionally starts:
+//! - `ChannelManager` for external messaging channels (Feishu, Slack, etc.)
+//! - `CronService` for scheduled jobs
+//! - `HeartbeatService` for periodic task review
+//!
+//! Wiring between these services is done via handler callbacks
+//! (`GatewayCronJobHandler`, `GatewayHeartbeatExecuteHandler`,
+//! `GatewayHeartbeatNotifyHandler`).
+
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
@@ -28,6 +60,12 @@ use nanobot_config::{
 use nanobot_cron::{CronJob, CronJobHandler, CronResult};
 use nanobot_types::SessionKey;
 
+/// Top-level CLI argument parser.
+///
+/// # Fields
+///
+/// * `config` — Optional path to a non-default config file.
+/// * `command` — The subcommand to execute.
 #[derive(Debug, Parser)]
 #[command(
     name = "nanobot",
@@ -35,53 +73,59 @@ use nanobot_types::SessionKey;
     long_about = "nanobot command-line interface for onboarding, running the agent, and managing providers."
 )]
 pub struct Cli {
-    /// Path to config file (default: ~/.nanobot/config.json).
+    /// Path to config file (default: `~/.nanobot/config.json`).
     #[arg(long, global = true, help = "Path to config file.")]
     pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Commands,
 }
 
+/// Top-level CLI subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(about = "Initialize or refresh config and workspace templates.")]
+    /// Initialize or refresh config and workspace templates.
     #[command(
         long_about = "Create or refresh ~/.nanobot/config.json and ensure workspace templates are present. Use --overwrite to reset to defaults."
     )]
     Onboard(OnboardArgs),
-    #[command(about = "Run the agent in interactive or one-shot mode.")]
+    /// Run the agent in interactive or one-shot mode.
     #[command(
         long_about = "Start an interactive session by default, or run a single prompt with --message."
     )]
     Agent(AgentArgs),
-    #[command(about = "Run the gateway service.")]
+    /// Run the gateway service.
     #[command(
         long_about = "Start the gateway service with the configured channels and heartbeat loop."
     )]
     Gateway(GatewayArgs),
-    #[command(about = "Show status of config, workspace, and providers.")]
+    /// Show status of config, workspace, and providers.
     #[command(long_about = "Print paths and availability checks for config and workspace.")]
     Status,
-    #[command(about = "Manage provider configuration and connectivity checks.")]
+    /// Manage provider configuration and connectivity checks.
     #[command(long_about = "Login to a provider or show provider auth status.")]
     Provider(ProviderArgs),
-    #[command(about = "Evaluate retrieval golden-case fixtures.")]
+    /// Evaluate retrieval golden-case fixtures.
     #[command(
         long_about = "Validate retrieval golden-case JSONL fixtures and print a compact summary."
     )]
     Retrieval(RetrievalArgs),
 }
 
+/// Arguments for the `onboard` subcommand.
 #[derive(Debug, Args)]
 pub struct OnboardArgs {
+    /// Overwrite existing config with defaults (otherwise preserves existing values).
     #[arg(long, help = "Overwrite existing config with defaults.")]
     pub overwrite: bool,
 }
 
+/// Arguments for the `agent` subcommand.
 #[derive(Debug, Args)]
 pub struct AgentArgs {
+    /// Optional single message to process (one-shot mode). If absent, enters interactive mode.
     #[arg(long, short, help = "Send a single message and exit.")]
     pub message: Option<String>,
+    /// Session key in `channel:chat_id` format. Defaults to `"cli:direct"`.
     #[arg(
         long,
         short,
@@ -91,9 +135,11 @@ pub struct AgentArgs {
     pub session: String,
 }
 
+/// Arguments for the `gateway` subcommand.
 #[derive(Debug, Args)]
 pub struct GatewayArgs {
     // TODO: gateway endpoint is not enabled yet; keep for future compatibility.
+    /// Reserved gateway port argument (currently unused).
     #[arg(
         long = "port",
         short,
@@ -104,72 +150,100 @@ pub struct GatewayArgs {
     pub _port: u16,
 }
 
+/// Arguments for the `provider` subcommand (contains sub-subcommands).
 #[derive(Debug, Args)]
 pub struct ProviderArgs {
     #[command(subcommand)]
     pub command: ProviderCommands,
 }
 
+/// Arguments for the `retrieval` subcommand (contains sub-subcommands).
 #[derive(Debug, Args)]
 pub struct RetrievalArgs {
     #[command(subcommand)]
     pub command: RetrievalCommands,
 }
 
+/// Sub-subcommands for retrieval evaluation.
 #[derive(Debug, Subcommand)]
 pub enum RetrievalCommands {
-    #[command(about = "Validate a retrieval golden-case JSONL dataset.")]
+    /// Validate a retrieval golden-case JSONL dataset.
     Eval(RetrievalEvalArgs),
 }
 
+/// Arguments for `retrieval eval`.
 #[derive(Debug, Args)]
 pub struct RetrievalEvalArgs {
+    /// Path to `golden_cases.jsonl`.
     #[arg(long, help = "Path to golden_cases.jsonl.")]
     pub dataset: PathBuf,
 }
 
+/// A single golden case from the retrieval evaluation dataset.
+///
+/// Fields use `camelCase` serialisation to match the JSONL file convention.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RetrievalGoldenCase {
+    /// The query text (must be non-empty).
     query: String,
+    /// Expected source documents that should be retrieved.
     #[serde(default)]
     expected_sources: Vec<String>,
+    /// Expected terms that should appear in the response.
     #[serde(default)]
     expected_terms: Vec<String>,
+    /// Expected citations that should be included.
     #[serde(default)]
     expected_citations: Vec<String>,
 }
 
+/// Sub-subcommands for provider management.
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommands {
-    #[command(about = "Store provider credentials.")]
+    /// Store provider credentials.
     #[command(
         long_about = "Write provider API key into the config file for the selected provider."
     )]
     Login(ProviderLoginArgs),
-    #[command(about = "Show provider auth status.")]
+    /// Show provider auth status.
     #[command(long_about = "Check whether the selected provider has credentials configured.")]
     Status(ProviderStatusArgs),
 }
 
+/// Arguments for `provider login`.
 #[derive(Debug, Args)]
 pub struct ProviderLoginArgs {
+    /// Provider name (e.g., `anthropic`, `openai`, `custom`).
     #[arg(help = "Provider name (e.g., anthropic, openai, custom).")]
     pub provider: String,
+    /// Optional API host override.
     #[arg(long, help = "Optional API host override.")]
     pub host: Option<String>,
+    /// Config directory override.
     #[arg(long = "config-dir", help = "Config directory override.")]
     pub config_dir: Option<PathBuf>,
 }
 
+/// Arguments for `provider status`.
 #[derive(Debug, Args)]
 pub struct ProviderStatusArgs {
+    /// Provider name (e.g., `anthropic`, `openai`, `custom`).
     #[arg(help = "Provider name (e.g., anthropic, openai, custom).")]
     pub provider: String,
+    /// Config directory override.
     #[arg(long = "config-dir", help = "Config directory override.")]
     pub config_dir: Option<PathBuf>,
 }
 
+/// Dispatch the CLI subcommand to its handler.
+///
+/// Parses the `Cli` struct and calls the appropriate handler function based
+/// on the selected subcommand.
+///
+/// # Errors
+///
+/// Returns a `NanobotError` if the subcommand handler fails.
 pub async fn run(cli: Cli) -> NanobotResult<()> {
     let config_path = cli.config.clone();
     match cli.command {
@@ -188,6 +262,7 @@ async fn retrieval(args: RetrievalArgs) -> NanobotResult<()> {
     }
 }
 
+/// Validate a retrieval golden-case JSONL dataset, printing a summary report.
 async fn retrieval_eval(args: RetrievalEvalArgs) -> NanobotResult<()> {
     let content = tokio::fs::read_to_string(&args.dataset)
         .await
@@ -242,6 +317,7 @@ async fn retrieval_eval(args: RetrievalEvalArgs) -> NanobotResult<()> {
     Ok(())
 }
 
+/// Resolve the config file path: use the explicit one or get the default.
 fn resolve_config_path(explicit: Option<PathBuf>) -> ConfigResult<PathBuf> {
     match explicit {
         Some(p) => Ok(p),
@@ -249,6 +325,7 @@ fn resolve_config_path(explicit: Option<PathBuf>) -> ConfigResult<PathBuf> {
     }
 }
 
+/// Handle `onboard` subcommand: create or refresh config and templates.
 async fn onboard(args: OnboardArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
     let config_path = resolve_config_path(config_path)?;
 
@@ -284,6 +361,11 @@ async fn onboard(args: OnboardArgs, config_path: Option<PathBuf>) -> NanobotResu
     Ok(())
 }
 
+/// Handle `agent` subcommand: run in one-shot (`--message`) or interactive (REPL) mode.
+///
+/// In one-shot mode, calls `process_direct` and prints the response.
+/// In interactive mode, spawns three concurrent tasks (agent loop, output
+/// listener, input reader) and shuts down on Ctrl+C or `exit`/`quit`.
 async fn agent(args: AgentArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
     let config = load_config(config_path.as_deref())?;
     tracing::trace!("load config: {:#?}", config);
@@ -394,6 +476,7 @@ async fn agent(args: AgentArgs, config_path: Option<PathBuf>) -> NanobotResult<(
     Ok(())
 }
 
+/// Handle `status` subcommand: print config path, workspace path, and provider info.
 async fn status(config_path: Option<PathBuf>) -> NanobotResult<()> {
     let config_path = resolve_config_path(config_path)?;
     let config = load_config(Some(&config_path))?;
@@ -422,6 +505,7 @@ async fn status(config_path: Option<PathBuf>) -> NanobotResult<()> {
     Ok(())
 }
 
+/// Handle `provider` subcommand: dispatch to login or status.
 async fn provider(args: ProviderArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
     match args.command {
         ProviderCommands::Login(args) => provider_login(args, config_path).await,
@@ -429,6 +513,9 @@ async fn provider(args: ProviderArgs, config_path: Option<PathBuf>) -> NanobotRe
     }
 }
 
+/// Handle `provider login`: store credentials for a supported provider.
+///
+/// Currently only `github_copilot` is supported for this command.
 async fn provider_login(
     args: ProviderLoginArgs,
     config_path: Option<PathBuf>,
@@ -480,6 +567,10 @@ async fn provider_login(
     Ok(())
 }
 
+/// Handle `provider status`: check auth status for a supported provider.
+///
+/// Currently only `github_copilot` is supported. Prints binary path,
+/// version, env token presence, and config directory status.
 async fn provider_status(
     args: ProviderStatusArgs,
     _config_path: Option<PathBuf>,
@@ -542,6 +633,17 @@ async fn provider_status(
     Ok(())
 }
 
+/// Handle `gateway` subcommand: start the gateway service.
+///
+/// Initialises all services (bus, provider, agent, cron, heartbeat, channels),
+/// wires them together via handler callbacks, and runs until Ctrl+C or stdin
+/// EOF. The service hierarchy is:
+///
+/// ```text
+/// Channels → MessageBus → AgentLoop
+/// Cron → AgentLoop
+/// Heartbeat → AgentLoop → MessageBus
+/// ```
 async fn gateway(_args: GatewayArgs, config_path: Option<PathBuf>) -> NanobotResult<()> {
     let config = load_config(config_path.as_deref())?;
     let workspace = get_workspace_path(Some(config.agents.defaults.workspace.as_str())).await?;
@@ -649,6 +751,7 @@ async fn gateway(_args: GatewayArgs, config_path: Option<PathBuf>) -> NanobotRes
     Ok(())
 }
 
+/// Resolve the GitHub Copilot CLI command name from the ACP config or default to `"copilot"`.
 fn copilot_command_name(config: &Config) -> String {
     config
         .acp
@@ -665,6 +768,8 @@ fn copilot_command_name(config: &Config) -> String {
         .unwrap_or_else(|| "copilot".to_string())
 }
 
+/// Resolve the Copilot config directory from explicit override, `$COPILOT_HOME`,
+/// or default to `~/.copilot`.
 fn resolve_copilot_config_dir(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(path) = explicit {
         return path;
@@ -679,6 +784,11 @@ fn resolve_copilot_config_dir(explicit: Option<PathBuf>) -> PathBuf {
         .join(".copilot")
 }
 
+/// Picks an appropriate (channel, chat_id) target from active sessions for
+/// delivering heartbeat or cron notifications.
+///
+/// Prefers the first session that belongs to an enabled channel (excluding
+/// `cli` and `system` channels). Falls back to `("cli", "direct")`.
 #[derive(Clone)]
 struct SessionTargetPicker {
     agent: Arc<AgentLoop>,
@@ -686,6 +796,10 @@ struct SessionTargetPicker {
 }
 
 impl SessionTargetPicker {
+    /// Select the best target (channel, chat_id) for delivering a notification.
+    ///
+    /// Iterates active sessions and returns the first that belongs to an
+    /// enabled external channel. Falls back to `("cli", "direct")`.
     async fn pick_target(&self) -> (String, String) {
         let Ok(sessions) = self.agent.sessions.list_sessions().await else {
             return ("cli".to_string(), "direct".to_string());
@@ -708,6 +822,8 @@ impl SessionTargetPicker {
     }
 }
 
+/// Cron job handler for the gateway: forwards triggered jobs to the agent loop
+/// and optionally publishes the response as an outbound message.
 struct GatewayCronJobHandler {
     agent: Arc<AgentLoop>,
     bus: MessageBus,
@@ -751,6 +867,7 @@ impl CronJobHandler for GatewayCronJobHandler {
     }
 }
 
+/// Heartbeat execute handler for the gateway: runs tasks through the agent loop.
 #[derive(Clone)]
 struct GatewayHeartbeatExecuteHandler {
     agent: Arc<AgentLoop>,
@@ -769,6 +886,7 @@ impl HeartbeatExecuteHandler for GatewayHeartbeatExecuteHandler {
     }
 }
 
+/// Heartbeat notify handler for the gateway: publishes results as outbound messages.
 #[derive(Clone)]
 struct GatewayHeartbeatNotifyHandler {
     bus: MessageBus,
@@ -794,6 +912,9 @@ impl HeartbeatNotifyHandler for GatewayHeartbeatNotifyHandler {
     }
 }
 
+/// Split a `channel:chat_id` session string into its components.
+///
+/// If there is no `:`, defaults the channel to `"cli"`.
 fn split_session(session: &str) -> (String, String) {
     if let Some((channel, chat_id)) = session.split_once(':') {
         (channel.to_string(), chat_id.to_string())
@@ -802,10 +923,12 @@ fn split_session(session: &str) -> (String, String) {
     }
 }
 
+/// Returns `true` if the outbound message targets the given channel and chat ID.
 fn matches_outbound_session(msg: &OutboundMessage, channel: &str, chat_id: &str) -> bool {
     msg.channel == channel && msg.chat_id == chat_id
 }
 
+/// Returns `true` if the input is an exit command (exit, quit, or variants).
 fn is_exit_cmd(input: &str) -> bool {
     matches!(
         input.to_lowercase().as_str(),

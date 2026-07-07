@@ -1,3 +1,32 @@
+//! MCP (Model Context Protocol) server manager and dynamic tool wrapper.
+//!
+//! This module provides the integration layer between the nanobot tool
+//! system and external MCP servers. It manages the lifecycle of MCP
+//! server connections (both stdio and HTTP/Streamable HTTP transports)
+//! and wraps remote tools as local [`Tool`] implementations.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! MCPManager (lifecycle manager)
+//!   └── MCPClientSession (per-server connection)
+//!         └── MCPToolWrapper (per-tool adapter implementing Tool trait)
+//!               └── ToolRegistry (dynamic registration)
+//! ```
+//!
+//! ## Transport types
+//!
+//! - **STDIO**: Spawns a subprocess and communicates via stdin/stdout
+//!   using the JSON-RPC MCP protocol.
+//! - **HTTP/Streamable HTTP**: Connects to a remote MCP server via HTTP,
+//!   supporting optional custom headers and proxy bypass.
+//!
+//! ## Tool naming
+//!
+//! MCP tools are registered with a prefixed name: `mcp_{server}_{tool}`,
+//! e.g., `mcp_alpha_echo`. This prevents naming collisions between
+//! different MCP servers and between MCP and builtin tools.
+
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -25,26 +54,46 @@ use crate::registry::ToolRegistry;
 
 const TARGET: &str = "nanobot::tools";
 
+/// Type alias for a running MCP client.
 type MCPRunningClient = RunningService<RoleClient, ClientInfo>;
 
 /// Manages MCP server lifecycle and dynamic tool registration.
+///
+/// Handles connecting to configured MCP servers (both stdio and HTTP),
+/// listing their available tools, registering them with a [`ToolRegistry`],
+/// and cleaning up on shutdown.
+///
+/// Uses `tokio::sync::Mutex` for internal state because lock operations
+/// cross await points during connection setup and teardown.
 pub struct MCPManager {
+    /// Server configurations, keyed by server name.
     servers: HashMap<String, MCPServerConfig>,
+    /// Shared mutable state: connection status, active sessions, registered tool names.
     state: Mutex<MCPManagerState>,
 }
 
+/// Internal state of the MCP manager.
 #[derive(Default)]
 struct MCPManagerState {
+    /// Current connection lifecycle status.
     connection: ConnectionStatus,
+    /// Active MCP client sessions (one per server).
     sessions: Vec<Arc<MCPClientSession>>,
+    /// Names of tools currently registered in the `ToolRegistry`.
     registered_tools: Vec<String>,
 }
 
+/// Tracks the connection lifecycle of an MCP server.
+///
+/// Prevents concurrent connection attempts via the `Connecting` intermediate state.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
 enum ConnectionStatus {
+    /// No connection established yet.
     #[default]
     Disconnect,
+    /// Connection is active.
     Connected,
+    /// Connection attempt is in progress.
     Connecting,
 }
 
@@ -55,6 +104,11 @@ impl ConnectionStatus {
 }
 
 impl MCPManager {
+    /// Creates a new `MCPManager` with the given server configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `servers` - Map of server names to their configurations.
     pub fn new(servers: HashMap<String, MCPServerConfig>) -> Self {
         Self {
             servers,
@@ -62,6 +116,21 @@ impl MCPManager {
         }
     }
 
+    /// Connects to all configured MCP servers if not already connected.
+    ///
+    /// For each server:
+    /// 1. Connects via the configured transport (stdio or HTTP).
+    /// 2. Lists all available tools.
+    /// 3. Wraps each tool as an [`MCPToolWrapper`] and registers it in the
+    ///    [`ToolRegistry`].
+    ///
+    /// This is idempotent: calling multiple times only connects once. Uses
+    /// a `Connecting` intermediate state to serialize concurrent attempts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any server connection fails hard (individual
+    /// server failures are logged but do not block other servers).
     pub async fn connect_if_needed(&self, registry: &ToolRegistry) -> ToolResult<()> {
         if self.servers.is_empty() {
             return Ok(());
@@ -150,6 +219,11 @@ impl MCPManager {
         Ok(())
     }
 
+    /// Disconnects all MCP servers and unregisters their tools.
+    ///
+    /// Unregisters all dynamic tools from the registry first, then closes
+    /// each session. This ensures the agent loop will not attempt to call
+    /// stale tool references.
     pub async fn close(&self, registry: &ToolRegistry) {
         let (sessions, tool_names) = {
             let mut state = self.state.lock().await;
@@ -169,6 +243,19 @@ impl MCPManager {
     }
 
     /// Reads a resource from a connected MCP server by URI.
+    ///
+    /// MCP resources are addressable content (documents, files, etc.)
+    /// exposed by the server alongside its tools.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_name` - The name of the MCP server.
+    /// * `uri` - The resource URI (e.g., `file:///config.json`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server is not connected or the resource
+    /// cannot be read.
     pub async fn read_resource(&self, server_name: &str, uri: &str) -> ToolResult<String> {
         let session = {
             let state = self.state.lock().await;
@@ -188,12 +275,25 @@ impl MCPManager {
     }
 }
 
+/// Represents a single MCP client connection to a server.
+///
+/// Wraps a [`RunningService`] client from the `rmcp` crate and provides
+/// methods for listing tools, calling tools, reading resources, and
+/// closing the connection.
+///
+/// Uses `tokio::sync::Mutex` to protect the client reference since
+/// operations on it cross await points.
 struct MCPClientSession {
     name: String,
     client: Mutex<Option<MCPRunningClient>>,
 }
 
 impl MCPClientSession {
+    /// Connects to an MCP server using either stdio or HTTP transport.
+    ///
+    /// Transport selection is automatic based on the config:
+    /// - If `command` is set, uses stdio transport (spawns subprocess).
+    /// - Otherwise, uses HTTP/Streamable HTTP transport to `url`.
     async fn connect(name: &str, cfg: &MCPServerConfig) -> ToolResult<Arc<Self>> {
         if !cfg.command.trim().is_empty() {
             Self::connect_stdio(name, cfg).await
@@ -202,6 +302,10 @@ impl MCPClientSession {
         }
     }
 
+    /// Connects to an MCP server via stdio transport.
+    ///
+    /// Spawns the configured command as a child process and communicates
+    /// via stdin/stdout using the JSON-RPC MCP protocol.
     async fn connect_stdio(name: &str, cfg: &MCPServerConfig) -> ToolResult<Arc<Self>> {
         let transport = TokioChildProcess::new(Command::new(&cfg.command).configure(|cmd| {
             cmd.args(&cfg.args);
@@ -229,6 +333,10 @@ impl MCPClientSession {
         }))
     }
 
+    /// Connects to an MCP server via HTTP/Streamable HTTP transport.
+    ///
+    /// Supports custom headers and bypasses the system proxy (uses
+    /// `reqwest::Client::builder().no_proxy()` for direct connections).
     async fn connect_http(name: &str, cfg: &MCPServerConfig) -> ToolResult<Arc<Self>> {
         if cfg.url.trim().is_empty() {
             return Err(ToolError::mcp_server(name, "missing url"));
@@ -256,6 +364,7 @@ impl MCPClientSession {
         }))
     }
 
+    /// Builds the client info payload for the MCP initialization handshake.
     fn client_info() -> ClientInfo {
         let mut info = ClientInfo::default();
         info.protocol_version = ProtocolVersion::V_2024_11_05;
@@ -264,6 +373,7 @@ impl MCPClientSession {
         info
     }
 
+    /// Returns a clone of the underlying MCP peer for making requests.
     async fn peer(&self) -> ToolResult<rmcp::Peer<RoleClient>> {
         let guard = self.client.lock().await;
         let client = guard
@@ -272,6 +382,7 @@ impl MCPClientSession {
         Ok(client.peer().clone())
     }
 
+    /// Lists all tools exposed by the MCP server.
     async fn list_tools(&self) -> ToolResult<Vec<MCPRemoteTool>> {
         let peer = self.peer().await?;
         let tools = peer
@@ -281,6 +392,7 @@ impl MCPClientSession {
         Ok(tools)
     }
 
+    /// Calls a tool on the MCP server.
     async fn call_tool(
         &self,
         name: &str,
@@ -296,6 +408,7 @@ impl MCPClientSession {
         Ok(format_call_tool_result(result))
     }
 
+    /// Reads a resource from the MCP server by URI.
     async fn read_resource(&self, uri: &str) -> ToolResult<String> {
         let peer = self.peer().await?;
         let result = peer
@@ -307,6 +420,7 @@ impl MCPClientSession {
         Ok(format_read_resource_result(result.contents))
     }
 
+    /// Gracefully closes the MCP connection.
     async fn close(&self) {
         let client = {
             let mut guard = self.client.lock().await;
@@ -325,6 +439,13 @@ impl MCPClientSession {
     }
 }
 
+/// Parses a `HashMap<String, String>` of custom headers into validated
+/// HTTP header name/value pairs.
+///
+/// # Errors
+///
+/// Returns a configuration error if any header name or value is invalid
+/// per the HTTP specification.
 fn parse_custom_headers(
     input: &HashMap<String, String>,
 ) -> ToolResult<HashMap<HeaderName, HeaderValue>> {
@@ -340,6 +461,11 @@ fn parse_custom_headers(
     Ok(out)
 }
 
+/// Formats an MCP `CallToolResult` into a plain text string.
+///
+/// Extracts text content blocks, falls back to JSON serialization for
+/// unsupported content types, and handles structured content and empty
+/// results gracefully.
 fn format_call_tool_result(result: CallToolResult) -> String {
     let mut lines = Vec::new();
     for block in result.content {
@@ -365,6 +491,7 @@ fn format_call_tool_result(result: CallToolResult) -> String {
     }
 }
 
+/// Formats MCP resource contents into a plain text string.
 fn format_read_resource_result(contents: Vec<ResourceContents>) -> String {
     let mut lines = Vec::new();
     for content in contents {
@@ -384,6 +511,12 @@ fn format_read_resource_result(contents: Vec<ResourceContents>) -> String {
     }
 }
 
+/// Converts an MCP tool's input schema (as `Option<serde_json::Value>`)
+/// into a [`JsonSchema`] for the local tool definition.
+///
+/// Falls back to an empty object schema if the input schema is `None` or
+/// cannot be parsed, ensuring the tool definition is always valid even
+/// when the remote server provides minimal metadata.
 fn to_tool_schema(input_schema: Option<serde_json::Value>) -> JsonSchema {
     if let Some(v) = input_schema
         && let Ok(parsed) = serde_json::from_value::<JsonSchema>(v)
@@ -393,6 +526,12 @@ fn to_tool_schema(input_schema: Option<serde_json::Value>) -> JsonSchema {
     JsonSchema::object(BTreeMap::new(), Vec::new())
 }
 
+/// Adapter that wraps a remote MCP tool as a local [`Tool`] implementation.
+///
+/// Each registered MCP tool gets its own `MCPToolWrapper` instance that:
+/// - Translates local tool execution calls to MCP `tools/call` requests.
+/// - Applies a configurable timeout to prevent hanging the agent loop.
+/// - Formats the remote result for the local result channel.
 pub struct MCPToolWrapper {
     session: Arc<MCPClientSession>,
     original_name: String,
@@ -403,6 +542,10 @@ pub struct MCPToolWrapper {
 }
 
 impl MCPToolWrapper {
+    /// Creates a new `MCPToolWrapper`.
+    ///
+    /// The wrapper's local name is prefixed with `mcp_{server}_` to avoid
+    /// collisions with other tools (e.g., `mcp_github_search_code`).
     fn new(
         session: Arc<MCPClientSession>,
         server_name: &str,
@@ -426,6 +569,9 @@ impl MCPToolWrapper {
     }
 }
 
+/// Generates a unique tool name for an MCP tool.
+///
+/// Format: `mcp_{server_name}_{tool_name}`
 fn mcp_tool_name(server_name: &str, tool_name: &str) -> String {
     format!("mcp_{}_{}", server_name, tool_name)
 }
@@ -459,6 +605,7 @@ impl Tool for MCPToolWrapper {
             }
         };
 
+        // Apply per-tool timeout to prevent slow MCP calls from hanging.
         match tokio::time::timeout(
             std::time::Duration::from_secs(self.tool_timeout),
             self.session.call_tool(&self.original_name, args_obj),

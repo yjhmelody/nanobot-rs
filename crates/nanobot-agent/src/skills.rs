@@ -1,3 +1,24 @@
+//! File-based skills loader with progressive disclosure.
+//!
+//! [`SkillsLoader`] discovers skills stored as subdirectories under the
+//! workspace's `skills/` directory. Each skill directory must contain a
+//! `SKILL.md` file with optional YAML-like frontmatter describing the
+//! skill's name, description, requirements, and whether it should be
+//! always-loaded.
+//!
+//! # Design Notes
+//!
+//! - **Progressive disclosure**: Skills are listed as a condensed XML
+//!   `<skills>` block rather than injecting full content. Only skills
+//!   marked `always: true` have their full content loaded into the system
+//!   prompt.
+//! - **Requirement checking**: Each skill can declare required CLI binaries
+//!   and environment variables. Skills with unmet requirements are flagged
+//!   as `available="false"` so the agent can try to install them.
+//! - **Frontmatter parsing**: A simple key-value parser is used (no YAML
+//!   dependency). The special `metadata` key can hold a JSON blob with
+//!   more structured [`SkillMeta`] fields.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -7,26 +28,41 @@ use crate::traits::SkillsProvider;
 use nanobot_types::agent::{SkillMeta, SkillMetaNode};
 
 /// Information about a skill without loading its full content.
+///
+/// Returned by [`SkillsLoader::list_skills`] to allow the system prompt
+/// builder to decide which skills to expand.
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
+    /// The skill's name (directory name).
     pub name: String,
+    /// Full path to the skill's `SKILL.md` file.
     pub path: PathBuf,
+    /// Origin label (always `"workspace"` for file-based skills).
     pub source: String,
 }
 
-/// File-based skills loader that implements progressive disclosure.
+/// Discovers and loads skills from the workspace `skills/` directory.
+///
+/// Each skill is a subdirectory containing a `SKILL.md` file with optional
+/// frontmatter.
 #[derive(Debug, Clone)]
 pub struct SkillsLoader {
     workspace_skills: PathBuf,
 }
 
 impl SkillsLoader {
+    /// Creates a new `SkillsLoader` pointing at the given workspace.
     pub fn new(workspace: &Path) -> Self {
         Self {
             workspace_skills: workspace.join("skills"),
         }
     }
 
+    /// Lists all available skills by scanning the `skills/` directory.
+    ///
+    /// Each subdirectory containing a `SKILL.md` file is considered a skill.
+    /// If `filter_unavailable` is `true`, skills whose requirements are not
+    /// met are excluded from the result.
     pub async fn list_skills(&self, filter_unavailable: bool) -> Vec<SkillInfo> {
         let mut skills = Vec::new();
 
@@ -80,6 +116,9 @@ impl SkillsLoader {
         }
     }
 
+    /// Loads the full content of a skill's `SKILL.md` file.
+    ///
+    /// Returns `None` if the skill does not exist or cannot be read.
     pub async fn load_skill(&self, name: &str) -> Option<String> {
         let workspace = self.workspace_skills.join(name).join("SKILL.md");
         if tokio::fs::try_exists(&workspace).await.unwrap_or(false) {
@@ -88,6 +127,10 @@ impl SkillsLoader {
         None
     }
 
+    /// Returns the names of all skills marked as `always: true`.
+    ///
+    /// These skills are loaded directly into the system prompt rather than
+    /// being listed in the summary block.
     pub async fn get_always_skills(&self) -> Vec<String> {
         let mut always_skills = Vec::new();
 
@@ -117,6 +160,8 @@ impl SkillsLoader {
         always_skills
     }
 
+    /// Loads the full content of the given skills and formats them for
+    /// injection into the system prompt.
     pub async fn load_skills_for_context(&self, skill_names: &[String]) -> String {
         let mut parts = Vec::new();
         for name in skill_names {
@@ -131,6 +176,11 @@ impl SkillsLoader {
         parts.join("\n\n---\n\n")
     }
 
+    /// Builds a condensed XML `<skills>` summary of all available skills.
+    ///
+    /// Each skill entry includes its name, description, location, and
+    /// whether it is available (requirements met). Unavailable skills get
+    /// a `<requires>` element listing missing dependencies.
     pub async fn build_skills_summary(&self) -> String {
         let all = self.list_skills(false).await;
         if all.is_empty() {
@@ -177,6 +227,7 @@ impl SkillsLoader {
         lines.join("\n")
     }
 
+    /// Parses the `metadata` frontmatter field into a [`SkillMeta`].
     async fn get_skill_meta(&self, name: &str) -> SkillMeta {
         let frontmatter = self.get_skill_metadata(name).await;
         let raw = frontmatter
@@ -185,11 +236,13 @@ impl SkillsLoader {
         self.parse_skill_meta(&raw)
     }
 
+    /// Parses a JSON string into a [`SkillMeta`], normalising legacy formats.
     fn parse_skill_meta(&self, raw: &str) -> SkillMeta {
         let node = serde_json::from_str::<SkillMetaNode>(raw).unwrap_or_default();
         node.normalize()
     }
 
+    /// Returns `true` if all required CLI bins and env vars are present.
     fn check_requirements(&self, skill_meta: &SkillMeta) -> bool {
         let bins_ok = skill_meta
             .requires
@@ -206,6 +259,7 @@ impl SkillsLoader {
         bins_ok && env_ok
     }
 
+    /// Returns a list of missing requirement descriptions for display.
     fn missing_requirements(&self, skill_meta: &SkillMeta) -> Vec<String> {
         let mut missing = Vec::new();
 
@@ -224,6 +278,7 @@ impl SkillsLoader {
         missing
     }
 
+    /// Extracts the frontmatter key-value pairs from the skill's content.
     async fn get_skill_metadata(&self, name: &str) -> Option<HashMap<String, String>> {
         let content = self.load_skill(name).await?;
         parse_frontmatter(&content)
@@ -253,6 +308,10 @@ impl SkillsProvider for SkillsLoader {
     }
 }
 
+/// Parses YAML-like frontmatter between `---` delimiters.
+///
+/// Only simple `key: value` pairs are supported. Returns `None` if no
+/// frontmatter block is found.
 fn parse_frontmatter(content: &str) -> Option<HashMap<String, String>> {
     if !content.starts_with("---") {
         return None;
@@ -277,6 +336,8 @@ fn parse_frontmatter(content: &str) -> Option<HashMap<String, String>> {
     Some(meta)
 }
 
+/// Strips the frontmatter block from a skill's content so only the
+/// Markdown body remains.
 fn strip_frontmatter(content: &str) -> String {
     if !content.starts_with("---") {
         return content.to_string();
@@ -287,6 +348,7 @@ fn strip_frontmatter(content: &str) -> String {
     it.next().unwrap_or(content).trim().to_string()
 }
 
+/// Escapes a string for safe inclusion in XML output.
 fn xml_escape(input: &str) -> String {
     input
         .replace('&', "&amp;")

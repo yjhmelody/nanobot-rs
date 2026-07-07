@@ -1,3 +1,37 @@
+//! Type definitions for OpenAI-compatible API wire formats.
+//!
+//! This module contains request and response types for two OpenAI wire protocols:
+//!
+//! ## Responses API (`/v1/responses`)
+//!
+//! The newer API with a flat output structure. Key types:
+//! - [`ResponsesPayload`] / [`OpenAIResponsesResponse`] — request/response payloads
+//! - [`ResponseInputItem`] — input items (messages, function calls, function outputs)
+//! - [`ResponseOutputBlock`] — output blocks (Message, FunctionCall, Reasoning)
+//! - [`ResponsesStreamEvent`] — streaming event types
+//!
+//! ## Chat Completions API (`/v1/chat/completions`)
+//!
+//! The legacy API with nested tool call structures. Key types:
+//! - [`ChatCompletionsPayload`] / [`ChatCompletionsResponse`] — request/response payloads
+//! - [`ChatCompletionsRequestMessage`] — message with role/content/tool_calls
+//! - [`ChatCompletionsResponseContent`] — content that can be plain text or a block array
+//!
+//! # Spec References
+//!
+//! - Responses API: <https://platform.openai.com/docs/api-reference/responses>
+//! - Responses Streaming: <https://platform.openai.com/docs/guides/streaming-responses>
+//! - Chat Completions: <https://platform.openai.com/docs/api-reference/chat>
+//! - Function Calling: <https://platform.openai.com/docs/guides/function-calling>
+//!
+//! # Notes
+//!
+//! - Streaming event types use `#[serde(other)]` on `Unknown` variants to handle new
+//!   event types gracefully.
+//! - The `#[serde(untagged)]` and `#[serde(rename_all = "snake_case")` attributes are
+//!   used extensively to match the exact JSON structure expected by the API.
+//! - All types are `pub(crate)` — internal to the provider crate.
+
 use serde::{Deserialize, Serialize};
 
 use nanobot_types::tools::{JsonSchema, ToolDefinition};

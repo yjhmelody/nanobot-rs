@@ -1,3 +1,16 @@
+//! Typed tool name representation that distinguishes built-in from dynamic tools.
+//!
+//! [`ToolName`] is an enum that captures whether a tool was defined at compile time
+//! (built-in) or registered at runtime (dynamic, such as MCP tools). This distinction
+//! enables compile-time checks against known tool names while still supporting
+//! arbitrary tool names from external sources.
+//!
+//! # Note
+//!
+//! This type is marked with a `TODO: unused now` comment in the codebase; it may
+//! be a candidate for removal if the dynamic tool path no longer needs it. However,
+//! it remains `pub` for external consumers that may still reference it.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -56,8 +69,13 @@ impl From<BuiltinTool> for ToolName {
 }
 
 impl From<String> for ToolName {
+    /// Converts a string into a `ToolName`, attempting to parse it as a built-in tool first.
+    ///
+    /// If the string matches one of [`BuiltinTool`]'s names (via `FromStr`), the result
+    /// is `ToolName::Builtin`. Otherwise, it is `ToolName::Dynamic`.
     fn from(name: String) -> Self {
-        // Try to parse as builtin first
+        // Try to parse as builtin first so that known tool names always resolve to
+        // the Builtin variant, enabling compile-time name checks downstream.
         if let Ok(tool) = name.parse::<BuiltinTool>() {
             Self::Builtin(tool)
         } else {
@@ -78,6 +96,9 @@ impl fmt::Display for ToolName {
     }
 }
 
+// Manual Serialize impl needed because ToolName is an enum that serializes as a plain
+// string (not a tagged or externally-tagged enum). This keeps the serialized form
+// compatible with both built-in and dynamic names.
 impl Serialize for ToolName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

@@ -1,16 +1,69 @@
+//! History transformer implementations.
+//!
+//! This module provides concrete implementations of the [`HistoryTransformer`]
+//! trait for pre-LLM message pipeline transforms:
+//!
+//! - [`SensitiveDataFilter`]: Redacts PII (email addresses, SSNs, credit card
+//!   numbers) before messages reach the LLM.
+//! - [`MetadataAnnotator`]: Inserts a system message at the start of the
+//!   history with session metadata for context.
+//!
+//! # Pipeline order
+//!
+//! These transformers are applied in registration order by `SessionManager`.
+//! Typically `SensitiveDataFilter` should come first (to redact before any
+//! annotation is added), then `MetadataAnnotator` to prepend the context.
+//!
+//! [`HistoryTransformer`]: crate::traits::HistoryTransformer
+//! [`SessionManager`]: crate::session_manager::SessionManager
+
 use crate::SessionResult;
 use async_trait::async_trait;
 
 use super::traits::HistoryTransformer;
 use super::types::Session;
 use nanobot_provider::ChatMessage;
-/// Example: Transformer that filters out sensitive information.
+
+/// A [`HistoryTransformer`] that redacts sensitive information from messages.
+///
+/// Currently patches the following patterns with `[REDACTED]`:
+/// - Email addresses
+/// - US Social Security Numbers (SSN)
+/// - Credit card numbers
+///
+/// # Limitations
+///
+/// - Regex-based matching may produce false positives or negatives. For
+///   stronger guarantees, consider a dedicated PII detection service.
+/// - Only text content is filtered; structured content (tool results) is
+///   passed through unchanged.
+///
+/// # Example
+///
+/// ```ignore
+/// let filter = SensitiveDataFilter::new()?;
+/// let manager = SessionManager::new(store)
+///     .add_transformer(Box::new(filter));
+/// ```
 pub struct SensitiveDataFilter {
+    /// Compiled regex patterns for PII detection.
     patterns: Vec<regex::Regex>,
+    /// Replacement string applied to all matches.
     replacement: String,
 }
 
 impl SensitiveDataFilter {
+    /// Creates a new filter with default PII patterns.
+    ///
+    /// Patterns:
+    /// - Email: `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`
+    /// - SSN: `\b\d{3}-\d{2}-\d{4}\b`
+    /// - Credit card: `\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`
+    ///
+    /// # Errors
+    ///
+    /// Returns `SessionError::Regex` if any of the default patterns fail to
+    /// compile (should not happen with the built-in patterns).
     pub fn new() -> SessionResult<Self> {
         Ok(Self {
             patterns: vec![
@@ -22,6 +75,7 @@ impl SensitiveDataFilter {
         })
     }
 
+    /// Applies all regex patterns to a text string.
     fn filter_text(&self, text: &str) -> String {
         let mut result = text.to_string();
         for pattern in &self.patterns {
@@ -35,6 +89,10 @@ impl SensitiveDataFilter {
 
 #[async_trait]
 impl HistoryTransformer for SensitiveDataFilter {
+    /// Filters sensitive data from each message's text content.
+    ///
+    /// Non-text `MessageContent` variants (e.g., tool results) are passed
+    /// through unchanged.
     async fn transform(
         &self,
         messages: Vec<ChatMessage>,
@@ -58,12 +116,32 @@ impl HistoryTransformer for SensitiveDataFilter {
     }
 }
 
-/// Example: Transformer that adds metadata annotations.
+/// A [`HistoryTransformer`] that prepends a system message with session
+/// metadata.
+///
+/// The annotation includes the session key, total message count, and a
+/// configurable custom string. This can be useful for debugging or for
+/// providing session-level context to the LLM.
+///
+/// # Example
+///
+/// ```ignore
+/// let annotator = MetadataAnnotator::new("production");
+/// let manager = SessionManager::new(store)
+///     .add_transformer(Box::new(annotator));
+/// ```
 pub struct MetadataAnnotator {
+    /// Custom annotation string included in the metadata message.
     annotation: String,
 }
 
 impl MetadataAnnotator {
+    /// Creates a new metadata annotator.
+    ///
+    /// # Arguments
+    ///
+    /// * `annotation` - A custom string included in the metadata message
+    ///   (e.g., environment name, channel name).
     pub fn new(annotation: impl Into<String>) -> Self {
         Self {
             annotation: annotation.into(),
@@ -73,6 +151,10 @@ impl MetadataAnnotator {
 
 #[async_trait]
 impl HistoryTransformer for MetadataAnnotator {
+    /// Prepends a system message with session metadata.
+    ///
+    /// The injected message has the format:
+    /// `[Session: <key> | Messages: <count> | <annotation>]`
     async fn transform(
         &self,
         mut messages: Vec<ChatMessage>,

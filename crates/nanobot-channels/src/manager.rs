@@ -1,3 +1,31 @@
+//! Channel lifecycle manager: builds adapter instances, validates config,
+//! and runs the outbound message dispatcher.
+//!
+//! # Overview
+//!
+//! [`ChannelManager`] is the central orchestrator for all channel adapters.
+//! It performs four roles:
+//!
+//! 1. **Construction** — Reads [`ChannelsConfig`], creates adapter instances
+//!    for each enabled channel (including the always-present CLI channel),
+//!    validates their allow-from rules, and merges per-instance runtime
+//!    settings with channel defaults.
+//! 2. **Lifecycle** — [`start_all`](ChannelManager::start_all) launches
+//!    every adapter's background listener and the shared outbound dispatcher
+//!    task.  [`stop_all`](ChannelManager::stop_all) tears everything down.
+//! 3. **Outbound routing** — The dispatcher listens on the shared
+//!    [`MessageBus`] outbound channel, applies runtime filters (progress /
+//!    tool-hint suppression), and delegates each message to the correct
+//!    adapter via `dispatch_outbound`, which also handles streaming edits.
+//! 4. **Introspection** — [`enabled_channels`](ChannelManager::enabled_channels)
+//!    and [`status`](ChannelManager::status) provide runtime visibility.
+//!
+//! # Thread Safety
+//!
+//! The dispatch task is stored inside a `tokio::sync::Mutex` because it
+//! is written once at startup and read during shutdown — both are rare
+//! operations that cross `.await` points (not hot paths).
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,14 +46,23 @@ use nanobot_config::schema::{ChannelDefaults, ChannelInstanceConfig, ChannelsCon
 const LOG_TARGET: &str = "nanobot::channels::manager";
 
 /// Per-instance resolved runtime settings (defaults merged with overrides).
+///
+/// Each channel instance can override the global defaults for progress
+/// messages, tool-hint visibility, usage summaries, and streaming behavior.
 #[derive(Debug, Clone)]
 pub struct InstanceRuntimeConfig {
+    /// Whether to deliver progress messages (e.g. "thinking...").
     pub send_progress: bool,
+    /// Whether to deliver tool-hint messages.
     pub send_tool_hints: bool,
+    /// Whether to deliver usage summary messages.
     pub send_usage_summary: bool,
+    /// How streaming updates should be delivered.
     pub stream_mode: StreamMode,
 }
 
+/// Merges per-instance config overrides into the global defaults, producing
+/// a resolved [`InstanceRuntimeConfig`] for one channel instance.
 fn resolve_runtime(
     cfg: &ChannelInstanceConfig,
     defaults: &ChannelDefaults,
@@ -52,6 +89,11 @@ fn resolve_runtime(
     }
 }
 
+/// Central orchestrator for all channel adapters.
+///
+/// Owns the adapter instances, their runtime configs, and the outbound
+/// dispatcher task handle.  Constructed once at startup and typically
+/// wrapped in an `Arc` for shared access.
 pub struct ChannelManager {
     bus: MessageBus,
     channels: HashMap<String, Arc<dyn ChannelAdapter>>,
@@ -60,12 +102,24 @@ pub struct ChannelManager {
 }
 
 impl ChannelManager {
+    /// Build a new `ChannelManager` from configuration.
+    ///
+    /// This validates all enabled channel configurations and constructs
+    /// their adapters, but does **not** start any listeners or the
+    /// dispatcher task (use [`start_all`](ChannelManager::start_all) for that).
+    ///
+    /// # Errors
+    /// Returns [`ChannelError::Config`] if any enabled channel has an invalid
+    /// allow-from list, missing credentials, or an incompatible configuration
+    /// (e.g. Feishu app_id without app_secret).
     pub fn new(config: ChannelsConfig, bus: MessageBus) -> ChannelResult<Self> {
         let mut channels: HashMap<String, Arc<dyn ChannelAdapter>> = HashMap::new();
         let mut runtime_configs: HashMap<String, InstanceRuntimeConfig> = HashMap::new();
 
+        // The CLI channel is always available.
         channels.insert("cli".to_string(), Arc::new(CliChannel::new()));
 
+        // Build adapters for each explicitly configured channel instance.
         for (name, instance_cfg) in &config.instances {
             if !instance_cfg.enabled() {
                 continue;
@@ -85,7 +139,19 @@ impl ChannelManager {
         })
     }
 
+    /// Start all channel adapters and the outbound dispatcher.
+    ///
+    /// For each adapter, calls [`ChannelAdapter::start`] (which begins
+    /// inbound listening). Then spawns a long-lived background task that
+    /// subscribes to the outbound message channel on [`MessageBus`] and
+    /// routes each message to the appropriate adapter.
+    ///
+    /// # Errors
+    /// Errors from individual adapters are logged but do not abort the
+    /// overall startup.  Returns `Ok` as long as the dispatcher task
+    /// was spawned successfully.
     pub async fn start_all(&self) -> ChannelResult<()> {
+        // Start each adapter's inbound listener.
         for (name, ch) in &self.channels {
             if let Err(err) = ch.start().await {
                 error!(
@@ -101,9 +167,11 @@ impl ChannelManager {
         let channels = self.channels.clone();
         let runtime_configs = self.runtime_configs.clone();
 
+        // Outbound dispatcher: runs forever until the manager is stopped.
         let handle = tokio::spawn(async move {
             info!(target: LOG_TARGET, "outbound dispatcher started");
             let mut outbound_rx = bus.subscribe_outbound();
+            // Maps (channel:chat_id:stream_id) -> platform message_id for streaming edits.
             let mut stream_registry: HashMap<String, String> = HashMap::new();
             loop {
                 let Ok(msg) = outbound_rx.recv().await else {
@@ -111,7 +179,7 @@ impl ChannelManager {
                 };
                 let channel_name = &msg.channel;
 
-                // Look up per-instance runtime config, fall back to defaults for CLI
+                // Per-instance runtime config controls filtering of progress / tool-hints.
                 if let Some(runtime) = runtime_configs.get(channel_name)
                     && !should_deliver(&msg, runtime.send_progress, runtime.send_tool_hints)
                 {
@@ -143,10 +211,16 @@ impl ChannelManager {
         Ok(())
     }
 
+    /// Stop all channel adapters and abort the outbound dispatcher.
+    ///
+    /// Signals each adapter to stop, then aborts the dispatcher task.
+    /// Adapter stop errors are logged but do not abort the process.
     pub async fn stop_all(&self) {
+        // Abort the outbound dispatcher first.
         if let Some(task) = self.dispatch_task.lock().await.take() {
             task.abort();
         }
+        // Then stop each adapter.
         for (name, ch) in &self.channels {
             if let Err(err) = ch.stop().await {
                 error!(
@@ -159,10 +233,12 @@ impl ChannelManager {
         }
     }
 
+    /// Returns the list of enabled channel names.
     pub fn enabled_channels(&self) -> Vec<String> {
         self.channels.keys().cloned().collect()
     }
 
+    /// Returns the runtime status (running / stopped) of each channel.
     pub fn status(&self) -> HashMap<String, bool> {
         self.channels
             .iter()
@@ -171,6 +247,12 @@ impl ChannelManager {
     }
 }
 
+/// Validates the allow-from list for a channel instance.
+///
+/// Rules:
+/// - Must not be empty (that would deny all senders).
+/// - Each entry must be non-empty and free of leading/trailing whitespace.
+/// - `"*"` (wildcard) must not appear alongside explicit IDs.
 fn validate_allow_from(name: &str, cfg: &ChannelInstanceConfig) -> ChannelResult<()> {
     let allow_from = cfg.allow_from();
     if allow_from.is_empty() {
@@ -214,6 +296,10 @@ fn validate_allow_from(name: &str, cfg: &ChannelInstanceConfig) -> ChannelResult
     Ok(())
 }
 
+/// Decides whether a particular outbound message should be delivered
+/// based on runtime settings for progress and tool-hint suppression.
+///
+/// Messages without a `message_id` (plain responses) are always delivered.
 fn should_deliver(msg: &OutboundMessage, send_progress: bool, send_tool_hints: bool) -> bool {
     let Some(message_id) = msg.metadata.message_id.as_ref() else {
         return true;
@@ -227,6 +313,11 @@ fn should_deliver(msg: &OutboundMessage, send_progress: bool, send_tool_hints: b
     true
 }
 
+/// Constructs the appropriate adapter for a channel instance config.
+///
+/// Feature-gated: the Telegram adapter is only available with
+/// `channel-telegram`, and the Feishu adapter with `channel-feishu`.
+/// The returned error message tells the user which feature flag is missing.
 fn build_adapter(
     name: String,
     cfg: ChannelInstanceConfig,
@@ -262,6 +353,21 @@ fn build_adapter(
     }
 }
 
+/// Routes a single outbound message to a channel adapter, handling streaming.
+///
+/// Streaming logic (when `stream_mode != Append` and the message has a
+/// `stream_id`):
+/// - If we already have a message_id for this stream, call `update` (or
+///   fall back to `send` if the adapter doesn't support updates).
+/// - If this is the first progress message and the adapter supports updates,
+///   call `begin_stream` to create a placeholder, then register the returned
+///   message_id.
+/// - In `UpdateProgress` mode, only progress messages update the placeholder;
+///   final messages are sent as new messages (removing the stream from the
+///   registry).
+///
+/// Non-streaming messages (tool hints, plain responses) are always sent
+/// directly via `channel.send`.
 async fn dispatch_outbound(
     channel: &dyn ChannelAdapter,
     stream_registry: &mut HashMap<String, String>,
@@ -290,6 +396,7 @@ async fn dispatch_outbound(
         if let Some(message_id) = stream_registry.get(&key).cloned() {
             if channel.supports_stream_updates() {
                 if stream_mode == StreamMode::UpdateProgress && !is_progress {
+                    // Final message in UpdateProgress mode: send as new.
                     stream_registry.remove(&key);
                     let _ = channel.send(msg).await?;
                     return Ok(());

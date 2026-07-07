@@ -1,4 +1,30 @@
-//! ACP client-side handler implementation for local runtime integration.
+//! Local ACP client-side handler implementation.
+//!
+//! `SimpleClient` implements the `agent_client_protocol::Client` trait,
+//! providing the local runtime that handles filesystem reads/writes,
+//! terminal process lifecycle, session notification buffering, and
+//! permission auto-approval for ACP agents.
+//!
+//! ## Capabilities
+//!
+//! By default `SimpleClient` advertises both filesystem and terminal
+//! capabilities to the ACP agent. A `prompt_only` mode disables both,
+//! restricting the agent to text generation.
+//!
+//! ## Session Buffering
+//!
+//! Each ACP turn accumulates agent output (message chunks, tool calls,
+//! plans) into a session-specific string buffer. The buffer is created
+//! by `begin_turn`, appended to by `session_notification`, and drained
+//! by `take_turn_output`. Progress snapshots are available via
+//! `turn_snapshot` for logging during long-running turns.
+//!
+//! ## Terminal Management
+//!
+//! The client tracks spawned terminal processes by `TerminalId`. Each
+//! terminal has a background reader task that captures stdout/stderr
+//! into an output buffer. Output can be truncated from the start if a
+//! byte limit is configured.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,6 +47,19 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+/// A local ACP client handler that provides filesystem, terminal, and
+/// session buffering capabilities.
+///
+/// `SimpleClient` implements the `agent_client_protocol::Client` trait which
+/// the ACP `ClientSideConnection` calls to fulfil agent requests. It is
+/// thread-safe via `Arc<Mutex<SimpleClientState>>` and is `Clone` for
+/// sharing across concurrent ACP sessions.
+///
+/// # Fields
+///
+/// * `state` — Shared mutable state: session buffers, turn metadata, terminals.
+/// * `allow_fs` — Whether filesystem capabilities are advertised.
+/// * `allow_terminal` — Whether terminal capabilities are advertised.
 #[derive(Clone)]
 pub struct SimpleClient {
     state: Arc<Mutex<SimpleClientState>>,
@@ -28,25 +67,41 @@ pub struct SimpleClient {
     allow_terminal: bool,
 }
 
+/// Snapshot of an in-progress ACP turn for logging progress.
 #[derive(Debug, Clone)]
 pub struct TurnSnapshot {
+    /// Seconds elapsed since `begin_turn`.
     pub elapsed_secs: u64,
+    /// Seconds since the last session update.
     pub idle_secs: u64,
+    /// Number of `SessionUpdate` notifications received this turn.
     pub updates_count: usize,
+    /// Current size of the buffered output (in bytes).
     pub buffer_bytes: usize,
+    /// Kind of the most recent session update (e.g., "agent_message_chunk").
     pub last_update_kind: Option<&'static str>,
 }
 
 impl SimpleClient {
+    /// Create a new `SimpleClient` with full filesystem and terminal capabilities.
+    ///
+    /// # Arguments
+    ///
+    /// * `default_cwd` — Default working directory for spawned terminal processes.
     pub fn new(default_cwd: PathBuf) -> Self {
         Self::with_permissions(default_cwd, true, true)
     }
 
+    /// Create a `SimpleClient` restricted to text-only prompts.
+    ///
+    /// No filesystem or terminal capabilities are advertised, so the ACP
+    /// agent will only be able to produce text output.
     #[allow(unused)]
     pub fn prompt_only(default_cwd: PathBuf) -> Self {
         Self::with_permissions(default_cwd, false, false)
     }
 
+    /// Internal constructor with explicit permission flags.
     fn with_permissions(default_cwd: PathBuf, allow_fs: bool, allow_terminal: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(SimpleClientState::new(default_cwd))),
@@ -55,6 +110,10 @@ impl SimpleClient {
         }
     }
 
+    /// Build the `ClientCapabilities` struct to advertise during ACP initialisation.
+    ///
+    /// The capabilities reflect the `allow_fs` and `allow_terminal` flags
+    /// set at construction time.
     pub fn capabilities(&self) -> ClientCapabilities {
         let capabilities = ClientCapabilities::new();
         let capabilities = if self.allow_fs {
@@ -68,6 +127,10 @@ impl SimpleClient {
         capabilities.terminal(self.allow_terminal)
     }
 
+    /// Initialise a new turn for the given session.
+    ///
+    /// Creates an empty output buffer and records the start time. Must be
+    /// called before `take_turn_output`.
     pub async fn begin_turn(&self, session_id: &SessionId) {
         let mut state = self.state.lock().await;
         state
@@ -84,6 +147,15 @@ impl SimpleClient {
         );
     }
 
+    /// Finalise the turn and return the accumulated agent output.
+    ///
+    /// Removes and returns the session buffer. If the buffer is empty,
+    /// returns a descriptive string like `"(ACP turn finished: end_turn)"`.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` — The session whose output to take.
+    /// * `stop_reason` — The reason the agent finished (used for the fallback string).
     pub async fn take_turn_output(
         &self,
         session_id: &SessionId,
@@ -104,6 +176,9 @@ impl SimpleClient {
         }
     }
 
+    /// Return a `TurnSnapshot` for the given session, or `None` if no turn is active.
+    ///
+    /// Used by `ACPActor` for periodic progress logging during long-running prompts.
     pub async fn turn_snapshot(&self, session_id: &SessionId) -> Option<TurnSnapshot> {
         let state = self.state.lock().await;
         let meta = state.session_turn_meta.get(session_id)?;
@@ -121,6 +196,9 @@ impl SimpleClient {
         })
     }
 
+    /// Kill and clean up all tracked terminal processes.
+    ///
+    /// Drains the terminal map and attempts to kill each child process.
     pub async fn close_all_terminals(&self) {
         let entries = {
             let mut state = self.state.lock().await;
@@ -134,8 +212,16 @@ impl SimpleClient {
     }
 }
 
+/// ACP `Client` trait implementation.
+///
+/// The `?Send` marker is required by the ACP SDK because the connection
+/// object is not `Send`.
 #[async_trait::async_trait(?Send)]
 impl Client for SimpleClient {
+    /// Auto-approve the first permission option (or cancel if none available).
+    ///
+    /// This means the ACP agent's permission requests are always granted
+    /// by default — appropriate for a trusted local agent.
     async fn request_permission(
         &self,
         args: RequestPermissionRequest,
@@ -151,12 +237,16 @@ impl Client for SimpleClient {
         Ok(RequestPermissionResponse::new(outcome))
     }
 
+    /// Record a session update notification into the turn buffer.
+    ///
+    /// Handles agent message chunks, tool calls/updates, and plan entries.
     async fn session_notification(&self, args: SessionNotification) -> Result<()> {
         let mut state = self.state.lock().await;
         state.record_session_update(args);
         Ok(())
     }
 
+    /// Write text content to a file (creating parent directories if needed).
     async fn write_text_file(&self, args: WriteTextFileRequest) -> Result<WriteTextFileResponse> {
         if let Some(parent) = args.path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -170,6 +260,12 @@ impl Client for SimpleClient {
         Ok(WriteTextFileResponse::new())
     }
 
+    /// Read text content from a file, with optional line-range slicing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `ResourceNotFound` error if the file does not exist.
+    /// Returns an `InvalidParams` error if `line` is 0 (lines are 1-based).
     async fn read_text_file(&self, args: ReadTextFileRequest) -> Result<ReadTextFileResponse> {
         let content = tokio::fs::read_to_string(&args.path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
@@ -179,6 +275,7 @@ impl Client for SimpleClient {
             }
         })?;
 
+        // Lines are 1-based per the ACP spec.
         if let Some(line) = args.line
             && line == 0
         {
@@ -191,6 +288,10 @@ impl Client for SimpleClient {
         Ok(ReadTextFileResponse::new(sliced))
     }
 
+    /// Create a terminal (subprocess) with the given command and environment.
+    ///
+    /// Spawns the process, captures stdout/stderr via background reader
+    /// tasks, and returns a `TerminalId` for subsequent operations.
     async fn create_terminal(&self, args: CreateTerminalRequest) -> Result<CreateTerminalResponse> {
         let (terminal_id, default_cwd) = {
             let mut state = self.state.lock().await;
@@ -239,6 +340,7 @@ impl Client for SimpleClient {
         Ok(CreateTerminalResponse::new(terminal_id))
     }
 
+    /// Get the current output and exit status of a terminal.
     async fn terminal_output(&self, args: TerminalOutputRequest) -> Result<TerminalOutputResponse> {
         let entry = {
             let state = self.state.lock().await;
@@ -265,6 +367,7 @@ impl Client for SimpleClient {
         Ok(TerminalOutputResponse::new(output, truncated).exit_status(exit_status))
     }
 
+    /// Release (kill and clean up) a terminal by its ID.
     async fn release_terminal(
         &self,
         args: ReleaseTerminalRequest,
@@ -284,6 +387,7 @@ impl Client for SimpleClient {
         Ok(ReleaseTerminalResponse::new())
     }
 
+    /// Wait for a terminal process to exit and return its exit status.
     async fn wait_for_terminal_exit(
         &self,
         args: WaitForTerminalExitRequest,
@@ -307,6 +411,7 @@ impl Client for SimpleClient {
         )))
     }
 
+    /// Kill a terminal process by its ID (non-blocking, no wait).
     async fn kill_terminal(&self, args: KillTerminalRequest) -> Result<KillTerminalResponse> {
         let entry = {
             let state = self.state.lock().await;
@@ -325,19 +430,32 @@ impl Client for SimpleClient {
     }
 }
 
+/// Mutable state shared across all session and terminal operations.
+///
+/// Protected by `tokio::sync::Mutex` because operations may hold the lock
+/// across await points (e.g., during `record_session_update`).
 #[derive(Default)]
 struct SimpleClientState {
     default_cwd: PathBuf,
+    /// Per-session output buffers, keyed by `SessionId`.
     session_buffers: HashMap<SessionId, String>,
+    /// Per-session turn metadata (start time, update count, etc.).
     session_turn_meta: HashMap<SessionId, SessionTurnMeta>,
+    /// Tracked terminal subprocesses, keyed by `TerminalId`.
     terminals: HashMap<TerminalId, TerminalEntry>,
+    /// Monotonically increasing counter for generating terminal IDs.
     next_terminal_id: u64,
 }
 
+/// Metadata tracked for an in-progress ACP turn.
 struct SessionTurnMeta {
+    /// Instant when `begin_turn` was called.
     started_at: Instant,
+    /// Instant of the most recent session update.
     last_update_at: Instant,
+    /// Number of `SessionUpdate` notifications received.
     updates_count: usize,
+    /// Kind of the most recent session update (for progress logging).
     last_update_kind: Option<&'static str>,
 }
 
@@ -352,13 +470,21 @@ impl SimpleClientState {
         }
     }
 
+    /// Generate a new unique `TerminalId`.
     fn next_terminal_id(&mut self) -> TerminalId {
         self.next_terminal_id += 1;
         TerminalId::new(format!("nanobot-terminal-{}", self.next_terminal_id))
     }
 
+    /// Process a `SessionNotification` and append the content to the session buffer.
+    ///
+    /// Handles the following update types:
+    /// - `AgentMessageChunk` — agent text output
+    /// - `ToolCall` / `ToolCallUpdate` — tool invocation metadata
+    /// - `Plan` — structured plan entries
     fn record_session_update(&mut self, notification: SessionNotification) {
         let Some(buffer) = self.session_buffers.get_mut(&notification.session_id) else {
+            // No active turn for this session — ignore the update.
             return;
         };
 
@@ -395,11 +521,13 @@ impl SimpleClientState {
                     buffer.push('\n');
                 }
             }
+            // Other update types (e.g., background tasks) are not buffered.
             _ => {}
         }
     }
 }
 
+/// Map a `SessionUpdate` variant to a human-readable label for progress logging.
 fn session_update_kind(update: &SessionUpdate) -> &'static str {
     match update {
         SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
@@ -410,18 +538,30 @@ fn session_update_kind(update: &SessionUpdate) -> &'static str {
     }
 }
 
+/// A tracked terminal subprocess with its output buffer.
+///
+/// Both fields are `Arc<Mutex<...>>` because the background reader task
+/// shares ownership with the ACP client.
 #[derive(Clone)]
 struct TerminalEntry {
     child: Arc<Mutex<Child>>,
     output: Arc<Mutex<TerminalOutputState>>,
 }
 
+/// Output buffer for a single terminal process.
 struct TerminalOutputState {
+    /// Accumulated stdout/stderr content.
     content: String,
+    /// Whether the output has been truncated due to `output_byte_limit`.
     truncated: bool,
+    /// Optional maximum byte limit for buffered output.
     output_byte_limit: Option<usize>,
 }
 
+/// Spawn a background task that reads from a terminal's stdout or stderr
+/// pipe and appends the data to the shared output buffer.
+///
+/// Applies output byte limiting (truncation from the start) when configured.
 fn spawn_terminal_reader<R>(mut reader: R, output: Arc<Mutex<TerminalOutputState>>)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -430,7 +570,7 @@ where
         let mut chunk = vec![0u8; 8192];
         loop {
             match reader.read(&mut chunk).await {
-                Ok(0) => break,
+                Ok(0) => break, // EOF
                 Ok(len) => {
                     let part = String::from_utf8_lossy(&chunk[..len]);
                     let mut output_state = output.lock().await;
@@ -450,12 +590,18 @@ where
     });
 }
 
+/// Truncate a string from the start to fit within `max_bytes`, working at
+/// UTF-8 character boundaries to avoid splitting multi-byte sequences.
+///
+/// Sets `truncated` to `true` if any data was removed.
 fn truncate_from_start(value: &mut String, max_bytes: usize, truncated: &mut bool) {
     if value.len() <= max_bytes {
         return;
     }
     *truncated = true;
 
+    // Find the start position that gives us the last `max_bytes`, aligned
+    // to a UTF-8 char boundary.
     let mut start = value.len().saturating_sub(max_bytes);
     while start < value.len() && !value.is_char_boundary(start) {
         start += 1;
@@ -463,6 +609,7 @@ fn truncate_from_start(value: &mut String, max_bytes: usize, truncated: &mut boo
     *value = value[start..].to_string();
 }
 
+/// Append the text representation of a `ToolCallContent` to the buffer.
 fn append_tool_call_content(buffer: &mut String, content: &ToolCallContent) {
     match content {
         ToolCallContent::Content(Content { content, .. }) => append_content_block(buffer, content),
@@ -476,10 +623,13 @@ fn append_tool_call_content(buffer: &mut String, content: &ToolCallContent) {
             buffer.push_str(&terminal.terminal_id.to_string());
             buffer.push('\n');
         }
+        // Other variants (background tasks, etc.) are not rendered.
         _ => {}
     }
 }
 
+/// Append the text content of a `ContentBlock` to the buffer, ensuring a
+/// trailing newline.
 fn append_content_block(buffer: &mut String, block: &ContentBlock) {
     let text = extract_content_text(block);
     if text.trim().is_empty() {
@@ -495,6 +645,8 @@ fn append_content_block(buffer: &mut String, block: &ContentBlock) {
     }
 }
 
+/// Extract the text content from a `ContentBlock`, returning an empty string
+/// for blocks that do not contain text (e.g., blob resources).
 fn extract_content_text(block: &ContentBlock) -> &str {
     match block {
         ContentBlock::Text(text) => text.text.as_str(),
@@ -507,6 +659,9 @@ fn extract_content_text(block: &ContentBlock) -> &str {
     }
 }
 
+/// Slice lines of a string by 1-based start line and maximum line count.
+///
+/// Returns all remaining lines when `max_lines` is `usize::MAX`.
 fn slice_lines(content: &str, start_line: usize, max_lines: usize) -> String {
     let skip = start_line.saturating_sub(1);
     let mut lines = content.lines().skip(skip);
@@ -521,6 +676,7 @@ fn slice_lines(content: &str, start_line: usize, max_lines: usize) -> String {
     }
 }
 
+/// Kill a child process if it is still running, then wait for it to exit.
 async fn kill_child_if_running(child: &mut Child) -> std::io::Result<()> {
     if child.try_wait()?.is_none() {
         debug!("terminating ACP terminal process");
@@ -530,6 +686,9 @@ async fn kill_child_if_running(child: &mut Child) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Convert a `std::process::ExitStatus` to the ACP `TerminalExitStatus` type.
+///
+/// On Unix, also captures the signal that terminated the process (if any).
 fn to_terminal_exit_status(status: std::process::ExitStatus) -> TerminalExitStatus {
     #[cfg(unix)]
     {
@@ -547,6 +706,7 @@ fn to_terminal_exit_status(status: std::process::ExitStatus) -> TerminalExitStat
     }
 }
 
+/// Convert a `StopReason` to a human-readable label.
 fn stop_reason_label(stop_reason: StopReason) -> &'static str {
     match stop_reason {
         StopReason::EndTurn => "end_turn",
