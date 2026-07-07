@@ -146,6 +146,45 @@ impl MemoryStore {
         }
     }
 
+    /// Gets query-aware memory context for inclusion in prompts.
+    ///
+    /// The implementation is intentionally lightweight: split markdown-ish memory
+    /// into small blocks, score them by query term overlap, and keep the best
+    /// matches. Empty queries preserve the historical behavior of returning the
+    /// full long-term memory.
+    pub async fn get_memory_context_for_query(&self, query: &str, max_blocks: usize) -> String {
+        let long_term = self.read_long_term().await;
+        if long_term.trim().is_empty() {
+            return String::new();
+        }
+
+        let query_terms = tokenize(query);
+        if query_terms.is_empty() {
+            return format!("## Long-term Memory\n{}", long_term);
+        }
+
+        let mut scored = split_memory_blocks(&long_term)
+            .into_iter()
+            .filter_map(|block| {
+                let score = score_block(&block, &query_terms);
+                (score > 0).then_some((score, block))
+            })
+            .collect::<Vec<_>>();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let blocks = scored
+            .into_iter()
+            .take(max_blocks.max(1))
+            .map(|(_, block)| block)
+            .collect::<Vec<_>>();
+
+        if blocks.is_empty() {
+            String::new()
+        } else {
+            format!("## Relevant Long-term Memory\n{}", blocks.join("\n\n"))
+        }
+    }
+
     /// Returns the path to the history log file.
     pub fn history_file(&self) -> &Path {
         &self.history_file
@@ -155,6 +194,51 @@ impl MemoryStore {
     pub fn memory_dir(&self) -> &Path {
         &self.memory_dir
     }
+}
+
+fn split_memory_blocks(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+
+    for line in content.lines() {
+        let starts_heading = line.trim_start().starts_with('#');
+        if starts_heading && !current.is_empty() {
+            blocks.push(current.join("\n").trim().to_string());
+            current.clear();
+        }
+
+        if line.trim().is_empty() && !current.is_empty() {
+            blocks.push(current.join("\n").trim().to_string());
+            current.clear();
+            continue;
+        }
+
+        current.push(line.to_string());
+    }
+
+    if !current.is_empty() {
+        blocks.push(current.join("\n").trim().to_string());
+    }
+
+    blocks.into_iter().filter(|b| !b.is_empty()).collect()
+}
+
+fn tokenize(input: &str) -> Vec<String> {
+    input
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter_map(|part| {
+            let term = part.trim().to_ascii_lowercase();
+            (term.len() >= 2).then_some(term)
+        })
+        .collect()
+}
+
+fn score_block(block: &str, query_terms: &[String]) -> usize {
+    let lower = block.to_ascii_lowercase();
+    query_terms
+        .iter()
+        .map(|term| lower.matches(term).count())
+        .sum()
 }
 
 #[cfg(test)]
@@ -278,6 +362,28 @@ mod tests {
 
         assert!(context.contains("## Long-term Memory"));
         assert!(context.contains("Remember me"));
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn get_memory_context_for_query_returns_relevant_blocks() {
+        let workspace = temp_workspace("context-query");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        let store = MemoryStore::new(&workspace).expect("new memory store");
+        store
+            .write_long_term(
+                "# Alpha\nThe deploy owner is ReleaseOps.\n\n# Beta\nThe design owner is Research.",
+            )
+            .await
+            .expect("write memory");
+        let context = store
+            .get_memory_context_for_query("Who owns deploy?", 2)
+            .await;
+
+        assert!(context.contains("ReleaseOps"));
+        assert!(!context.contains("Research"));
 
         let _ = std::fs::remove_dir_all(workspace);
     }

@@ -31,11 +31,14 @@
   "providers": {},
   "gateway": {},
   "tools": {},
+  "retrieval": {},
   "acp": {}
 }
 ```
 
 其中 `acp` 为可选字段。
+
+`retrieval` 默认关闭，用于首轮模型调用前的轻量检索上下文注入；详见 [§4](#4-retrieval-检索上下文层)。
 
 ## 3. agents.defaults
 
@@ -53,7 +56,7 @@
 - `consolidationKeepRecent`: `10`
 - `consolidationMinMessages`: `20`
 - `consolidationSummaryMaxTokens`: `1000`
-- `reasoningEffort`: `null` — 推理/思考配置。详见 [§4](#4-reasoningeffort-推理思考配置)
+- `reasoningEffort`: `null` — 推理/思考配置。详见 [§5](#5-reasoningeffort-推理思考配置)
 - `consolidationEnabled`: `true`
 
 校验规则：
@@ -112,7 +115,82 @@
   }
 }
 
-## 4. reasoningEffort（推理/思考配置）
+## 4. retrieval（检索上下文层）
+
+默认值：
+
+- `enabled`: `false`
+- `autoInject`: `true`
+- `maxHits`: `8`
+- `maxContextTokens`: `3000`
+- `sourceTimeoutMs`: `1500`
+- `sources`: `{}`
+
+示例：
+
+```jsonc
+{
+  "retrieval": {
+    "enabled": true,
+    "autoInject": true,
+    "maxHits": 8,
+    "maxContextTokens": 3000,
+    "sources": {
+      "memory": {
+        "kind": "memory",
+        "enabled": true
+      },
+      "workspace": {
+        "kind": "workspace",
+        "enabled": false,
+        "include": ["**/*.md", "**/*.rs"],
+        "exclude": ["target/**", ".git/**", "**/.env", "**/*secret*"]
+      },
+      "productDocs": {
+        "kind": "mcpTool",
+        "enabled": true,
+        "server": "company_docs",
+        "tool": "retrieve_context",
+        "maxHits": 5,
+        "maxContextTokens": 1800
+      }
+    }
+  }
+}
+```
+
+可用 source kind：
+
+- `memory`：query-aware 读取 `MEMORY.md` / `HISTORY.md`
+- `workspace`：基于 `rg` 的词法检索，返回 file/line citation
+- `mcpTool`：调用显式配置的 MCP retrieval tool
+- `mcpResource`：读取显式配置的 MCP resource URI/template
+
+通道实例可通过 `agentOverrides` 收窄 retrieval 行为：
+
+```jsonc
+{
+  "channels": {
+    "instances": {
+      "my_feishu_bot": {
+        "channelType": "feishu",
+        "appId": "cli_xxx",
+        "appSecret": "yyy",
+        "allowFrom": ["*"],
+        "agentOverrides": {
+          "retrievalMaxHits": 4,
+          "retrievalMaxContextTokens": 1200,
+          "retrievalSourceAllowlist": ["memory", "productDocs"]
+        }
+      }
+    }
+  }
+}
+```
+
+更多 MCP / skills 接入协议见 `docs/RETRIEVAL_CONTEXT.md`。
+
+## 5. reasoningEffort（推理/思考配置）
 
 `reasoningEffort` 是 provider-agnostic 的推理/思考配置超集。
 
@@ -162,7 +240,7 @@
 | `budgetTokens` | `number` | 仅 Anthropic `type="enabled"` 时生效。思考 token 预算，须小于 `maxTokens` |
 | `effort` | `string` | 仅 OpenAI-compatible 使用。可选值：`low`, `medium`, `high`, `xhigh` |
 
-## 5. providers
+## 6. providers
 
 ### 4.1 当前支持的“模型提供商”范围
 
@@ -250,7 +328,7 @@ DeepSeek（Anthropic-compatible）示例：
 - `github_copilot` 当前不作为主 LLM provider 注入运行时（应通过 ACP 工具使用）。
 - `custom` 默认走 OpenAI-compatible `responses` 路径，可通过 `wireApi` 切换到 `chat/completions`；默认 `apiBase` 为 `http://localhost:8000/v1`（未配置时）。
 
-## 5. channels
+## 7. channels
 
 支持通过 `channels.instances` 配置多个通道实例，每个实例由 `channelType` 字段标识类型。公共默认值在 `channels.defaults` 中配置，各实例可覆盖。
 
@@ -392,7 +470,7 @@ chat_id = "oc_xxx"   ───→  chat_id:   "oc_xxx"   ──→  SessionKey("
 - **Sender ID 角色**：`sender_id` 使用 **union_id**（跨应用稳定的用户标识），仅用于 `allowFrom` 访问控制，不参与 session 隔离。如需按用户隔离上下文，需额外配置。
 - **Event 接收方式**：WebSocket（默认）和 HTTP Callback 仅影响事件接收，不影响消息发送能力。只要配置了 `appId+appSecret`，发消息走 IM API。
 
-## 7. tools
+## 8. tools
 
 - `web.proxy`: 可选 HTTP 代理
 - `web.search.apiKey`: `web_search` 所需 API key
@@ -404,7 +482,7 @@ chat_id = "oc_xxx"   ───→  chat_id:   "oc_xxx"   ──→  SessionKey("
 - `restrictToWorkspace`: 是否限制文件工具在 workspace 内
 - `mcpServers`: MCP server 定义（每个 server 需至少提供 `command` 或 `url`）
 
-## 8. gateway
+## 9. gateway
 
 - `host`: 默认 `0.0.0.0`
 - `port`: 默认 `18790`
@@ -413,7 +491,7 @@ chat_id = "oc_xxx"   ───→  chat_id:   "oc_xxx"   ──→  SessionKey("
 
 说明：当前二进制的 `gateway` 子命令会启动 channels + cron + heartbeat + agent loop。`host/port` 字段仅为保留配置，当前不生效，也不代表已暴露独立 HTTP API 服务。
 
-## 9. acp（可选）
+## 10. acp（可选）
 
 `acp` 配置用于注入 `acp_execute` 工具，典型字段：
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
@@ -64,6 +65,11 @@ pub enum Commands {
     #[command(about = "Manage provider configuration and connectivity checks.")]
     #[command(long_about = "Login to a provider or show provider auth status.")]
     Provider(ProviderArgs),
+    #[command(about = "Evaluate retrieval golden-case fixtures.")]
+    #[command(
+        long_about = "Validate retrieval golden-case JSONL fixtures and print a compact summary."
+    )]
+    Retrieval(RetrievalArgs),
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +110,36 @@ pub struct ProviderArgs {
     pub command: ProviderCommands,
 }
 
+#[derive(Debug, Args)]
+pub struct RetrievalArgs {
+    #[command(subcommand)]
+    pub command: RetrievalCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RetrievalCommands {
+    #[command(about = "Validate a retrieval golden-case JSONL dataset.")]
+    Eval(RetrievalEvalArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RetrievalEvalArgs {
+    #[arg(long, help = "Path to golden_cases.jsonl.")]
+    pub dataset: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalGoldenCase {
+    query: String,
+    #[serde(default)]
+    expected_sources: Vec<String>,
+    #[serde(default)]
+    expected_terms: Vec<String>,
+    #[serde(default)]
+    expected_citations: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommands {
     #[command(about = "Store provider credentials.")]
@@ -142,7 +178,68 @@ pub async fn run(cli: Cli) -> NanobotResult<()> {
         Commands::Gateway(args) => gateway(args, config_path).await,
         Commands::Status => status(config_path).await,
         Commands::Provider(args) => provider(args, config_path.clone()).await,
+        Commands::Retrieval(args) => retrieval(args).await,
     }
+}
+
+async fn retrieval(args: RetrievalArgs) -> NanobotResult<()> {
+    match args.command {
+        RetrievalCommands::Eval(args) => retrieval_eval(args).await,
+    }
+}
+
+async fn retrieval_eval(args: RetrievalEvalArgs) -> NanobotResult<()> {
+    let content = tokio::fs::read_to_string(&args.dataset)
+        .await
+        .map_err(|e| {
+            NanobotError::Other(anyhow::anyhow!(
+                "failed to read dataset {}: {}",
+                args.dataset.display(),
+                e
+            ))
+        })?;
+    let mut cases = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let case: RetrievalGoldenCase = serde_json::from_str(trimmed).map_err(|e| {
+            NanobotError::Other(anyhow::anyhow!(
+                "invalid JSONL at {}:{}: {}",
+                args.dataset.display(),
+                idx + 1,
+                e
+            ))
+        })?;
+        if case.query.trim().is_empty() {
+            return Err(NanobotError::Other(anyhow::anyhow!(
+                "invalid golden case at {}:{}: query cannot be empty",
+                args.dataset.display(),
+                idx + 1
+            )));
+        }
+        cases.push(case);
+    }
+
+    let source_expectations = cases
+        .iter()
+        .filter(|case| !case.expected_sources.is_empty())
+        .count();
+    let term_expectations = cases
+        .iter()
+        .filter(|case| !case.expected_terms.is_empty())
+        .count();
+    let citation_expectations = cases
+        .iter()
+        .filter(|case| !case.expected_citations.is_empty())
+        .count();
+
+    println!("Retrieval golden cases: {}", cases.len());
+    println!("  with expected sources: {source_expectations}");
+    println!("  with expected terms: {term_expectations}");
+    println!("  with expected citations: {citation_expectations}");
+    Ok(())
 }
 
 fn resolve_config_path(explicit: Option<PathBuf>) -> ConfigResult<PathBuf> {

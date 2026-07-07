@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientInfo, ProtocolVersion, RawContent,
-    Tool as MCPRemoteTool,
+    ReadResourceRequestParams, ResourceContents, Tool as MCPRemoteTool,
 };
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -167,6 +167,25 @@ impl MCPManager {
             session.close().await;
         }
     }
+
+    /// Reads a resource from a connected MCP server by URI.
+    pub async fn read_resource(&self, server_name: &str, uri: &str) -> ToolResult<String> {
+        let session = {
+            let state = self.state.lock().await;
+            state
+                .sessions
+                .iter()
+                .find(|session| session.name == server_name)
+                .cloned()
+        };
+        let Some(session) = session else {
+            return Err(ToolError::mcp_server(
+                server_name,
+                "server is not connected",
+            ));
+        };
+        session.read_resource(uri).await
+    }
 }
 
 struct MCPClientSession {
@@ -277,6 +296,17 @@ impl MCPClientSession {
         Ok(format_call_tool_result(result))
     }
 
+    async fn read_resource(&self, uri: &str) -> ToolResult<String> {
+        let peer = self.peer().await?;
+        let result = peer
+            .read_resource(ReadResourceRequestParams::new(uri.to_string()))
+            .await
+            .map_err(|e| {
+                ToolError::mcp_server(&self.name, format!("read resource '{}' failed: {}", uri, e))
+            })?;
+        Ok(format_read_resource_result(result.contents))
+    }
+
     async fn close(&self) {
         let client = {
             let mut guard = self.client.lock().await;
@@ -330,6 +360,25 @@ fn format_call_tool_result(result: CallToolResult) -> String {
 
     if lines.is_empty() {
         "(no output)".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn format_read_resource_result(contents: Vec<ResourceContents>) -> String {
+    let mut lines = Vec::new();
+    for content in contents {
+        match content {
+            ResourceContents::TextResourceContents { text, .. } => lines.push(text),
+            other => lines.push(
+                serde_json::to_string(&other)
+                    .unwrap_or_else(|_| "(unsupported MCP resource block)".to_string()),
+            ),
+        }
+    }
+
+    if lines.is_empty() {
+        "(empty resource)".to_string()
     } else {
         lines.join("\n")
     }

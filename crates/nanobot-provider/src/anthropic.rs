@@ -328,10 +328,6 @@ impl LLMProvider for AnthropicProvider {
         let adapter = SseAdapter;
         adapter.adapt_stream(response).await
     }
-
-    fn default_model(&self) -> &str {
-        &self.default_model
-    }
 }
 
 fn anthropic_messages_from_chat(

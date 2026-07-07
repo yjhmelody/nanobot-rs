@@ -7,10 +7,15 @@ use anyhow::Context;
 use crate::context::ContextBuilder;
 use crate::error::AgentResult;
 use crate::loop_core::AgentLoop;
+use crate::retrieval::{
+    ContextExplainTool, ContextSearchTool, ContextSourcesTool, RetrievalService,
+};
 use crate::subagent::SubagentManager;
 use crate::traits::ContextProvider;
 use nanobot_bus::MessageBus;
-use nanobot_config::schema::{ChannelsConfig, ExecToolConfig, MCPServerConfig, WebToolsConfig};
+use nanobot_config::schema::{
+    ChannelsConfig, ExecToolConfig, MCPServerConfig, RetrievalConfig, WebToolsConfig,
+};
 use nanobot_cron::CronService;
 use nanobot_provider::LLMProvider;
 use nanobot_provider::ReasoningConfig;
@@ -19,7 +24,7 @@ use nanobot_session::{
     SessionManager,
 };
 use nanobot_tools::mcp::MCPManager;
-use nanobot_tools::{ToolRegistry, ToolRegistryBuilder};
+use nanobot_tools::{Tool, ToolRegistry, ToolRegistryBuilder};
 
 /// Configuration for AgentLoop.
 #[derive(Debug, Clone)]
@@ -47,169 +52,104 @@ impl Default for AgentConfig {
     }
 }
 
-/// Builder for constructing AgentLoop with a fluent API.
-pub struct AgentLoopBuilder {
-    bus: MessageBus,
-    provider: Arc<dyn LLMProvider>,
-    workspace: PathBuf,
-    config: AgentConfig,
-    consolidation_config: ConsolidationConfig,
-    auto_consolidation: bool,
-    web_config: WebToolsConfig,
-    exec_config: ExecToolConfig,
-    mcp_servers: HashMap<String, MCPServerConfig>,
-    restrict_to_workspace: bool,
-    channel_configs: ChannelsConfig,
-    send_usage_summary: bool,
-    cron_service: Option<Arc<CronService>>,
-    custom_tools: Vec<Arc<dyn nanobot_tools::Tool>>,
-}
+/// Namespace for the `bon`-generated `AgentLoop` builder.
+pub struct AgentLoopBuilder;
 
+#[bon::bon]
 impl AgentLoopBuilder {
-    /// Creates a new builder with the required bus, provider, and workspace path.
-    pub fn new(bus: MessageBus, provider: Arc<dyn LLMProvider>, workspace: PathBuf) -> Self {
-        Self {
-            bus,
-            provider,
-            workspace,
-            config: AgentConfig::default(),
-            consolidation_config: ConsolidationConfig::default(),
-            auto_consolidation: true,
-            web_config: WebToolsConfig::default(),
-            exec_config: ExecToolConfig::default(),
-            mcp_servers: HashMap::new(),
-            restrict_to_workspace: false,
-            channel_configs: ChannelsConfig::default(),
-            send_usage_summary: false,
-            cron_service: None,
-            custom_tools: Vec::new(),
-        }
-    }
-
-    /// Sets the agent model configuration (model name, iterations, temperature, etc.).
-    pub fn with_config(mut self, config: AgentConfig) -> Self {
-        self.config = config;
-        self
-    }
-
-    /// Sets the session consolidation configuration.
-    pub fn with_consolidation_config(mut self, config: ConsolidationConfig) -> Self {
-        self.consolidation_config = config;
-        self
-    }
-
-    /// Enables or disables automatic session consolidation on each save.
-    pub fn with_auto_consolidation(mut self, enabled: bool) -> Self {
-        self.auto_consolidation = enabled;
-        self
-    }
-
-    /// Configures the web search/fetch tool settings.
-    pub fn with_web_config(mut self, config: WebToolsConfig) -> Self {
-        self.web_config = config;
-        self
-    }
-
-    /// Configures the shell execution tool settings.
-    pub fn with_exec_config(mut self, config: ExecToolConfig) -> Self {
-        self.exec_config = config;
-        self
-    }
-
-    /// Registers MCP server configurations to be connected at startup.
-    pub fn with_mcp_servers(mut self, servers: HashMap<String, MCPServerConfig>) -> Self {
-        self.mcp_servers = servers;
-        self
-    }
-
-    /// When `true`, filesystem tools are restricted to the workspace directory.
-    pub fn with_restrict_to_workspace(mut self, restrict: bool) -> Self {
-        self.restrict_to_workspace = restrict;
-        self
-    }
-
-    /// Provides channel configuration so per-channel agent overrides can be resolved at runtime.
-    pub fn with_channel_configs(mut self, config: ChannelsConfig) -> Self {
-        self.channel_configs = config;
-        self
-    }
-
-    /// Provides a `CronService` to enable cron tool support.
-    pub fn with_cron_service(mut self, service: Arc<CronService>) -> Self {
-        self.cron_service = Some(service);
-        self
-    }
-
-    /// When `true`, appends a token-usage summary to each outbound message.
-    pub fn with_send_usage_summary(mut self, enabled: bool) -> Self {
-        self.send_usage_summary = enabled;
-        self
-    }
-
-    /// Registers an additional custom tool into the agent's tool registry.
-    pub fn with_custom_tool(mut self, tool: Arc<dyn nanobot_tools::Tool>) -> Self {
-        self.custom_tools.push(tool);
-        self
-    }
-
     /// Builds and returns a fully configured `AgentLoop`.
-    pub async fn build(self) -> AgentResult<AgentLoop> {
-        let context: Arc<dyn ContextProvider> =
-            Arc::new(ContextBuilder::new(self.workspace.clone())?);
-        let store = JsonlSessionStore::new(&self.workspace).await?;
+    #[allow(clippy::new_ret_no_self)]
+    #[builder(start_fn = new, finish_fn = build)]
+    pub async fn create(
+        #[builder(start_fn)] bus: MessageBus,
+        #[builder(start_fn)] provider: Arc<dyn LLMProvider>,
+        #[builder(start_fn)] workspace: PathBuf,
+        #[builder(default)] config: AgentConfig,
+        #[builder(default)] consolidation_config: ConsolidationConfig,
+        #[builder(default = true)] auto_consolidation: bool,
+        #[builder(default)] web_config: WebToolsConfig,
+        #[builder(default)] exec_config: ExecToolConfig,
+        #[builder(default)] mcp_servers: HashMap<String, MCPServerConfig>,
+        #[builder(default)] restrict_to_workspace: bool,
+        #[builder(default)] retrieval_config: RetrievalConfig,
+        #[builder(default)] channel_configs: ChannelsConfig,
+        #[builder(default)] send_usage_summary: bool,
+        cron_service: Option<Arc<CronService>>,
+        #[builder(default)] custom_tools: Vec<Arc<dyn Tool>>,
+    ) -> AgentResult<AgentLoop> {
+        let context: Arc<dyn ContextProvider> = Arc::new(ContextBuilder::new(workspace.clone())?);
+        let store = JsonlSessionStore::new(&workspace).await?;
 
         let mut session_manager =
-            SessionManager::new(Box::new(store)).with_auto_consolidation(self.auto_consolidation);
+            SessionManager::new(Box::new(store)).with_auto_consolidation(auto_consolidation);
 
         let consolidation_strategy = LlmConsolidationStrategy::new(
-            self.provider.clone(),
-            self.config.model.clone(),
-            self.consolidation_config.clone(),
+            provider.clone(),
+            config.model.clone(),
+            consolidation_config.clone(),
         );
         session_manager = session_manager.with_consolidation(Box::new(consolidation_strategy));
 
-        let memory_provider = FileMemoryProvider::new(&self.workspace)?;
+        let memory_provider = FileMemoryProvider::new(&workspace)?;
         session_manager = session_manager.add_memory_provider(Box::new(memory_provider));
 
         let sessions = Arc::new(session_manager);
-        let tools = self.build_tool_registry()?;
+        let retrieval = Arc::new(RetrievalService::new(
+            retrieval_config.clone(),
+            workspace.clone(),
+            restrict_to_workspace,
+        ));
+        let tools = build_tool_registry(
+            workspace.clone(),
+            restrict_to_workspace,
+            exec_config.clone(),
+            web_config.clone(),
+            bus.clone(),
+            cron_service.clone(),
+            custom_tools,
+            retrieval.clone(),
+            sessions.clone(),
+        )?;
+        retrieval.set_tool_registry(&tools);
 
         let subagent_manager = Arc::new(SubagentManager::new(
-            self.provider.clone(),
-            self.workspace.clone(),
-            self.bus.clone(),
+            provider.clone(),
+            workspace.clone(),
+            bus.clone(),
             tools.clone(),
-            self.config.model.clone(),
-            self.config.temperature,
-            self.config.max_tokens,
-            self.config.reasoning_effort.clone(),
-            self.config.max_subagent_iterations,
+            config.model.clone(),
+            config.temperature,
+            config.max_tokens,
+            config.reasoning_effort.clone(),
+            config.max_subagent_iterations,
         ));
 
         tools.set_spawn_service(subagent_manager);
 
-        let mcp = if self.mcp_servers.is_empty() {
+        let mcp = if mcp_servers.is_empty() {
             None
         } else {
-            Some(Arc::new(MCPManager::new(self.mcp_servers)))
+            Some(Arc::new(MCPManager::new(mcp_servers)))
         };
+        retrieval.set_mcp_manager(mcp.as_ref());
 
         Ok(AgentLoop {
-            bus: self.bus,
-            provider: self.provider,
-            model: self.config.model,
-            max_iterations: self.config.max_iterations,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
-            memory_window: self.config.memory_window,
-            reasoning_effort: self.config.reasoning_effort,
-            consolidation_config: self.consolidation_config,
-            consolidation_enabled: self.auto_consolidation,
-            channel_configs: self.channel_configs,
-            send_usage_summary: self.send_usage_summary,
+            bus,
+            provider,
+            model: config.model,
+            max_iterations: config.max_iterations,
+            temperature: config.temperature,
+            max_tokens: config.max_tokens,
+            memory_window: config.memory_window,
+            reasoning_effort: config.reasoning_effort,
+            consolidation_config,
+            consolidation_enabled: auto_consolidation,
+            channel_configs,
+            send_usage_summary,
             tools,
             mcp,
             context,
+            retrieval,
             sessions,
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_locks: Arc::new(dashmap::DashMap::new()),
@@ -218,24 +158,37 @@ impl AgentLoopBuilder {
             last_cleanup: Arc::new(parking_lot::Mutex::new(std::time::Instant::now())),
         })
     }
+}
 
-    fn build_tool_registry(&self) -> AgentResult<Arc<ToolRegistry>> {
-        let mut builder = ToolRegistryBuilder::new(self.workspace.clone())
-            .with_restrict_to_workspace(self.restrict_to_workspace)
-            .with_exec_config(self.exec_config.clone())
-            .with_web_config(self.web_config.clone())
-            .with_bus(self.bus.clone());
+#[allow(clippy::too_many_arguments)]
+fn build_tool_registry(
+    workspace: PathBuf,
+    restrict_to_workspace: bool,
+    exec_config: ExecToolConfig,
+    web_config: WebToolsConfig,
+    bus: MessageBus,
+    cron_service: Option<Arc<CronService>>,
+    custom_tools: Vec<Arc<dyn Tool>>,
+    retrieval: Arc<RetrievalService>,
+    sessions: Arc<SessionManager>,
+) -> AgentResult<Arc<ToolRegistry>> {
+    let registry = Arc::new(
+        ToolRegistryBuilder::new(workspace)
+            .restrict_to_workspace(restrict_to_workspace)
+            .exec_config(exec_config)
+            .web_config(web_config)
+            .bus(bus)
+            .maybe_cron_service(cron_service)
+            .custom_tools(custom_tools)
+            .build()
+            .context("Failed to build tool registry")?,
+    );
+    registry.register_dynamic_tool(Arc::new(ContextSearchTool::new(
+        retrieval.clone(),
+        sessions,
+    )))?;
+    registry.register_dynamic_tool(Arc::new(ContextSourcesTool::new(retrieval.clone())))?;
+    registry.register_dynamic_tool(Arc::new(ContextExplainTool::new(retrieval)))?;
 
-        if let Some(cron_service) = self.cron_service.clone() {
-            builder = builder.with_cron_service(cron_service);
-        }
-
-        for tool in &self.custom_tools {
-            builder = builder.with_custom_tool(tool.clone());
-        }
-
-        Ok(Arc::new(
-            builder.build().context("Failed to build tool registry")?,
-        ))
-    }
+    Ok(registry)
 }

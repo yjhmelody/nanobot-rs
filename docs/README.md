@@ -45,6 +45,8 @@
   - CLI 子命令、参数、聊天内建命令
 - `docs/DEPLOYMENT.md`
   - gateway 运行方式、目录、通道配置、GitHub Release 发版与运维排查
+- `docs/RETRIEVAL_CONTEXT.md`
+  - 检索上下文层配置、MCP / skills 接入协议与 fixture 验证方式
 
 ## 专题文档说明
 

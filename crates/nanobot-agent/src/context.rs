@@ -41,6 +41,7 @@ impl ContextBuilder {
         &self,
         session_manager: &SessionManager,
         session_key: &str,
+        current_message: &str,
     ) -> String {
         let mut parts = vec![self.identity_section()];
 
@@ -50,7 +51,7 @@ impl ContextBuilder {
         }
 
         let memory = session_manager
-            .get_memory_context("", session_key)
+            .get_memory_context(current_message, session_key)
             .await
             .unwrap_or_default();
         if !memory.trim().is_empty() {
@@ -191,7 +192,8 @@ impl ContextProvider for ContextBuilder {
 
         let mut messages = Vec::new();
         messages.push(ChatMessage::system_text(
-            self.build_system_prompt(session_manager, session_key).await,
+            self.build_system_prompt(session_manager, session_key, current_message)
+                .await,
         ));
         messages.extend(history);
         messages.push(ChatMessage {

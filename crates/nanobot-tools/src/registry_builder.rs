@@ -11,95 +11,37 @@ use nanobot_config::{ExecToolConfig, WebToolsConfig};
 use nanobot_cron::CronService;
 
 /// Builder for ToolRegistry.
-///
-/// This builder pattern simplifies the construction of ToolRegistry by:
-/// - Separating required parameters from optional ones
-/// - Providing clear method names for each configuration option
-/// - Allowing flexible construction order
-pub struct ToolRegistryBuilder {
-    workspace: PathBuf,
-    restrict_to_workspace: bool,
-    exec_config: ExecToolConfig,
-    web_config: WebToolsConfig,
-    bus: Option<MessageBus>,
-    spawn_service: Option<Arc<dyn SpawnService>>,
-    cron_service: Option<Arc<CronService>>,
-    custom_tools: Vec<Arc<dyn Tool>>,
-}
+pub struct ToolRegistryBuilder;
 
+#[bon::bon]
 impl ToolRegistryBuilder {
-    /// Creates a new builder with required parameters.
-    pub fn new(workspace: PathBuf) -> Self {
-        Self {
-            workspace,
-            restrict_to_workspace: false,
-            exec_config: ExecToolConfig::default(),
-            web_config: WebToolsConfig::default(),
-            bus: None,
-            spawn_service: None,
-            cron_service: None,
-            custom_tools: Vec::new(),
-        }
-    }
-
-    /// Sets whether to restrict file operations to workspace.
-    pub fn with_restrict_to_workspace(mut self, restrict: bool) -> Self {
-        self.restrict_to_workspace = restrict;
-        self
-    }
-
-    /// Sets the exec tool configuration.
-    pub fn with_exec_config(mut self, config: ExecToolConfig) -> Self {
-        self.exec_config = config;
-        self
-    }
-
-    /// Sets the web tools configuration.
-    pub fn with_web_config(mut self, config: WebToolsConfig) -> Self {
-        self.web_config = config;
-        self
-    }
-
-    /// Sets the message bus for the message tool.
-    pub fn with_bus(mut self, bus: MessageBus) -> Self {
-        self.bus = Some(bus);
-        self
-    }
-
-    /// Sets the spawn service for the spawn tool.
-    pub fn with_spawn_service(mut self, service: Arc<dyn SpawnService>) -> Self {
-        self.spawn_service = Some(service);
-        self
-    }
-
-    /// Sets the cron service for the cron tool.
-    pub fn with_cron_service(mut self, service: Arc<CronService>) -> Self {
-        self.cron_service = Some(service);
-        self
-    }
-
-    /// Registers a custom tool that will be added after builtin tools.
-    pub fn with_custom_tool(mut self, tool: Arc<dyn Tool>) -> Self {
-        self.custom_tools.push(tool);
-        self
-    }
-
     /// Builds the ToolRegistry.
-    pub fn build(self) -> ToolResult<ToolRegistry> {
+    #[allow(clippy::new_ret_no_self)]
+    #[builder(start_fn = new, finish_fn = build)]
+    pub fn create(
+        #[builder(start_fn)] workspace: PathBuf,
+        #[builder(default)] restrict_to_workspace: bool,
+        #[builder(default)] exec_config: ExecToolConfig,
+        #[builder(default)] web_config: WebToolsConfig,
+        bus: Option<MessageBus>,
+        spawn_service: Option<Arc<dyn SpawnService>>,
+        cron_service: Option<Arc<CronService>>,
+        #[builder(default)] custom_tools: Vec<Arc<dyn Tool>>,
+    ) -> ToolResult<ToolRegistry> {
         let registry = ToolRegistry::new(
-            self.workspace,
-            self.restrict_to_workspace,
-            self.exec_config,
-            self.web_config,
-            self.bus,
-            self.cron_service,
+            workspace,
+            restrict_to_workspace,
+            exec_config,
+            web_config,
+            bus,
+            cron_service,
         );
 
-        if let Some(service) = self.spawn_service {
+        if let Some(service) = spawn_service {
             registry.set_spawn_service(service);
         }
 
-        for tool in self.custom_tools {
+        for tool in custom_tools {
             registry.register_dynamic_tool(tool)?;
         }
 
@@ -144,8 +86,8 @@ mod tests {
         };
 
         let registry = ToolRegistryBuilder::new(workspace)
-            .with_restrict_to_workspace(true)
-            .with_exec_config(exec_config)
+            .restrict_to_workspace(true)
+            .exec_config(exec_config)
             .build()
             .expect("build registry");
 
@@ -177,7 +119,7 @@ mod tests {
     async fn builder_registers_spawn_tool_when_service_is_provided() {
         let workspace = std::env::temp_dir().join("test-registry-builder-spawn");
         let registry = ToolRegistryBuilder::new(workspace)
-            .with_spawn_service(Arc::new(BuilderSpawnService))
+            .spawn_service(Arc::new(BuilderSpawnService))
             .build()
             .expect("build registry");
 
@@ -229,7 +171,7 @@ mod tests {
     async fn builder_registers_custom_tool() {
         let workspace = std::env::temp_dir().join("test-registry-builder-custom-tool");
         let registry = ToolRegistryBuilder::new(workspace)
-            .with_custom_tool(Arc::new(BuilderEchoTool))
+            .custom_tools(vec![Arc::new(BuilderEchoTool)])
             .build()
             .expect("build registry");
 
@@ -281,7 +223,7 @@ mod tests {
     fn builder_rejects_builtin_name_conflict_for_custom_tool() {
         let workspace = std::env::temp_dir().join("test-registry-builder-conflict-tool");
         let result = ToolRegistryBuilder::new(workspace)
-            .with_custom_tool(Arc::new(BuilderConflictTool))
+            .custom_tools(vec![Arc::new(BuilderConflictTool)])
             .build();
         assert!(
             result.is_err(),

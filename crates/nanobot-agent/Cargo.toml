@@ -31,3 +31,4 @@ regex.workspace = true
 notify.workspace = true
 uuid.workspace = true
 which.workspace = true
+bon.workspace = true

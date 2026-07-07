@@ -13,6 +13,7 @@ use tracing::{Instrument, debug, debug_span, error, info, trace};
 use crate::error::{AgentError, AgentResult};
 use crate::react::LoopExitReason;
 use crate::react::{ExecutionContext, LoopOutcome, ModelConfig, ProgressEmitter, ReActExecutor};
+use crate::retrieval::{RetrievalService, RetrievalTurnOverrides};
 use crate::traits::{Agent, ContextProvider};
 use crate::utils::preview_text;
 use nanobot_bus::{
@@ -78,6 +79,7 @@ pub struct AgentLoop {
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) mcp: Option<Arc<MCPManager>>,
     pub(crate) context: Arc<dyn ContextProvider>,
+    pub(crate) retrieval: Arc<RetrievalService>,
     pub sessions: Arc<SessionManager>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) session_locks: Arc<DashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
@@ -96,6 +98,7 @@ struct AgentRuntimeSettings {
     memory_window: usize,
     consolidation_enabled: bool,
     consolidation_config: ConsolidationConfig,
+    retrieval: RetrievalTurnOverrides,
 }
 
 impl AgentLoop {
@@ -146,12 +149,17 @@ impl AgentLoop {
         )
     }
 
-    fn runtime_settings_for_channel(&self, _channel: &str) -> AgentRuntimeSettings {
+    fn runtime_settings_for_channel(&self, channel: &str) -> AgentRuntimeSettings {
+        let overrides = self
+            .channel_configs
+            .instances
+            .get(channel)
+            .and_then(|instance| instance.agent_overrides());
         Self::merge_runtime_settings(
             self.memory_window,
             self.consolidation_enabled,
             &self.consolidation_config,
-            None,
+            overrides,
         )
     }
 
@@ -165,6 +173,7 @@ impl AgentLoop {
             memory_window: default_memory_window,
             consolidation_enabled: default_consolidation_enabled,
             consolidation_config: default_consolidation_config.clone(),
+            retrieval: RetrievalTurnOverrides::default(),
         };
 
         if let Some(overrides) = overrides {
@@ -183,6 +192,11 @@ impl AgentLoop {
             if let Some(max_tokens) = overrides.consolidation_summary_max_tokens {
                 settings.consolidation_config.max_tokens = max_tokens;
             }
+            settings.retrieval.enabled = overrides.retrieval_enabled;
+            settings.retrieval.auto_inject = overrides.retrieval_auto_inject;
+            settings.retrieval.max_hits = overrides.retrieval_max_hits;
+            settings.retrieval.max_context_tokens = overrides.retrieval_max_context_tokens;
+            settings.retrieval.source_allowlist = overrides.retrieval_source_allowlist.clone();
         }
 
         settings
@@ -602,13 +616,29 @@ impl AgentLoop {
             .get_history(&session, runtime_settings.memory_window)
             .await?;
         let history_len = history.len();
+        let retrieved = self
+            .retrieval
+            .retrieve_for_turn(
+                msg.content_text(),
+                &session_key,
+                Some(&msg.channel),
+                Some(&msg.chat_id),
+                &self.sessions,
+                Some(&runtime_settings.retrieval),
+            )
+            .await;
+        let current_message = if retrieved.text.trim().is_empty() {
+            msg.content_text().to_string()
+        } else {
+            format!("{}\n\n{}", retrieved.text, msg.content_text())
+        };
         let messages = self
             .context
             .build_messages(
                 &self.sessions,
                 session_key.as_str(),
                 history,
-                msg.content_text(),
+                &current_message,
                 if msg.media.is_empty() {
                     None
                 } else {
@@ -961,6 +991,7 @@ impl Clone for AgentLoop {
             tools: self.tools.clone(),
             mcp: self.mcp.clone(),
             context: self.context.clone(),
+            retrieval: self.retrieval.clone(),
             sessions: self.sessions.clone(),
             running: self.running.clone(),
             session_locks: self.session_locks.clone(),
@@ -1040,6 +1071,11 @@ mod tests {
             consolidation_keep_recent: Some(36),
             consolidation_min_messages: Some(48),
             consolidation_summary_max_tokens: Some(1800),
+            retrieval_enabled: Some(true),
+            retrieval_auto_inject: Some(false),
+            retrieval_max_hits: Some(3),
+            retrieval_max_context_tokens: Some(700),
+            retrieval_source_allowlist: Some(vec!["memory".to_string()]),
         };
 
         let settings = AgentLoop::merge_runtime_settings(80, true, &defaults, Some(&overrides));
@@ -1049,6 +1085,14 @@ mod tests {
         assert_eq!(settings.consolidation_config.min_messages, 48);
         assert_eq!(settings.consolidation_config.keep_recent, 36);
         assert_eq!(settings.consolidation_config.max_tokens, 1800);
+        assert_eq!(settings.retrieval.enabled, Some(true));
+        assert_eq!(settings.retrieval.auto_inject, Some(false));
+        assert_eq!(settings.retrieval.max_hits, Some(3));
+        assert_eq!(settings.retrieval.max_context_tokens, Some(700));
+        assert_eq!(
+            settings.retrieval.source_allowlist,
+            Some(vec!["memory".to_string()])
+        );
     }
 
     #[test]
@@ -1103,9 +1147,6 @@ mod tests {
     struct NoopProvider;
     #[async_trait]
     impl nanobot_provider::LLMProvider for NoopProvider {
-        fn default_model(&self) -> &str {
-            "test"
-        }
         async fn chat(
             &self,
             _req: nanobot_provider::ChatRequest,
@@ -1125,6 +1166,11 @@ mod tests {
 
         let store = Box::new(nanobot_session::InMemorySessionStore::new());
         let sessions = Arc::new(SessionManager::new(store));
+        let retrieval = Arc::new(crate::retrieval::RetrievalService::new(
+            nanobot_config::RetrievalConfig::default(),
+            tmp.path().to_path_buf(),
+            false,
+        ));
 
         let cancel_signals: Arc<DashMap<SessionKey, CancelSignal>> = Arc::new(DashMap::new());
 
@@ -1146,6 +1192,7 @@ mod tests {
             context: Arc::new(
                 crate::context::ContextBuilder::new(tmp.path().to_path_buf()).unwrap(),
             ),
+            retrieval,
             sessions,
             running: Arc::new(AtomicBool::new(true)),
             session_locks: Arc::new(DashMap::new()),
@@ -1167,6 +1214,11 @@ mod tests {
 
         let store = Box::new(nanobot_session::InMemorySessionStore::new());
         let sessions = Arc::new(SessionManager::new(store));
+        let retrieval = Arc::new(crate::retrieval::RetrievalService::new(
+            nanobot_config::RetrievalConfig::default(),
+            tmp.path().to_path_buf(),
+            false,
+        ));
 
         let cancel_signals: Arc<DashMap<SessionKey, CancelSignal>> = Arc::new(DashMap::new());
 
@@ -1188,6 +1240,7 @@ mod tests {
             context: Arc::new(
                 crate::context::ContextBuilder::new(tmp.path().to_path_buf()).unwrap(),
             ),
+            retrieval,
             sessions,
             running: Arc::new(AtomicBool::new(true)),
             session_locks: Arc::new(DashMap::new()),

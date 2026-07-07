@@ -61,29 +61,35 @@ pub async fn build_runtime(config: Config) -> NanobotResult<RuntimeBundle> {
         max_subagent_iterations: defaults.max_subagent_iterations,
     };
 
-    let mut builder = AgentLoopBuilder::new(bus.clone(), provider, workspace)
-        .with_config(agent_config)
-        .with_consolidation_config(ConsolidationConfig {
-            min_messages: defaults.consolidation_min_messages,
-            keep_recent: defaults.consolidation_keep_recent,
-            max_tokens: defaults.consolidation_summary_max_tokens,
-        })
-        .with_web_config(config.tools.web.clone())
-        .with_exec_config(config.tools.exec.clone())
-        .with_mcp_servers(config.tools.mcp_servers.clone())
-        .with_restrict_to_workspace(config.tools.restrict_to_workspace)
-        .with_cron_service(cron.clone())
-        .with_channel_configs(config.channels.clone())
-        .with_send_usage_summary(config.channels.defaults.send_usage_summary)
-        .with_auto_consolidation(config.agents.defaults.consolidation_enabled);
+    let custom_tools = config
+        .acp
+        .clone()
+        // ACP 不是主 provider，而是一个按需注入的外部编码代理工具。
+        .map(|acp_config| Arc::new(ACPTool::new(acp_config)) as Arc<dyn nanobot_tools::Tool>)
+        .into_iter()
+        .collect();
 
-    // ACP 不是主 provider，而是一个按需注入的“外部编码代理工具”。
-    // 这样可以保持主对话模型与外部 coding agent 的职责解耦。
-    if let Some(acp_config) = config.acp.clone() {
-        builder = builder.with_custom_tool(Arc::new(ACPTool::new(acp_config)));
-    }
-
-    let agent = Arc::new(builder.build().await?);
+    let agent = Arc::new(
+        AgentLoopBuilder::new(bus.clone(), provider, workspace)
+            .config(agent_config)
+            .consolidation_config(ConsolidationConfig {
+                min_messages: defaults.consolidation_min_messages,
+                keep_recent: defaults.consolidation_keep_recent,
+                max_tokens: defaults.consolidation_summary_max_tokens,
+            })
+            .web_config(config.tools.web.clone())
+            .exec_config(config.tools.exec.clone())
+            .mcp_servers(config.tools.mcp_servers.clone())
+            .restrict_to_workspace(config.tools.restrict_to_workspace)
+            .retrieval_config(config.retrieval.clone())
+            .cron_service(cron.clone())
+            .channel_configs(config.channels.clone())
+            .send_usage_summary(config.channels.defaults.send_usage_summary)
+            .auto_consolidation(config.agents.defaults.consolidation_enabled)
+            .custom_tools(custom_tools)
+            .build()
+            .await?,
+    );
 
     Ok(RuntimeBundle {
         config,

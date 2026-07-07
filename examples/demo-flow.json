@@ -1,0 +1,43 @@
+{
+  "schema_version": { "major": 1, "minor": 0, "patch": 0 },
+  "flow_version": { "major": 1, "minor": 0, "patch": 0 },
+  "name": "submit-form",
+  "description": "Fill a text field and click submit",
+  "tags": ["demo", "form"],
+  "variables": {
+    "username": {
+      "key": "username",
+      "default": { "String": "admin" },
+      "description": "Login username",
+      "required": true
+    }
+  },
+  "steps": [
+    {
+      "type": "atom",
+      "id": "step-1",
+      "action": "InputText",
+      "selector": "role:TextField && name:Username",
+      "params": { "text": "{{username}}" },
+      "description": "Type username into the username field"
+    },
+    {
+      "type": "atom",
+      "id": "step-2",
+      "action": "Click",
+      "selector": "role:Button && name:Submit",
+      "params": {},
+      "description": "Click the submit button"
+    },
+    {
+      "type": "control",
+      "id": "step-3",
+      "control_type": {
+        "type": "wait",
+        "timeout_ms": 5000,
+        "for_selector": "role:StaticText && name:Success"
+      },
+      "description": "Wait for success message"
+    }
+  ]
+}

@@ -18,7 +18,6 @@ use nanobot_types::provider::LLMResponse;
 /// when retryable errors occur (network issues, timeouts, rate limits).
 pub struct FallbackProvider {
     providers: Vec<Arc<dyn LLMProvider>>,
-    default_model: String,
 }
 
 impl FallbackProvider {
@@ -32,15 +31,12 @@ impl FallbackProvider {
     /// # Panics
     ///
     /// Panics if the providers list is empty.
-    pub fn new(providers: Vec<Arc<dyn LLMProvider>>, default_model: String) -> Self {
+    pub fn new(providers: Vec<Arc<dyn LLMProvider>>, _default_model: String) -> Self {
         assert!(
             !providers.is_empty(),
             "FallbackProvider requires at least one provider"
         );
-        Self {
-            providers,
-            default_model,
-        }
+        Self { providers }
     }
 
     /// Returns the number of configured providers.
@@ -51,10 +47,6 @@ impl FallbackProvider {
 
 #[async_trait]
 impl LLMProvider for FallbackProvider {
-    fn default_model(&self) -> &str {
-        &self.default_model
-    }
-
     async fn chat(&self, req: ChatRequest) -> ProviderResult<LLMResponse> {
         let mut last_error = None;
 
@@ -227,10 +219,6 @@ mod tests {
 
     #[async_trait]
     impl LLMProvider for MockProvider {
-        fn default_model(&self) -> &str {
-            "mock/model"
-        }
-
         async fn chat(&self, _req: ChatRequest) -> Result<LLMResponse, ProviderError> {
             if self.should_fail {
                 Err(match self.error_type {

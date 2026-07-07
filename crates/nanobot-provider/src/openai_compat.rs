@@ -432,10 +432,6 @@ impl LLMProvider for OpenAICompatProvider {
         let adapter = OpenAiAdapter;
         adapter.adapt_stream(response).await
     }
-
-    fn default_model(&self) -> &str {
-        &self.default_model
-    }
 }
 
 fn canonicalize_explicit_prefix(model: &str, spec_name: &str, canonical_prefix: &str) -> String {

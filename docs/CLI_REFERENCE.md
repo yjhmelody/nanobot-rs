@@ -15,6 +15,7 @@ nanobot <subcommand>
 - `gateway`
 - `status`
 - `provider`
+- `retrieval`
 
 ## 2. onboard
 
@@ -112,7 +113,17 @@ nanobot provider status github_copilot --config-dir <DIR>
 - 对非 `github_copilot` 的 provider，`provider status` 不做同等状态探测。
 - 实际调用命令名可由 `acp.agents.copilot.command` 覆盖，默认是 `copilot`。
 
-## 7. 聊天内建命令（通过消息内容触发）
+## 7. retrieval
+
+验证 retrieval golden-case fixture：
+
+```bash
+nanobot retrieval eval --dataset tests/fixtures/retrieval/golden_cases.jsonl
+```
+
+当前 `eval` 会校验 JSONL fixture 格式，并输出 query、source、term、citation 期望项统计。它是轻量入口，后续可扩展为真实 retrieval recall / citation coverage 评测。
+
+## 8. 聊天内建命令（通过消息内容触发）
 
 这些命令不是 CLI 子命令，而是聊天消息中的控制指令：
 

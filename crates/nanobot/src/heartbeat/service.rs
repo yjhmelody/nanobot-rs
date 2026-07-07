@@ -289,10 +289,6 @@ mod tests {
                 Ok(responses.remove(0))
             }
         }
-
-        fn default_model(&self) -> &str {
-            "openai/gpt-4o-mini"
-        }
     }
 
     struct ExecRecorder {

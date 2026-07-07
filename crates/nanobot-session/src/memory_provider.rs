@@ -85,10 +85,8 @@ impl FileMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for FileMemoryProvider {
-    async fn get_context(&self, _query: &str, _session_key: &str) -> SessionResult<String> {
-        // Simple implementation: return long-term memory
-        // Future: could use query for semantic search
-        Ok(self.store.get_memory_context().await)
+    async fn get_context(&self, query: &str, _session_key: &str) -> SessionResult<String> {
+        Ok(self.store.get_memory_context_for_query(query, 6).await)
     }
 
     async fn store(

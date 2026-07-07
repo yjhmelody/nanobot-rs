@@ -19,6 +19,8 @@ pub struct Config {
     pub gateway: GatewayConfig,
     /// Tool subsystem configuration.
     pub tools: ToolsConfig,
+    /// Retrieval context layer configuration.
+    pub retrieval: RetrievalConfig,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Optional ACP configuration for external agent tools.
@@ -81,6 +83,18 @@ impl Config {
 
         // Validate gateway config
         self.gateway.validate()?;
+
+        // Validate retrieval config
+        self.retrieval.validate()?;
+
+        for (name, instance) in &self.channels.instances {
+            if let Some(overrides) = instance.agent_overrides() {
+                self.agents.defaults.validate_overrides(
+                    overrides,
+                    &format!("channels.instances.{name}.agentOverrides"),
+                )?;
+            }
+        }
 
         Ok(())
     }
@@ -351,6 +365,21 @@ pub struct AgentRuntimeOverrides {
     /// Override for the summarization token budget used by consolidation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consolidation_summary_max_tokens: Option<i32>,
+    /// Override for retrieval enablement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_enabled: Option<bool>,
+    /// Override for automatic retrieval injection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_auto_inject: Option<bool>,
+    /// Override for retrieval hit budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_max_hits: Option<usize>,
+    /// Override for retrieval context token budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_max_context_tokens: Option<usize>,
+    /// Override for retrieval source allowlist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_source_allowlist: Option<Vec<String>>,
 }
 
 /// Configuration for agent prompts
@@ -504,6 +533,16 @@ impl AgentDefaults {
                 "{scope}: consolidation_summary_max_tokens must be positive, got {consolidation_summary_max_tokens}"
             )));
         }
+        if overrides.retrieval_max_hits == Some(0) {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: retrieval_max_hits must be positive"
+            )));
+        }
+        if overrides.retrieval_max_context_tokens == Some(0) {
+            return Err(ConfigError::invalid(format!(
+                "{scope}: retrieval_max_context_tokens must be positive"
+            )));
+        }
 
         Ok(())
     }
@@ -596,6 +635,9 @@ pub struct TelegramChannelConfig {
     /// Override default: streaming message behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_mode: Option<StreamMode>,
+    /// Optional per-channel agent runtime overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_overrides: Option<AgentRuntimeOverrides>,
 }
 
 impl Default for TelegramChannelConfig {
@@ -609,6 +651,7 @@ impl Default for TelegramChannelConfig {
             send_tool_hints: None,
             send_usage_summary: None,
             stream_mode: None,
+            agent_overrides: None,
         }
     }
 }
@@ -672,6 +715,9 @@ pub struct FeishuChannelConfig {
     /// Default is "raw" for backward compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub render_mode: Option<String>,
+    /// Optional per-channel agent runtime overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_overrides: Option<AgentRuntimeOverrides>,
 }
 
 impl Default for FeishuChannelConfig {
@@ -696,6 +742,7 @@ impl Default for FeishuChannelConfig {
             send_usage_summary: None,
             stream_mode: None,
             render_mode: None,
+            agent_overrides: None,
         }
     }
 }
@@ -712,6 +759,13 @@ impl ChannelInstanceConfig {
         match self {
             Self::Telegram(c) => &c.allow_from,
             Self::Feishu(c) => &c.allow_from,
+        }
+    }
+
+    pub fn agent_overrides(&self) -> Option<&AgentRuntimeOverrides> {
+        match self {
+            Self::Telegram(c) => c.agent_overrides.as_ref(),
+            Self::Feishu(c) => c.agent_overrides.as_ref(),
         }
     }
 }
@@ -939,6 +993,161 @@ impl ToolsConfig {
             server.validate()?;
         }
 
+        Ok(())
+    }
+}
+
+/// Retrieval context layer configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RetrievalConfig {
+    /// Enables retrieval context features.
+    pub enabled: bool,
+    /// Inject retrieved context before the first model call of a turn.
+    pub auto_inject: bool,
+    /// Maximum retrieved snippets to keep after source collection.
+    pub max_hits: usize,
+    /// Approximate token budget for injected retrieved context.
+    pub max_context_tokens: usize,
+    /// Per-source timeout in milliseconds.
+    pub source_timeout_ms: u64,
+    /// Explicitly configured retrieval sources.
+    pub sources: HashMap<String, RetrievalSourceConfig>,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_inject: true,
+            max_hits: 8,
+            max_context_tokens: 3000,
+            source_timeout_ms: 1500,
+            sources: HashMap::new(),
+        }
+    }
+}
+
+impl RetrievalConfig {
+    /// Validates retrieval configuration.
+    pub fn validate(&self) -> ConfigResult<()> {
+        if self.max_hits == 0 {
+            return Err(ConfigError::invalid("retrieval max_hits must be positive"));
+        }
+        if self.max_context_tokens == 0 {
+            return Err(ConfigError::invalid(
+                "retrieval max_context_tokens must be positive",
+            ));
+        }
+        if self.source_timeout_ms == 0 {
+            return Err(ConfigError::invalid(
+                "retrieval source_timeout_ms must be positive",
+            ));
+        }
+        for (name, source) in &self.sources {
+            if name.trim().is_empty() {
+                return Err(ConfigError::invalid(
+                    "retrieval source name cannot be empty",
+                ));
+            }
+            source.validate(name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Retrieval source adapter kind.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RetrievalSourceKind {
+    Memory,
+    Workspace,
+    McpTool,
+    McpResource,
+}
+
+/// Configuration for a single retrieval source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RetrievalSourceConfig {
+    /// Adapter kind.
+    pub kind: RetrievalSourceKind,
+    /// Enables this source.
+    pub enabled: bool,
+    /// Include globs for workspace source.
+    pub include: Vec<String>,
+    /// Exclude globs for workspace source.
+    pub exclude: Vec<String>,
+    /// MCP server name for MCP sources.
+    pub server: String,
+    /// MCP tool name for mcpTool sources.
+    pub tool: String,
+    /// MCP resource template for mcpResource sources.
+    pub template: String,
+    /// Optional per-source hit limit.
+    pub max_hits: Option<usize>,
+    /// Optional per-source context token budget.
+    pub max_context_tokens: Option<usize>,
+    /// Allows source results without explicit citation.
+    pub allow_anonymous_citation: bool,
+}
+
+impl Default for RetrievalSourceConfig {
+    fn default() -> Self {
+        Self {
+            kind: RetrievalSourceKind::Memory,
+            enabled: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            server: String::new(),
+            tool: String::new(),
+            template: String::new(),
+            max_hits: None,
+            max_context_tokens: None,
+            allow_anonymous_citation: false,
+        }
+    }
+}
+
+impl RetrievalSourceConfig {
+    fn validate(&self, name: &str) -> ConfigResult<()> {
+        if self.max_hits == Some(0) {
+            return Err(ConfigError::invalid(format!(
+                "retrieval source {name}: max_hits must be positive"
+            )));
+        }
+        if self.max_context_tokens == Some(0) {
+            return Err(ConfigError::invalid(format!(
+                "retrieval source {name}: max_context_tokens must be positive"
+            )));
+        }
+        match self.kind {
+            RetrievalSourceKind::Memory | RetrievalSourceKind::Workspace => {}
+            RetrievalSourceKind::McpTool => {
+                if self.server.trim().is_empty() {
+                    return Err(ConfigError::invalid(format!(
+                        "retrieval source {name}: mcpTool requires server"
+                    )));
+                }
+                if self.tool.trim().is_empty() {
+                    return Err(ConfigError::invalid(format!(
+                        "retrieval source {name}: mcpTool requires tool"
+                    )));
+                }
+            }
+            RetrievalSourceKind::McpResource => {
+                if self.server.trim().is_empty() {
+                    return Err(ConfigError::invalid(format!(
+                        "retrieval source {name}: mcpResource requires server"
+                    )));
+                }
+                if self.template.trim().is_empty() {
+                    return Err(ConfigError::invalid(format!(
+                        "retrieval source {name}: mcpResource requires template"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }

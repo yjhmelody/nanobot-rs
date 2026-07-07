@@ -32,3 +32,4 @@ html2text.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 chrono-tz.workspace = true
 dirs.workspace = true
+bon.workspace = true

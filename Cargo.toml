@@ -76,6 +76,7 @@ bytes = "1.0"
 which = "8.0"
 dirs = "6.0"
 tempfile = "3"
+bon = "3.9.3"
 
 # WebSocket
 openlark = { version = "0.16.1", default-features = false, features = [

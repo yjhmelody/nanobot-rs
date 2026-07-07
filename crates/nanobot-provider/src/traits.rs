@@ -37,10 +37,6 @@ pub struct ChatRequest {
 /// response in a single-event stream, but providers should override it for true streaming.
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
-    // TODO: remove this
-    /// Returns the default model identifier for this provider.
-    fn default_model(&self) -> &str;
-
     /// Non-streaming chat completion.
     ///
     /// # Arguments
