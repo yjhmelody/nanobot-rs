@@ -335,32 +335,6 @@ pub struct ListDirArgs {
     pub path: String,
 }
 
-/// Arguments for the `message` tool.
-///
-/// Used to send a message to a user, optionally in a different channel
-/// or chat than the current conversation.
-///
-/// # Fields
-///
-/// * `content` — Text content to send.
-/// * `channel` — Optional target channel override (defaults to current).
-/// * `chat_id` — Optional target chat ID override.
-/// * `message_id` — Optional reply-to message ID for threading.
-/// * `media` — Optional list of media attachment paths or URLs.
-#[derive(Debug, Deserialize)]
-pub struct MessageArgs {
-    /// Text content to send.
-    pub content: String,
-    /// Optional target channel override.
-    pub channel: Option<String>,
-    /// Optional target chat id override.
-    pub chat_id: Option<String>,
-    /// Optional reply-to message id.
-    pub message_id: Option<String>,
-    /// Optional media attachments.
-    pub media: Option<Vec<String>>,
-}
-
 /// Actions supported by the `cron` tool.
 ///
 /// | Variant | Effect |

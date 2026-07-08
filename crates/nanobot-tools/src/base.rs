@@ -37,10 +37,6 @@ pub use nanobot_types::tools::{
 ///
 /// # Optional Lifecycle Hooks
 ///
-/// * [`start_turn`](Tool::start_turn) -- Reset per-turn state (e.g., `message` tool's
-///   `sent_in_turn` flag).
-/// * [`sent_in_turn`](Tool::sent_in_turn) -- Query whether this tool sent a message
-///   during the current agent turn.
 /// * [`cancel_by_session`](Tool::cancel_by_session) -- Cancel any session-scoped
 ///   background tasks (e.g., spawned subagents).
 ///
@@ -99,32 +95,6 @@ pub trait Tool: Send + Sync {
     /// Returns a [`ToolError`] if execution fails. The agent loop wraps
     /// errors as text and continues the turn rather than aborting.
     async fn execute(&self, args_json: &str, ctx: &ToolContext) -> ToolResult<String>;
-
-    /// Optional hook called at the start of each agent turn.
-    ///
-    /// Tools can use this to reset per-turn state. The default
-    /// implementation is a no-op.
-    ///
-    /// # Examples
-    ///
-    /// The [`MessageTool`](crate::message::MessageTool) uses this hook to
-    /// reset its `sent_in_turn` flag to `false` at the beginning of each
-    /// agent turn.
-    async fn start_turn(&self) -> ToolResult<()> {
-        Ok(())
-    }
-
-    /// Optional signal indicating whether this tool sent a message
-    /// to the user in the current agent turn.
-    ///
-    /// The agent loop uses this to decide whether the LLM needs to
-    /// produce a visible response. If no tool sent a message, the
-    /// loop assumes the LLM's text response is the answer.
-    ///
-    /// The default implementation returns `false`.
-    async fn sent_in_turn(&self) -> ToolResult<bool> {
-        Ok(false)
-    }
 
     /// Optional cancellation hook for session-scoped background tasks.
     ///

@@ -1715,7 +1715,6 @@ dependencies = [
  "dirs",
  "html2text",
  "http",
- "nanobot-bus",
  "nanobot-config",
  "nanobot-cron",
  "nanobot-types",

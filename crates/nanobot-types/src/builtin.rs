@@ -33,7 +33,6 @@ use std::str::FromStr;
 /// | `Exec` | `exec` | Run a shell command |
 /// | `WebSearch` | `web_search` | Search the web |
 /// | `WebFetch` | `web_fetch` | Fetch a URL |
-/// | `Message` | `message` | Send a message |
 /// | `Spawn` | `spawn` | Spawn a sub-agent |
 /// | `Cron` | `cron` | Manage scheduled jobs |
 ///
@@ -52,7 +51,6 @@ pub enum BuiltinTool {
     Exec,
     WebSearch,
     WebFetch,
-    Message,
     Spawn,
     Cron,
 }
@@ -81,7 +79,6 @@ impl BuiltinTool {
             Self::Exec => "exec",
             Self::WebSearch => "web_search",
             Self::WebFetch => "web_fetch",
-            Self::Message => "message",
             Self::Spawn => "spawn",
             Self::Cron => "cron",
         }
@@ -96,7 +93,7 @@ impl BuiltinTool {
     ///
     /// ```
     /// use nanobot_types::builtin::BuiltinTool;
-    /// assert_eq!(BuiltinTool::core_tools().len(), 10);
+    /// assert_eq!(BuiltinTool::core_tools().len(), 9);
     /// ```
     pub const fn core_tools() -> &'static [BuiltinTool] {
         &[
@@ -107,7 +104,6 @@ impl BuiltinTool {
             Self::Exec,
             Self::WebSearch,
             Self::WebFetch,
-            Self::Message,
             Self::Spawn,
             Self::Cron,
         ]
@@ -159,7 +155,6 @@ impl FromStr for BuiltinTool {
             "exec" => Ok(Self::Exec),
             "web_search" => Ok(Self::WebSearch),
             "web_fetch" => Ok(Self::WebFetch),
-            "message" => Ok(Self::Message),
             "spawn" => Ok(Self::Spawn),
             "cron" => Ok(Self::Cron),
             other => Err(UnknownToolError(other.to_string())),

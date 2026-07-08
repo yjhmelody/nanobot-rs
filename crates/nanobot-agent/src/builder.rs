@@ -159,7 +159,6 @@ impl AgentLoopBuilder {
             restrict_to_workspace,
             exec_config.clone(),
             web_config.clone(),
-            bus.clone(),
             cron_service.clone(),
             custom_tools,
             retrieval.clone(),
@@ -229,7 +228,6 @@ fn build_tool_registry(
     restrict_to_workspace: bool,
     exec_config: ExecToolConfig,
     web_config: WebToolsConfig,
-    bus: MessageBus,
     cron_service: Option<Arc<CronService>>,
     custom_tools: Vec<Arc<dyn Tool>>,
     retrieval: Arc<RetrievalService>,
@@ -240,7 +238,6 @@ fn build_tool_registry(
             .restrict_to_workspace(restrict_to_workspace)
             .exec_config(exec_config)
             .web_config(web_config)
-            .bus(bus)
             .maybe_cron_service(cron_service)
             .custom_tools(custom_tools)
             .build()

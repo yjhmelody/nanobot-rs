@@ -989,7 +989,6 @@ while True:
             ExecToolConfig::default(),
             WebToolsConfig::default(),
             None,
-            None,
         );
 
         manager
@@ -1057,7 +1056,6 @@ while True:
             false,
             ExecToolConfig::default(),
             WebToolsConfig::default(),
-            None,
             None,
         );
 

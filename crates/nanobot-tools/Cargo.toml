@@ -12,7 +12,6 @@ which.workspace = true
 [dependencies]
 nanobot-types.workspace = true
 nanobot-config.workspace = true
-nanobot-bus.workspace = true
 nanobot-cron.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

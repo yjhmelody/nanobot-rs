@@ -9,7 +9,6 @@
 //! ```ignore
 //! let registry = ToolRegistryBuilder::new(workspace_path)
 //!     .restrict_to_workspace(true)
-//!     .bus(my_bus)
 //!     .spawn_service(my_spawn_service)
 //!     .cron_service(my_cron_service)
 //!     .custom_tools(vec![Arc::new(MyCustomTool)])
@@ -24,7 +23,6 @@ use crate::error::ToolResult;
 use crate::base::Tool;
 use crate::registry::ToolRegistry;
 use crate::spawn::SpawnService;
-use nanobot_bus::MessageBus;
 use nanobot_config::{ExecToolConfig, WebToolsConfig};
 use nanobot_cron::CronService;
 
@@ -48,7 +46,6 @@ impl ToolRegistryBuilder {
     ///   to workspace.
     /// * `exec_config` (default) - Shell execution configuration.
     /// * `web_config` (default) - Web search/fetch configuration.
-    /// * `bus` - Message bus for the message tool.
     /// * `spawn_service` - Service for the spawn tool (subagent spawning).
     /// * `cron_service` - Service for the cron tool (scheduling).
     /// * `custom_tools` (default: empty) - Additional [`Tool`] implementations
@@ -64,7 +61,6 @@ impl ToolRegistryBuilder {
         #[builder(default)] restrict_to_workspace: bool,
         #[builder(default)] exec_config: ExecToolConfig,
         #[builder(default)] web_config: WebToolsConfig,
-        bus: Option<MessageBus>,
         spawn_service: Option<Arc<dyn SpawnService>>,
         cron_service: Option<Arc<CronService>>,
         #[builder(default)] custom_tools: Vec<Arc<dyn Tool>>,
@@ -74,7 +70,6 @@ impl ToolRegistryBuilder {
             restrict_to_workspace,
             exec_config,
             web_config,
-            bus,
             cron_service,
         );
 

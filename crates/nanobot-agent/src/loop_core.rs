@@ -791,8 +791,6 @@ impl AgentLoop {
             message_id: msg.metadata.message_id.clone(),
         };
 
-        self.tools.start_turn().await?;
-
         let history = self
             .sessions
             .get_history(&session, runtime_settings.memory_window)
@@ -884,11 +882,6 @@ impl AgentLoop {
                     ))
                 })??;
 
-                // If the turn already sent a message via the `message` tool,
-                // skip the default final reply to avoid duplicates.
-                if self.tools.message_sent_in_turn().await {
-                    return Ok(None);
-                }
                 return Ok(Some(OutboundEnvelope {
                     usage: None,
                     message: OutboundMessage {
@@ -938,12 +931,6 @@ impl AgentLoop {
                 SAVE_WITH_CONSOLIDATION_TIMEOUT.as_secs()
             ))
         })??;
-
-        // If the turn already sent a message via the `message` tool,
-        // skip the default final reply to avoid duplicates.
-        if self.tools.message_sent_in_turn().await {
-            return Ok(None);
-        }
 
         Ok(Some(OutboundEnvelope {
             usage: outcome.loop_usage.clone().or(outcome.usage.clone()),

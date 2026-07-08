@@ -17,7 +17,6 @@
 //!   ├── shell      (exec)
 //!   ├── web        (web_search, web_fetch)
 //!   ├── search     (search_files, grep_code)
-//!   ├── message    (send_message)
 //!   ├── cron       (schedule reminders)
 //!   ├── spawn      (subagent tasks)
 //!   └── mcp        (dynamically registered MCP tools)
@@ -42,7 +41,6 @@
 //! - `nanobot-types` for shared type definitions (`ToolContext`, `ToolDefinition`,
 //!   argument structs).
 //! - `nanobot-config` for configuration deserialization.
-//! - `nanobot-bus` (optional) for the message tool's outbound channel.
 //! - `nanobot-cron` (optional) for the scheduling backend.
 //! - `rmcp` for MCP protocol client support.
 
@@ -53,7 +51,6 @@ pub mod cron;
 pub mod error;
 pub mod filesystem;
 pub mod mcp;
-pub mod message;
 pub mod registry;
 pub mod registry_builder;
 pub mod search;

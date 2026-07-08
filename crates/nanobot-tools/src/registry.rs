@@ -29,11 +29,9 @@ use crate::base::{Tool, ToolContext, ToolDefinition};
 use crate::config::SharedToolConfig;
 use crate::cron::CronTool;
 use crate::error::{ToolError, ToolResult};
-use crate::message::MessageTool;
 use crate::spawn::SpawnService;
 use crate::spawn::SpawnTool;
 use crate::{filesystem, search, shell, web};
-use nanobot_bus::MessageBus;
 use nanobot_config::{ExecToolConfig, WebToolsConfig};
 use nanobot_cron::CronService;
 use nanobot_types::SessionKey;
@@ -99,7 +97,6 @@ impl ToolRegistry {
         restrict_to_workspace: bool,
         exec_config: ExecToolConfig,
         web_config: WebToolsConfig,
-        bus: Option<MessageBus>,
         cron_service: Option<Arc<CronService>>,
     ) -> Self {
         let config =
@@ -122,9 +119,6 @@ impl ToolRegistry {
         for tool in builtin_tools {
             tools.insert(tool.name().to_string(), tool);
         }
-
-        let message_tool: Arc<dyn Tool> = Arc::new(MessageTool::new(bus));
-        tools.insert(message_tool.name().to_string(), message_tool);
 
         if let Some(service) = cron_service {
             let cron_tool: Arc<dyn Tool> = Arc::new(CronTool::new(service));
@@ -202,32 +196,6 @@ impl ToolRegistry {
         self.tools
             .write()
             .insert(spawn_tool.name().to_string(), spawn_tool);
-    }
-
-    /// Calls `start_turn` on every registered tool.
-    ///
-    /// This is invoked by the agent loop at the beginning of each LLM
-    /// turn. Tools use this hook to reset per-turn state.
-    pub async fn start_turn(&self) -> ToolResult<()> {
-        let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
-        for tool in snapshot {
-            tool.start_turn().await?;
-        }
-        Ok(())
-    }
-
-    /// Checks whether any tool sent a message in the current turn.
-    ///
-    /// The agent loop uses this to decide if the LLM's text response is
-    /// needed or if the tool's message delivery suffices.
-    pub async fn message_sent_in_turn(&self) -> bool {
-        let snapshot = self.tools.read().values().cloned().collect::<Vec<_>>();
-        for tool in snapshot {
-            if tool.sent_in_turn().await.unwrap_or(false) {
-                return true;
-            }
-        }
-        false
     }
 
     /// Cancels all spawned tasks associated with a session.
@@ -360,19 +328,16 @@ mod tests {
             ExecToolConfig::default(),
             WebToolsConfig::default(),
             None,
-            None,
         );
         let names = definition_names(reg.definitions());
         assert!(!names.contains("spawn"));
         assert!(!names.contains("cron"));
-        assert!(names.contains("message"));
         assert!(names.contains("exec"));
     }
 
     #[tokio::test]
     async fn registry_with_optional_tools_includes_spawn_and_cron() {
         use crate::spawn::SpawnService;
-        use nanobot_bus::MessageBus;
         use nanobot_cron::CronService;
         use nanobot_types::SessionKey;
 
@@ -395,7 +360,6 @@ mod tests {
         }
 
         let workspace = std::env::temp_dir().join("nanobot-reg-with-optional");
-        let bus = MessageBus::new();
         let cron_store = workspace.join("cron.json");
         let cron = Arc::new(CronService::new(cron_store));
 
@@ -405,7 +369,6 @@ mod tests {
             false,
             ExecToolConfig::default(),
             WebToolsConfig::default(),
-            Some(bus.clone()),
             Some(cron),
         );
 
@@ -420,7 +383,6 @@ mod tests {
             false,
             ExecToolConfig::default(),
             WebToolsConfig::default(),
-            None,
             None,
         );
         reg2.set_spawn_service(Arc::new(MockSpawn));
@@ -469,7 +431,6 @@ mod tests {
             ExecToolConfig::default(),
             WebToolsConfig::default(),
             None,
-            None,
         );
 
         let tool = Arc::new(EchoDynamicTool::new("ok"));
@@ -483,7 +444,7 @@ mod tests {
             channel: "cli".to_string(),
             chat_id: "direct".to_string(),
             session_key: SessionKey::from("cli:direct"),
-            message_id: Some(nanobot_bus::MessageId::External("m1".to_string())),
+            message_id: Some(nanobot_types::bus::MessageId::External("m1".to_string())),
         };
 
         let out = reg
@@ -525,7 +486,6 @@ mod tests {
             false,
             ExecToolConfig::default(),
             WebToolsConfig::default(),
-            None,
             None,
         );
         let err = reg
