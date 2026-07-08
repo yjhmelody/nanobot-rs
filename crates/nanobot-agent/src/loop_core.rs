@@ -33,22 +33,14 @@
 //! * [`AtomicBool`] for the cancellation signal (lock-free check at every
 //!   iteration).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
-use dashmap::DashMap;
-use parking_lot::Mutex;
-use tokio::task::AbortHandle;
-use tracing::{Instrument, debug, debug_span, error, info, trace};
-
 use crate::error::{AgentError, AgentResult};
 use crate::react::LoopExitReason;
 use crate::react::{ExecutionContext, LoopOutcome, ModelConfig, ProgressEmitter, ReActExecutor};
 use crate::retrieval::{RetrievalService, RetrievalTurnOverrides};
-use crate::traits::{Agent, ContextProvider};
+use crate::traits::ContextProvider;
 use crate::utils::preview_text;
+use dashmap::DashMap;
+use futures::FutureExt;
 use nanobot_bus::{
     InboundCommand, InboundMessage, MessageBus, MessageId, MessageMetadata, OutboundMessage,
 };
@@ -63,6 +55,12 @@ use nanobot_types::SessionKey;
 use nanobot_types::provider::{ChatMessage, MessageContent, MessageRole, UsageStats};
 use nanobot_types::task::TaskId;
 use nanobot_types::text::truncate_utf8_prefix;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use tokio::task::AbortHandle;
+use tracing::{Instrument, debug, debug_span, error, info, trace};
 
 /// Tracing target for log messages from this module.
 const TARGET: &str = "nanobot::agent";
@@ -117,6 +115,7 @@ impl CancelSignal {
 /// for tasks, locks, and signals.
 ///
 /// Constructed via [`AgentLoopBuilder`](crate::builder::AgentLoopBuilder).
+#[derive(Clone)]
 pub struct AgentLoop {
     /// Message bus for inbound/outbound communication.
     pub(crate) bus: MessageBus,
@@ -667,8 +666,14 @@ impl AgentLoop {
             );
         }
 
-        match self.process_message(msg.clone()).await {
-            Ok(Some(mut out)) => {
+        // Catch panics during message processing so the task never silently
+        // dies — a response or error message is always published.
+        let msg_for_err = msg.clone();
+        match std::panic::AssertUnwindSafe(self.process_message(msg.clone()))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(Some(mut out))) => {
                 // Append usage summary to the main reply instead of sending
                 // a separate message, avoiding duplicate output in the chat.
                 if self.send_usage_summary
@@ -682,18 +687,42 @@ impl AgentLoop {
                     error!(target: TARGET, error = %err, "failed to publish outbound message");
                 }
             }
-            Ok(None) => {
+            Ok(Ok(None)) => {
                 trace!(target: TARGET, session_key = %session_key, "no outbound message to publish");
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 error!(target: TARGET, session_key = %session_key, error = %err, "error processing message");
                 let _ = self.bus.publish_outbound(OutboundMessage {
-                    channel: msg.channel,
-                    chat_id: msg.chat_id,
+                    channel: msg_for_err.channel,
+                    chat_id: msg_for_err.chat_id,
                     content: Self::format_internal_error(format!("Error: {}", err)),
                     reply_to: None,
                     media: Vec::new(),
-                    metadata: msg.metadata,
+                    metadata: msg_for_err.metadata,
+                });
+            }
+            Err(panic_payload) => {
+                let panic_msg = panic_payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                error!(
+                    target: TARGET,
+                    session_key = %session_key,
+                    panic = panic_msg,
+                    "process_message panicked — publishing error response"
+                );
+                let _ = self.bus.publish_outbound(OutboundMessage {
+                    channel: msg_for_err.channel,
+                    chat_id: msg_for_err.chat_id,
+                    content: Self::format_internal_error(format!(
+                        "Internal error: agent panicked during processing: {}",
+                        panic_msg
+                    )),
+                    reply_to: None,
+                    media: Vec::new(),
+                    metadata: msg_for_err.metadata,
                 });
             }
         }
@@ -1170,74 +1199,10 @@ impl AgentLoop {
     }
 }
 
-/// Manual `Clone` implementation — all fields are cheaply cloneable
-/// (Arcs, atomics, and clone-on-write types).
-impl Clone for AgentLoop {
-    fn clone(&self) -> Self {
-        Self {
-            bus: self.bus.clone(),
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            max_iterations: self.max_iterations,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            memory_window: self.memory_window,
-            reasoning_effort: self.reasoning_effort.clone(),
-            consolidation_config: self.consolidation_config.clone(),
-            consolidation_enabled: self.consolidation_enabled,
-            channel_configs: self.channel_configs.clone(),
-            send_usage_summary: self.send_usage_summary,
-            tools: self.tools.clone(),
-            mcp: self.mcp.clone(),
-            context: self.context.clone(),
-            retrieval: self.retrieval.clone(),
-            sessions: self.sessions.clone(),
-            running: self.running.clone(),
-            session_locks: self.session_locks.clone(),
-            active_tasks: self.active_tasks.clone(),
-            cancel_signals: self.cancel_signals.clone(),
-            last_cleanup: self.last_cleanup.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl Agent for AgentLoop {
-    async fn run(self: std::sync::Arc<Self>) {
-        AgentLoop::run(&*self).await;
-    }
-
-    async fn stop(&self) {
-        AgentLoop::stop(self).await;
-    }
-
-    async fn process_direct(
-        &self,
-        content: &str,
-        session_key: &SessionKey,
-        channel: &str,
-        chat_id: &str,
-    ) -> AgentResult<String> {
-        self.process_direct(content, session_key, channel, chat_id)
-            .await
-    }
-
-    fn has_active_tasks(&self, session_key: &SessionKey) -> bool {
-        AgentLoop::has_active_tasks(self, session_key)
-    }
-
-    async fn close_mcp(&self) {
-        AgentLoop::close_mcp(self).await;
-    }
-
-    async fn close_provider(&self) {
-        AgentLoop::close_provider(self).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use nanobot_tools::ToolRegistryBuilder;
 
     #[test]
@@ -1449,6 +1414,26 @@ mod tests {
         })
     }
 
+    /// Reads outbound messages until a non-progress, non-tool_hint response
+    /// is found (the actual error or content message).
+    async fn read_error_outbound(
+        rx: &mut tokio::sync::broadcast::Receiver<OutboundMessage>,
+    ) -> OutboundMessage {
+        loop {
+            let out = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("should receive outbound message")
+                .unwrap();
+            // Skip progress markers and tool_hints
+            match &out.metadata.message_id {
+                Some(nanobot_bus::MessageId::Progress) | Some(nanobot_bus::MessageId::ToolHint) => {
+                    continue;
+                }
+                _ => return out,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn handle_cancel_clears_active_tasks_and_sets_signal() {
         let bus = MessageBus::new();
@@ -1591,8 +1576,11 @@ mod tests {
     async fn dispatch_does_not_route_cancel_anymore() {
         // /cancel is now handled in run() loop, not dispatch().
         // dispatch() with a /cancel command should treat it as a normal message
-        // and fail when trying to process it (NoopProvider panics).
+        // and fail when trying to process it (process_builtin_command has an
+        // unreachable!() for Cancel). The panic is caught by catch_unwind in
+        // dispatch_normal and an error response is published.
         let bus = MessageBus::new();
+        let mut rx = bus.subscribe_outbound();
         let agent = create_test_loop(bus);
         let session_key = SessionKey::from("cancel:test:session_6");
 
@@ -1607,16 +1595,17 @@ mod tests {
             session_key_override: Some(session_key.clone()),
         };
 
-        // dispatch() should NOT route to handle_cancel; it will try
-        // dispatch_normal which panics from NoopProvider.
-        let agent_clone = agent.clone();
-        let handle = tokio::spawn(async move {
-            agent_clone.dispatch(msg).await;
-        });
-        let result = handle.await;
+        // dispatch() should NOT route to handle_cancel and should NOT panic
+        // (the unreachable!() panic is caught by catch_unwind).
+        agent.dispatch(msg).await;
+
+        // Read outbound messages until we find the error response (skip
+        // progress/tool_hint messages that may arrive before the error).
+        let out = read_error_outbound(&mut rx).await;
         assert!(
-            result.is_err(),
-            "dispatch with /cancel should panic (NoopProvider), not silently succeed"
+            out.content.contains("Internal error"),
+            "expected error response after caught panic, got: {}",
+            out.content
         );
 
         // Cancel signal should NOT have been set (dispatch doesn't handle cancel)
@@ -1632,6 +1621,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_resets_cancel_signal_before_normal_message() {
         let bus = MessageBus::new();
+        let mut rx = bus.subscribe_outbound();
         let agent = create_test_loop(bus);
         let session_key = SessionKey::from("cancel:test:session_4");
 
@@ -1646,9 +1636,8 @@ mod tests {
 
         // Now dispatch a normal (non-cancel) message.
         // dispatch_normal will acquire the lock and reset the signal before
-        // process_message errors (NoopProvider panics). We catch the panic
-        // via spawned task so we can verify the signal was already reset.
-        let agent_clone = agent.clone();
+        // process_message errors (NoopProvider panics). The panic is caught by
+        // catch_unwind and an error response is published.
         let msg = InboundMessage {
             channel: "test".to_string(),
             sender_id: "user".to_string(),
@@ -1659,18 +1648,21 @@ mod tests {
             metadata: MessageMetadata::default(),
             session_key_override: Some(session_key.clone()),
         };
-        let handle = tokio::spawn(async move {
-            agent_clone.dispatch(msg).await;
-        });
+        agent.dispatch(msg).await;
 
-        // JoinError is expected (NoopProvider panics); signal was already reset
-        assert!(
-            handle.await.is_err(),
-            "dispatch should have panicked from NoopProvider"
-        );
+        // Signal should have been reset before normal message processing
         assert!(
             !signal.is_cancelled(),
             "signal should be reset before normal message processing"
+        );
+
+        // An error outbound message should have been published (caught panic).
+        // Skip progress/tool_hint messages that may arrive before the error.
+        let out = read_error_outbound(&mut rx).await;
+        assert!(
+            out.content.contains("Internal error"),
+            "expected error response after caught panic, got: {}",
+            out.content
         );
     }
 

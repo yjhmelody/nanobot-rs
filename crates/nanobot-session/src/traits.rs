@@ -18,7 +18,7 @@
 //!
 //! All trait methods are `async` (via `#[async_trait]`), `Send + Sync`, and
 //! return `SessionResult`. Implementors should be careful not to hold
-//! `std::sync::Mutex` guards across `.await` points (use `tokio::sync` instead).
+//! `parking_lot::Mutex` guards across `.await` points (use `tokio::sync` instead).
 use crate::SessionResult;
 use async_trait::async_trait;
 

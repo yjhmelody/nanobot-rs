@@ -331,7 +331,12 @@ pub async fn execute_fetch(
         || body.trim_start().to_lowercase().starts_with("<html")
         || body.trim_start().to_lowercase().starts_with("<!doctype")
     {
-        let rendered = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
+        let rendered = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            html2text::from_read(body.as_bytes(), 100)
+        })) {
+            Ok(Ok(text)) => text,
+            _ => body.clone(), // from_read returned Err or panicked
+        };
         ("html2text", rendered)
     } else {
         ("raw", body)

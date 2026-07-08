@@ -7,7 +7,7 @@
 //! ## Registration model
 //!
 //! - **Built-in tools** are statically defined at construction time:
-//!   filesystem, shell, web, search, message. Their names are immutable
+//!   filesystem, shell, web, search. Their names are immutable
 //!   and protected from accidental override.
 //! - **Dynamic tools** are registered at runtime by MCP servers or user
 //!   code via [`register_dynamic_tool`](ToolRegistry::register_dynamic_tool).
@@ -86,7 +86,6 @@ impl ToolRegistry {
     /// * `restrict_to_workspace` - If true, file/exec are confined to the workspace.
     /// * `exec_config` - Shell execution configuration.
     /// * `web_config` - Web search/fetch configuration.
-    /// * `bus` - Optional message bus for the message tool.
     /// * `cron_service` - Optional cron service for the cron tool.
     ///
     /// The spawn tool is **not** registered here; it must be set separately

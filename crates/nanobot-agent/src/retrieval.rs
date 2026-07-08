@@ -190,8 +190,8 @@ pub struct RetrievalService {
     config: RetrievalConfig,
     workspace: PathBuf,
     restrict_to_workspace: bool,
-    tools: Arc<std::sync::RwLock<Option<Weak<ToolRegistry>>>>,
-    mcp: Arc<std::sync::RwLock<Option<Weak<MCPManager>>>>,
+    tools: Arc<parking_lot::RwLock<Option<Weak<ToolRegistry>>>>,
+    mcp: Arc<parking_lot::RwLock<Option<Weak<MCPManager>>>>,
     explanations: Arc<DashMap<SessionKey, RetrievalExplain>>,
 }
 
@@ -219,8 +219,8 @@ impl RetrievalService {
             config,
             workspace,
             restrict_to_workspace,
-            tools: Arc::new(std::sync::RwLock::new(None)),
-            mcp: Arc::new(std::sync::RwLock::new(None)),
+            tools: Arc::new(parking_lot::RwLock::new(None)),
+            mcp: Arc::new(parking_lot::RwLock::new(None)),
             explanations: Arc::new(DashMap::new()),
         }
     }
@@ -241,9 +241,8 @@ impl RetrievalService {
     ///
     /// Uses [`Arc::downgrade`] to avoid a circular strong-reference cycle.
     pub fn set_tool_registry(&self, tools: &Arc<ToolRegistry>) {
-        if let Ok(mut guard) = self.tools.write() {
-            *guard = Some(Arc::downgrade(tools));
-        }
+        let mut guard = self.tools.write();
+        *guard = Some(Arc::downgrade(tools));
     }
 
     /// Sets a weak reference to the [`MCPManager`] so the service can read
@@ -251,9 +250,8 @@ impl RetrievalService {
     ///
     /// Uses [`Arc::downgrade`] to avoid a circular strong-reference cycle.
     pub fn set_mcp_manager(&self, mcp: Option<&Arc<MCPManager>>) {
-        if let Ok(mut guard) = self.mcp.write() {
-            *guard = mcp.map(Arc::downgrade);
-        }
+        let mut guard = self.mcp.write();
+        *guard = mcp.map(Arc::downgrade);
     }
 
     /// Returns the [`RetrievalExplain`] from the last automatic retrieval
@@ -290,11 +288,7 @@ impl RetrievalService {
     ///
     /// These are candidates for explicit retrieval configuration.
     pub fn discovery_candidates(&self) -> Vec<serde_json::Value> {
-        let tools = self
-            .tools
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(Weak::upgrade));
+        let tools = self.tools.read().as_ref().and_then(Weak::upgrade);
         let Some(tools) = tools else {
             return Vec::new();
         };
@@ -648,11 +642,7 @@ impl RetrievalService {
         cfg: &RetrievalSourceConfig,
         query: &RetrievalQuery,
     ) -> AgentResult<Vec<RetrievedContext>> {
-        let tools = self
-            .tools
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(Weak::upgrade));
+        let tools = self.tools.read().as_ref().and_then(Weak::upgrade);
         let Some(tools) = tools else {
             return Ok(Vec::new());
         };
@@ -691,11 +681,7 @@ impl RetrievalService {
         cfg: &RetrievalSourceConfig,
         query: &RetrievalQuery,
     ) -> AgentResult<Vec<RetrievedContext>> {
-        let mcp = self
-            .mcp
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(Weak::upgrade));
+        let mcp = self.mcp.read().as_ref().and_then(Weak::upgrade);
         let Some(mcp) = mcp else {
             return Ok(Vec::new());
         };
